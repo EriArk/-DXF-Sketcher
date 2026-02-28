@@ -1,7 +1,9 @@
 #include "dune3d_application.hpp"
 #include "dune3d_appwindow.hpp"
 #include "canvas/canvas.hpp"
+#ifndef DUNE_SKETCHER_ONLY
 #include "widgets/axes_cube.hpp"
+#endif
 #include "widgets/recent_item_box.hpp"
 #include "util/fs_util.hpp"
 #include "util/gtk_util.hpp"
@@ -81,7 +83,12 @@ Dune3DAppWindow::Dune3DAppWindow(BaseObjectType *cobject, const Glib::RefPtr<Gtk
 
     {
         auto paned = refBuilder->get_widget<Gtk::Paned>("paned");
+#ifdef DUNE_SKETCHER_ONLY
+        paned->set_shrink_start_child(true);
+        paned->set_position(0);
+#else
         paned->set_shrink_start_child(false);
+#endif
     }
 
     m_left_bar = refBuilder->get_widget<Gtk::Paned>("left_bar");
@@ -100,6 +107,7 @@ Dune3DAppWindow::Dune3DAppWindow(BaseObjectType *cobject, const Glib::RefPtr<Gtk
 
     m_open_button = refBuilder->get_widget<Gtk::Button>("open_button");
     m_open_popover = refBuilder->get_widget<Gtk::Popover>("open_popover");
+    m_open_popover->set_autohide(true);
     m_open_menu_button = refBuilder->get_widget<Gtk::MenuButton>("open_menu_button");
     m_new_button = refBuilder->get_widget<Gtk::Button>("new_button");
     m_save_button = refBuilder->get_widget<Gtk::Button>("save_button");
@@ -113,14 +121,21 @@ Dune3DAppWindow::Dune3DAppWindow(BaseObjectType *cobject, const Glib::RefPtr<Gtk
         m_editor.open_file(ch.m_path);
     });
     m_open_popover->signal_show().connect([this] {
+#ifdef DUNE_SKETCHER_ONLY
+        const int max_width = std::max(220, get_width() - 80);
+        m_open_popover->set_size_request(std::min(280, max_width), -1);
+#endif
         m_open_recent_search_entry->set_text("");
         update_recent_listbox(*m_open_recent_listbox, m_app);
     });
     m_open_recent_search_entry->signal_changed().connect(
             [this] { update_recent_search(*m_open_recent_search_entry, *m_open_recent_listbox); });
     m_open_recent_search_entry->signal_stop_search().connect([this] { m_open_popover->popdown(); });
-
-
+    m_open_popover->signal_hide().connect([this] {
+        // Avoid stuck grab/focus after closing by clicking Recent again.
+        m_open_menu_button->set_active(false);
+        m_canvas->grab_focus();
+    });
     m_hamburger_menu_button = refBuilder->get_widget<Gtk::MenuButton>("hamburger_menu_button");
 
 
@@ -140,6 +155,10 @@ Dune3DAppWindow::Dune3DAppWindow(BaseObjectType *cobject, const Glib::RefPtr<Gtk
     m_workspace_add_button->set_has_frame(false);
     m_workspace_add_button->set_icon_name("list-add-symbolic");
     m_workspace_notebook->set_action_widget(m_workspace_add_button, Gtk::PackType::END);
+#ifdef DUNE_SKETCHER_ONLY
+    m_new_button->set_visible(false);
+    m_workspace_notebook->set_visible(false);
+#endif
 
     refBuilder->get_widget<Gtk::Box>("canvas_box")->insert_child_at_start(*m_canvas);
     get_canvas().set_vexpand(true);
@@ -147,9 +166,16 @@ Dune3DAppWindow::Dune3DAppWindow(BaseObjectType *cobject, const Glib::RefPtr<Gtk
     m_key_hint_label = refBuilder->get_widget<Gtk::Label>("key_hint_label");
     m_workplane_checkbutton = refBuilder->get_widget<Gtk::CheckButton>("workplane_checkbutton");
     m_workplane_label = refBuilder->get_widget<Gtk::Label>("workplane_label");
+#ifdef DUNE_SKETCHER_ONLY
+    m_workplane_checkbutton->set_visible(false);
+    m_workplane_label->set_visible(false);
+#endif
 
     {
         Gtk::Box *cube_box = refBuilder->get_widget<Gtk::Box>("cube_box");
+#ifdef DUNE_SKETCHER_ONLY
+        cube_box->set_visible(false);
+#else
         auto axes_cube = Gtk::make_managed<AxesCube>();
         cube_box->append(*axes_cube);
         get_canvas().signal_view_changed().connect(
@@ -160,6 +186,7 @@ Dune3DAppWindow::Dune3DAppWindow(BaseObjectType *cobject, const Glib::RefPtr<Gtk
             auto snapped_quat = get_canvas().get_tilt_snapped_quat(q);
             get_canvas().animate_to_cam_quat(snapped_quat);
         });
+#endif
     }
 
 
@@ -178,6 +205,7 @@ Dune3DAppWindow::Dune3DAppWindow(BaseObjectType *cobject, const Glib::RefPtr<Gtk
     m_welcome_recent_search_entry = refBuilder->get_widget<Gtk::SearchEntry>("welcome_recent_search_entry");
     m_welcome_new_button = refBuilder->get_widget<Gtk::Button>("welcome_new_button");
     m_welcome_open_button = refBuilder->get_widget<Gtk::Button>("welcome_open_button");
+    m_welcome_open_folder_button = refBuilder->get_widget<Gtk::Button>("welcome_open_folder_button");
 
     {
         auto sg = Gtk::SizeGroup::create(Gtk::SizeGroup::Mode::VERTICAL);
@@ -190,6 +218,25 @@ Dune3DAppWindow::Dune3DAppWindow(BaseObjectType *cobject, const Glib::RefPtr<Gtk
 
     m_view_options_button = refBuilder->get_widget<Gtk::MenuButton>("view_options_button");
     m_view_hints_label = refBuilder->get_widget<Gtk::Label>("view_hints_label");
+#ifdef DUNE_SKETCHER_ONLY
+    if (auto footer = m_selection_mode_label->get_parent()) {
+        footer->set_visible(false);
+        if (auto separator = footer->get_prev_sibling())
+            separator->set_visible(false);
+    }
+    m_action_bar_revealer->set_reveal_child(false);
+    m_action_bar_revealer->set_visible(false);
+    m_header_action_box = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL);
+    m_header_action_box->set_spacing(6);
+    m_header_action_box->set_halign(Gtk::Align::START);
+    m_header_action_box->set_valign(Gtk::Align::CENTER);
+    m_title_label->set_visible(false);
+    m_subtitle_label->set_visible(false);
+    m_sidebar_floating_button = Gtk::make_managed<Gtk::Button>();
+    m_sidebar_floating_button->set_icon_name("sidebar-show-symbolic");
+    m_sidebar_floating_button->set_tooltip_text("Toggle sidebar (Tab)");
+    m_sidebar_floating_button->set_has_frame(true);
+#endif
 
     m_delete_revealer = refBuilder->get_widget<Gtk::Revealer>("delete_revealer");
     m_delete_expander = refBuilder->get_widget<Gtk::Expander>("delete_expander");
@@ -354,12 +401,18 @@ void Dune3DAppWindow::set_welcome_box_visible(bool v)
 
 void Dune3DAppWindow::add_action_button(Gtk::Widget &widget)
 {
-    m_action_bar_box->append(widget);
+    if (m_header_action_box)
+        m_header_action_box->append(widget);
+    else
+        m_action_bar_box->append(widget);
 }
 
 void Dune3DAppWindow::set_action_bar_visible(bool v)
 {
-    m_action_bar_revealer->set_reveal_child(v);
+    if (m_header_action_box)
+        m_header_action_box->set_visible(v);
+    else
+        m_action_bar_revealer->set_reveal_child(v);
 }
 
 void Dune3DAppWindow::set_view_hints_label(const std::vector<std::string> &s)

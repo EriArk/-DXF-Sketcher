@@ -49,6 +49,17 @@ SelectionFilterWindow::SelectionFilterWindow(ICore &core) : m_core(core)
     set_child(*lb);
 }
 
+void SelectionFilterWindow::set_current_group_only_locked(bool locked)
+{
+    m_current_group_only_cb->set_active(locked);
+    m_current_group_only_cb->set_sensitive(!locked);
+    if (locked) {
+        m_entities_cb->set_active(true);
+        m_constraints_cb->set_active(true);
+    }
+    m_signal_changed.emit();
+}
+
 bool SelectionFilterWindow::is_active() const
 {
     const bool is_default =

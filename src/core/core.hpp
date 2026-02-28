@@ -88,6 +88,8 @@ public:
     void save_all();
     void save();
     void save_as(const std::filesystem::path &path);
+    void set_current_document_path(const std::filesystem::path &path);
+    void clear_needs_save();
 
     void rebuild(const std::string &comment);
 

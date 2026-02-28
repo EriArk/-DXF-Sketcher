@@ -551,6 +551,18 @@ void Core::save_as(const std::filesystem::path &path)
     m_signal_needs_save.emit();
 }
 
+void Core::set_current_document_path(const std::filesystem::path &path)
+{
+    if (!has_documents())
+        return;
+    get_current_document_info().m_path = path;
+}
+
+void Core::clear_needs_save()
+{
+    set_needs_save(false);
+}
+
 
 bool Core::maybe_end_tool(const ToolResponse &r)
 {

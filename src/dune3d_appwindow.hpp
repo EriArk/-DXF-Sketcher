@@ -66,10 +66,18 @@ public:
     {
         return *m_welcome_open_button;
     }
+    Gtk::Button &get_welcome_open_folder_button()
+    {
+        return *m_welcome_open_folder_button;
+    }
 
     Gtk::MenuButton &get_open_menu_button()
     {
         return *m_open_menu_button;
+    }
+    Gtk::Popover *get_open_popover()
+    {
+        return m_open_popover;
     }
 
     Gtk::Button &get_new_button()
@@ -100,6 +108,15 @@ public:
     Gtk::MenuButton &get_view_options_button()
     {
         return *m_view_options_button;
+    }
+
+    Gtk::Button *get_sidebar_floating_button()
+    {
+        return m_sidebar_floating_button;
+    }
+    Gtk::Box *get_header_action_box()
+    {
+        return m_header_action_box;
     }
 
     Canvas &get_canvas()
@@ -235,9 +252,11 @@ private:
     Gtk::ListBox *m_welcome_recent_listbox = nullptr;
     Gtk::Button *m_welcome_new_button = nullptr;
     Gtk::Button *m_welcome_open_button = nullptr;
+    Gtk::Button *m_welcome_open_folder_button = nullptr;
 
     Gtk::Box *m_action_bar_box = nullptr;
     Gtk::Revealer *m_action_bar_revealer = nullptr;
+    Gtk::Box *m_header_action_box = nullptr;
 
     Gtk::Paned *m_left_bar = nullptr;
 
@@ -249,6 +268,7 @@ private:
     Gtk::Button *m_workspace_add_button = nullptr;
 
     Gtk::MenuButton *m_view_options_button = nullptr;
+    Gtk::Button *m_sidebar_floating_button = nullptr;
     Gtk::Label *m_view_hints_label = nullptr;
 
 

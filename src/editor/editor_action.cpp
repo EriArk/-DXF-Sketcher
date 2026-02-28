@@ -15,9 +15,12 @@
 #include "document/group/group_reference.hpp"
 #include "document/group/igroup_source_group.hpp"
 #include "document/entity/entity_cluster.hpp"
+#include "document/export_dxf.hpp"
+#include "document/export_paths.hpp"
 #include "util/selection_util.hpp"
 #include "util/key_util.hpp"
 #include "util/paths.hpp"
+#include "util/fs_util.hpp"
 #include "core/tool_id.hpp"
 #include "buffer.hpp"
 
@@ -49,12 +52,50 @@ static const std::map<ActionID, Document::MoveGroup> move_group_action_map = {
 void Editor::init_actions()
 {
     connect_action(ActionID::SAVE_ALL, [this](auto &a) {
+#ifdef DUNE_SKETCHER_ONLY
+        trigger_action(ActionID::SAVE);
+#else
         m_core.save_all();
         for (auto doc : m_core.get_documents()) {
             save_workspace_view(doc->get_uuid());
         }
+#endif
     });
     connect_action(ActionID::SAVE, [this](auto &a) {
+#ifdef DUNE_SKETCHER_ONLY
+        const auto group_uu = m_core.get_current_group();
+        if (auto group_path = get_group_export_path(group_uu)) {
+            auto path = *group_path;
+            auto ext = path.extension().string();
+            const bool save_svg = (ext == ".svg" || ext == ".SVG");
+            if (!save_svg && ext != ".dxf" && ext != ".DXF")
+                path.replace_extension(".dxf");
+
+            if (save_svg) {
+                auto group_filter = [this](const Group &group) { return group.m_uuid == m_core.get_current_group(); };
+                export_paths(path, m_core.get_current_document(), m_core.get_current_group(), group_filter);
+            }
+            else {
+                export_dxf(path, m_core.get_current_document(), m_core.get_current_group());
+            }
+            auto &group = m_core.get_current_document().get_group(group_uu);
+            group.m_name = path_to_string(path.filename());
+            set_group_export_path(group_uu, path);
+            m_core.set_current_document_path(path);
+            m_core.clear_needs_save();
+            m_win.get_app().add_recent_item(path);
+            save_workspace_view(m_core.get_current_idocument_info().get_uuid());
+            m_workspace_browser->update_documents(get_current_document_views());
+            update_version_info();
+            update_title();
+            if (m_after_save_cb)
+                m_after_save_cb();
+            m_after_save_cb = nullptr;
+        }
+        else {
+            trigger_action(ActionID::SAVE_AS);
+        }
+#else
         if (m_core.get_current_idocument_info().has_path()) {
             if (m_core.get_needs_save())
                 m_core.save();
@@ -67,6 +108,7 @@ void Editor::init_actions()
         else {
             trigger_action(ActionID::SAVE_AS);
         }
+#endif
     });
 
     connect_action(ActionID::SAVE_AS, sigc::mem_fun(*this, &Editor::on_save_as));
@@ -88,6 +130,11 @@ void Editor::init_actions()
         set_current_workspace_view(wsv);
         update_title();
         update_workspace_view_names();
+#ifdef DUNE_SKETCHER_ONLY
+        m_workspace_browser->set_sketcher_folder_mode({});
+        if (!m_core.tool_is_active() && m_core.tool_can_begin(ToolID::DRAW_CONTOUR, {}).get_can_begin())
+            trigger_action(ToolID::DRAW_CONTOUR);
+#endif
     });
     connect_action(ActionID::OPEN_DOCUMENT, sigc::mem_fun(*this, &Editor::on_open_document));
 
@@ -145,6 +192,7 @@ void Editor::init_actions()
         get_canvas().set_center({0, 0, 0});
     });
 
+#ifndef DUNE_SKETCHER_ONLY
     connect_action(ActionID::VIEW_RESET_TILT, [this](auto &a) {
         const auto q = get_canvas().get_cam_quat();
         const auto z = glm::rotate(glm::inverse(q), glm::vec3(0, 0, 1));
@@ -152,27 +200,35 @@ void Editor::init_actions()
         const auto ry = glm::angleAxis(-(float)(M_PI / 2 - phi), glm::rotate(q, glm::vec3(0, 0, 1)));
         get_canvas().animate_to_cam_quat(ry * q);
     });
+#endif
 
+#ifndef DUNE_SKETCHER_ONLY
     connect_action(ActionID::ALIGN_VIEW_TO_WORKPLANE, sigc::mem_fun(*this, &Editor::on_align_to_workplane));
     connect_action(ActionID::ALIGN_VIEW_TO_CURRENT_WORKPLANE, sigc::mem_fun(*this, &Editor::on_align_to_workplane));
     connect_action(ActionID::CENTER_VIEW_TO_WORKPLANE, sigc::mem_fun(*this, &Editor::on_center_to_workplane));
     connect_action(ActionID::CENTER_VIEW_TO_CURRENT_WORKPLANE, sigc::mem_fun(*this, &Editor::on_center_to_workplane));
+#endif
     connect_action(ActionID::LOOK_HERE, sigc::mem_fun(*this, &Editor::on_look_here));
+#ifndef DUNE_SKETCHER_ONLY
     connect_action(ActionID::ALIGN_AND_CENTER_VIEW_TO_WORKPLANE, [this](const auto &a) {
         trigger_action(ActionID::ALIGN_VIEW_TO_WORKPLANE);
         trigger_action(ActionID::CENTER_VIEW_TO_WORKPLANE);
     });
+#endif
 
     connect_action(ActionID::GO_TO_GROUP, sigc::mem_fun(*this, &Editor::on_go_to_group));
     connect_action(ActionID::GO_TO_SOURCE_GROUP, sigc::mem_fun(*this, &Editor::on_go_to_source_group));
 
 
+#ifndef DUNE_SKETCHER_ONLY
     connect_action(ActionID::VIEW_PERSP, [this](auto &a) { set_perspective_projection(true); });
     connect_action(ActionID::VIEW_ORTHO, [this](auto &a) { set_perspective_projection(false); });
     connect_action(ActionID::VIEW_TOGGLE_PERSP_ORTHO, [this](auto &a) {
         set_perspective_projection(get_canvas().get_projection() == Canvas::Projection::ORTHO);
     });
+#endif
 
+#ifndef DUNE_SKETCHER_ONLY
     connect_action(ActionID::VIEW_ROTATE_UP, sigc::mem_fun(*this, &Editor::on_view_rotate));
     connect_action(ActionID::VIEW_ROTATE_DOWN, sigc::mem_fun(*this, &Editor::on_view_rotate));
     connect_action(ActionID::VIEW_ROTATE_LEFT, sigc::mem_fun(*this, &Editor::on_view_rotate));
@@ -180,13 +236,16 @@ void Editor::init_actions()
 
     connect_action(ActionID::VIEW_TILT_LEFT, sigc::mem_fun(*this, &Editor::on_view_rotate));
     connect_action(ActionID::VIEW_TILT_RIGHT, sigc::mem_fun(*this, &Editor::on_view_rotate));
+#endif
 
+    connect_action(ActionID::VIEW_TOP, sigc::mem_fun(*this, &Editor::on_view_set));
+#ifndef DUNE_SKETCHER_ONLY
     connect_action(ActionID::VIEW_FRONT, sigc::mem_fun(*this, &Editor::on_view_set));
     connect_action(ActionID::VIEW_BACK, sigc::mem_fun(*this, &Editor::on_view_set));
-    connect_action(ActionID::VIEW_TOP, sigc::mem_fun(*this, &Editor::on_view_set));
     connect_action(ActionID::VIEW_BOTTOM, sigc::mem_fun(*this, &Editor::on_view_set));
     connect_action(ActionID::VIEW_LEFT, sigc::mem_fun(*this, &Editor::on_view_set));
     connect_action(ActionID::VIEW_RIGHT, sigc::mem_fun(*this, &Editor::on_view_set));
+#endif
 
     connect_action(ActionID::VIEW_ZOOM_IN, sigc::mem_fun(*this, &Editor::on_view_zoom));
     connect_action(ActionID::VIEW_ZOOM_OUT, sigc::mem_fun(*this, &Editor::on_view_zoom));
@@ -196,7 +255,7 @@ void Editor::init_actions()
     connect_action(ActionID::VIEW_PAN_LEFT, sigc::mem_fun(*this, &Editor::on_view_pan));
     connect_action(ActionID::VIEW_PAN_RIGHT, sigc::mem_fun(*this, &Editor::on_view_pan));
 
-    connect_action(ActionID::DELETE_CURRENT_GROUP, [this](auto &a) { on_delete_current_group(); });
+    connect_action(ActionID::DELETE_CURRENT_GROUP, [this](auto &a) { on_delete_current_group(false); });
 
     for (const auto [act, group_type] : create_group_action_map) {
         connect_action(act, sigc::mem_fun(*this, &Editor::on_create_group_action));
@@ -204,11 +263,15 @@ void Editor::init_actions()
     for (const auto [act, move] : move_group_action_map) {
         connect_action(act, sigc::mem_fun(*this, &Editor::on_move_group_action));
     }
+#ifndef DUNE_SKETCHER_ONLY
     connect_action(ActionID::TOGGLE_WORKPLANE, [this](auto &a) {
         auto &cb = m_win.get_workplane_checkbutton();
         cb.set_active(!cb.get_active());
     });
+#endif
+#ifndef DUNE_SKETCHER_ONLY
     m_win.get_workplane_checkbutton().signal_toggled().connect([this] { update_action_bar_buttons_sensitivity(); });
+#endif
 
     connect_action(ActionID::SELECT_PATH, [this](auto &a) {
         auto &doc = m_core.get_current_document();
@@ -562,6 +625,17 @@ void Editor::update_action_sensitivity(const std::set<SelectableRef> &sel)
         m_action_sensitivity[ActionID::GO_TO_SOURCE_GROUP] = false;
     }
 
+#ifdef DUNE_SKETCHER_ONLY
+    m_action_sensitivity[ActionID::TOGGLE_WORKPLANE] = false;
+    m_action_sensitivity[ActionID::ALIGN_VIEW_TO_WORKPLANE] = false;
+    m_action_sensitivity[ActionID::ALIGN_VIEW_TO_CURRENT_WORKPLANE] = false;
+    m_action_sensitivity[ActionID::CENTER_VIEW_TO_WORKPLANE] = false;
+    m_action_sensitivity[ActionID::CENTER_VIEW_TO_CURRENT_WORKPLANE] = false;
+    m_action_sensitivity[ActionID::ALIGN_AND_CENTER_VIEW_TO_WORKPLANE] = false;
+    m_action_sensitivity[ActionID::TOGGLE_IRRELEVANT_WORKPLANES] = false;
+    m_action_sensitivity[ActionID::TOGGLE_PREVIOUS_CONSTRUCTION_ENTITIES] = false;
+#endif
+
     m_action_sensitivity[ActionID::EXPORT_SOLID_MODEL_STEP] = has_solid_model;
     m_action_sensitivity[ActionID::EXPORT_SOLID_MODEL_STL] = has_solid_model;
     m_action_sensitivity[ActionID::EXPORT_PROJECTION] = has_solid_model;
@@ -583,6 +657,12 @@ Gtk::Button *Editor::create_action_button(ActionToolID action)
 bool Editor::trigger_action(ActionToolID action, ActionSource source)
 {
     if (m_core.tool_is_active() && !(action_catalog.at(action).flags & ActionCatalogItem::FLAGS_IN_TOOL)) {
+#ifdef DUNE_SKETCHER_ONLY
+        if (std::holds_alternative<ActionID>(action) && std::get<ActionID>(action) == ActionID::OPEN_DOCUMENT) {
+            // Keep Open available while a drawing tool is active in sketcher-only mode.
+        }
+        else
+#endif
         return false;
     }
     if (std::holds_alternative<ActionID>(action) && !get_action_sensitive(std::get<ActionID>(action)))
@@ -602,8 +682,13 @@ bool Editor::get_action_sensitive(ActionID action) const
     if (!m_action_connections.count(action)) // actions not connected can't be sensitive
         return false;
 
-    if (m_core.tool_is_active()) // actions available int tools are always sensitive
+    if (m_core.tool_is_active()) { // actions available int tools are always sensitive
+#ifdef DUNE_SKETCHER_ONLY
+        if (action == ActionID::OPEN_DOCUMENT)
+            return true;
+#endif
         return action_catalog.at(action).flags & ActionCatalogItem::FLAGS_IN_TOOL;
+    }
 
     if (m_action_sensitivity.count(action))
         return m_action_sensitivity.at(action);
@@ -696,6 +781,12 @@ bool Editor::handle_action_key(Glib::RefPtr<Gtk::EventControllerKey> controller,
     state &= ~ev->get_consumed_modifiers();
     remap_keys(keyval, state);
     state &= (Gdk::ModifierType::SHIFT_MASK | Gdk::ModifierType::CONTROL_MASK | Gdk::ModifierType::ALT_MASK);
+#ifdef DUNE_SKETCHER_ONLY
+    if (keyval == GDK_KEY_Tab && state == static_cast<Gdk::ModifierType>(0)) {
+        toggle_sidebar_visibility();
+        return true;
+    }
+#endif
     if (keyval == GDK_KEY_Escape) {
         if (!m_core.tool_is_active()) {
             get_canvas().set_selection_mode(SelectionMode::HOVER);
@@ -1023,6 +1114,11 @@ void Editor::on_view_pan(const ActionConnection &conn)
 void Editor::on_view_set(const ActionConnection &conn)
 {
     const auto action = std::get<ActionID>(conn.id);
+
+#ifdef DUNE_SKETCHER_ONLY
+    if (action != ActionID::VIEW_TOP)
+        return;
+#endif
 
     glm::quat q;
 

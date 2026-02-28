@@ -1,6 +1,7 @@
 #include "editor.hpp"
 #include "workspace_browser.hpp"
 #include "dune3d_appwindow.hpp"
+#include "dune3d_application.hpp"
 #include "widgets/constraints_box.hpp"
 #include "document/group/all_groups.hpp"
 #include "document/entity/entity_workplane.hpp"
@@ -14,6 +15,7 @@
 #include "action/action_id.hpp"
 #include "document/solid_model/solid_model.hpp"
 #include "widgets/select_groups_dialog.hpp"
+#include "util/fs_util.hpp"
 
 namespace dune3d {
 using json = nlohmann::json;
@@ -21,6 +23,43 @@ using json = nlohmann::json;
 void Editor::init_workspace_browser()
 {
     m_workspace_browser = Gtk::make_managed<WorkspaceBrowser>(m_core);
+#ifdef DUNE_SKETCHER_ONLY
+    m_sidebar_popover = Gtk::make_managed<Gtk::Popover>();
+    m_sidebar_popover->add_css_class("sketch-sidebar-popover");
+    m_sidebar_popover->set_autohide(true);
+    m_sidebar_popover->set_has_arrow(true);
+    m_sidebar_popover->set_position(Gtk::PositionType::TOP);
+    m_sidebar_popover->set_size_request(280, 560);
+    m_sidebar_popover->set_child(*m_workspace_browser);
+    m_sidebar_popover->signal_hide().connect([this] { m_win.get_app().m_user_config.sidebar_visible = false; });
+    m_sidebar_popover->signal_show().connect([this] { m_win.get_app().m_user_config.sidebar_visible = true; });
+    m_workspace_browser->set_sketcher_open_controls(m_win.get_open_button(), m_win.get_open_menu_button());
+    if (auto open_popover = m_win.get_open_popover()) {
+        open_popover->signal_hide().connect([this] {
+            if (!m_sidebar_popover)
+                return;
+            const bool restore_sidebar = m_sidebar_popover->is_visible();
+            if (!restore_sidebar)
+                return;
+            // Work around nested-popover grab getting stuck after closing Recent via second click.
+            m_sidebar_popover->popdown();
+            Glib::signal_idle().connect_once([this] {
+                if (!m_sidebar_popover)
+                    return;
+                m_sidebar_popover->popup();
+            });
+        });
+    }
+    if (auto sidebar_button = m_win.get_sidebar_floating_button()) {
+        m_sidebar_popover->set_parent(*sidebar_button);
+        sidebar_button->signal_clicked().connect([this] { toggle_sidebar_visibility(); });
+    }
+#else
+    m_workspace_browser_revealer = Gtk::make_managed<Gtk::Revealer>();
+    m_workspace_browser_revealer->set_transition_type(Gtk::RevealerTransitionType::NONE);
+    m_workspace_browser_revealer->set_reveal_child(true);
+    m_workspace_browser_revealer->set_child(*m_workspace_browser);
+#endif
     m_workspace_browser->signal_close_document().connect([this](const UUID &doc_uu) {
         get_canvas().grab_focus();
         close_document(doc_uu, nullptr, nullptr);
@@ -29,6 +68,7 @@ void Editor::init_workspace_browser()
     m_workspace_browser->signal_group_selected().connect(
             sigc::mem_fun(*this, &Editor::on_workspace_browser_group_selected));
     m_workspace_browser->signal_add_group().connect(sigc::mem_fun(*this, &Editor::on_add_group));
+    m_workspace_browser->signal_open_folder().connect(sigc::mem_fun(*this, &Editor::on_open_folder));
     m_workspace_browser->signal_delete_current_group().connect(sigc::mem_fun(*this, &Editor::on_delete_current_group));
     m_workspace_browser->signal_move_group().connect(sigc::mem_fun(*this, &Editor::on_move_group));
     m_workspace_browser->signal_document_checked().connect(
@@ -69,13 +109,62 @@ void Editor::init_workspace_browser()
         });
     });
 
-    m_win.get_left_bar().set_start_child(*m_workspace_browser);
+#ifdef DUNE_SKETCHER_ONLY
+    auto empty = Gtk::make_managed<Gtk::Box>();
+    empty->set_visible(false);
+    m_win.get_left_bar().set_start_child(*empty);
+    set_sidebar_visible(m_win.get_app().m_user_config.sidebar_visible);
+#else
+    m_win.get_left_bar().set_start_child(*m_workspace_browser_revealer);
+#endif
+}
+
+void Editor::set_sidebar_visible(bool visible)
+{
+#ifdef DUNE_SKETCHER_ONLY
+    if (!m_sidebar_popover)
+        return;
+    if (visible) {
+        const auto max_height = std::max(220, static_cast<int>((m_win.get_height() - 120) * 0.8));
+        m_sidebar_popover->set_size_request(270, max_height);
+        m_sidebar_popover->popup();
+    }
+    else {
+        if (auto open_popover = m_win.get_open_popover())
+            open_popover->popdown();
+        m_sidebar_popover->popdown();
+    }
+#else
+    if (!m_workspace_browser_revealer)
+        return;
+    m_workspace_browser_revealer->set_reveal_child(visible);
+#endif
+    m_win.get_app().m_user_config.sidebar_visible = visible;
+}
+
+void Editor::toggle_sidebar_visibility()
+{
+#ifdef DUNE_SKETCHER_ONLY
+    if (!m_sidebar_popover)
+        return;
+    set_sidebar_visible(!m_sidebar_popover->is_visible());
+#else
+    if (!m_workspace_browser_revealer)
+        return;
+    set_sidebar_visible(!m_workspace_browser_revealer->get_reveal_child());
+#endif
 }
 
 void Editor::on_workspace_browser_group_selected(const UUID &uu_doc, const UUID &uu_group)
 {
-    if (m_core.tool_is_active())
+    if (m_core.tool_is_active()) {
+#ifdef DUNE_SKETCHER_ONLY
+        if (!force_end_tool())
+            return;
+#else
         return;
+#endif
+    }
     auto &idoc = m_core.get_current_idocument_info();
     if (idoc.get_uuid() == uu_doc && idoc.get_current_group() == uu_group)
         return;
@@ -97,6 +186,17 @@ void Editor::on_add_group(Group::Type group_type, WorkspaceBrowserAddGroupMode a
     if (group_type == Group::Type::SKETCH) {
         auto &group = doc.insert_group<GroupSketch>(UUID::random(), current_group.m_uuid);
         new_group = &group;
+        if (current_group.m_active_wrkpl) {
+            group.m_active_wrkpl = current_group.m_active_wrkpl;
+        }
+        else {
+            for (auto gr : doc.get_groups_sorted()) {
+                if (auto ref = dynamic_cast<const GroupReference *>(gr)) {
+                    group.m_active_wrkpl = ref->get_workplane_xy_uuid();
+                    break;
+                }
+            }
+        }
     }
     else if (group_type == Group::Type::EXTRUDE) {
         if (!current_group.m_active_wrkpl) {
@@ -264,7 +364,7 @@ void Editor::finish_add_group(Group *new_group)
     }
 }
 
-void Editor::on_delete_current_group()
+void Editor::on_delete_current_group(bool delete_file_too)
 {
     if (m_core.tool_is_active())
         return;
@@ -282,25 +382,73 @@ void Editor::on_delete_current_group()
 
     if (!previous_group)
         return;
-    doc.set_group_generate_pending(previous_group);
+    const auto group_uuid = group.m_uuid;
+    const auto file_path = get_group_export_path(group_uuid);
 
-    {
-        ItemsToDelete items;
-        items.groups = {group.m_uuid};
-        const auto items_initial = items;
-        auto extra_items = doc.get_additional_items_to_delete(items);
-        items.append(extra_items);
-        show_delete_items_popup(items_initial, items);
-        doc.delete_items(items);
+    auto perform_delete = [this, previous_group, group_uuid, file_path, delete_file_too] {
+        auto &doc = m_core.get_current_document();
+        try {
+            doc.get_group(group_uuid);
+        }
+        catch (...) {
+            return;
+        }
+
+        if (delete_file_too) {
+            if (!file_path.has_value()) {
+                m_workspace_browser->show_toast("Sketch has no file to delete");
+                return;
+            }
+            std::error_code ec;
+            if (std::filesystem::exists(*file_path, ec) && !std::filesystem::remove(*file_path, ec)) {
+                m_workspace_browser->show_toast("Couldn't delete file");
+                return;
+            }
+        }
+
+        doc.set_group_generate_pending(previous_group);
+        {
+            ItemsToDelete items;
+            items.groups = {group_uuid};
+            const auto items_initial = items;
+            auto extra_items = doc.get_additional_items_to_delete(items);
+            items.append(extra_items);
+            show_delete_items_popup(items_initial, items);
+            doc.delete_items(items);
+        }
+        m_group_export_paths.erase(group_uuid);
+
+        get_current_document_view().m_current_group = previous_group;
+        m_core.set_current_group(previous_group);
+        m_workspace_browser->update_documents(get_current_document_views());
+        set_current_group(previous_group);
+
+        m_core.set_needs_save();
+        m_core.rebuild("delete group");
+    };
+
+    if (delete_file_too) {
+        if (!file_path.has_value()) {
+            m_workspace_browser->show_toast("Sketch has no file to delete");
+            return;
+        }
+#ifdef DUNE_SKETCHER_ONLY
+        if (m_sidebar_popover)
+            m_sidebar_popover->popdown();
+#endif
+        auto dialog = Gtk::AlertDialog::create("Delete file \"" + path_to_string(file_path->filename()) + "\"?");
+        dialog->set_detail("This will permanently delete the file from disk.");
+        dialog->set_buttons({"Cancel", "Delete file"});
+        dialog->set_cancel_button(0);
+        dialog->set_default_button(0);
+        dialog->choose(m_win, [dialog, perform_delete](Glib::RefPtr<Gio::AsyncResult> &result) {
+            if (dialog->choose_finish(result) == 1)
+                perform_delete();
+        });
+        return;
     }
 
-    get_current_document_view().m_current_group = previous_group;
-    m_core.set_current_group(previous_group);
-    m_workspace_browser->update_documents(get_current_document_views());
-    set_current_group(previous_group);
-
-    m_core.set_needs_save();
-    m_core.rebuild("delete group");
+    perform_delete();
 }
 
 void Editor::on_move_group(Document::MoveGroup op)
@@ -360,8 +508,10 @@ void Editor::on_workspace_browser_activate_link(const std::string &link)
     const auto j = json::parse(link);
     const auto op = j.at("op").get<std::string>();
     if (op == "find-redundant-constraints") {
-        m_properties_notebook->set_current_page(m_properties_notebook->page_num(*m_constraints_box));
-        m_constraints_box->set_redundant_only();
+        if (m_properties_notebook && m_constraints_box) {
+            m_properties_notebook->set_current_page(m_properties_notebook->page_num(*m_constraints_box));
+            m_constraints_box->set_redundant_only();
+        }
     }
     else if (op == "undo") {
         if (!m_core.tool_is_active())

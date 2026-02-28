@@ -6,6 +6,7 @@
 #include "workspace/document_view.hpp"
 #include "util/fs_util.hpp"
 #include <iostream>
+#include <memory>
 
 namespace dune3d {
 
@@ -71,6 +72,7 @@ public:
     Glib::Property<bool> m_solid_model_active;
     Glib::Property<bool> m_has_color;
     Glib::Property<Gdk::RGBA> m_color;
+    bool m_show_in_sketcher = true;
 
     Glib::RefPtr<Gio::ListStore<GroupItem>> m_group_store;
 
@@ -155,21 +157,31 @@ void WorkspaceBrowser::update_documents(const std::map<UUID, DocumentView> &doc_
     block_signals();
     auto store = Gio::ListStore<DocumentItem>::create();
     for (auto doci : m_core.get_documents()) {
+#ifdef DUNE_SKETCHER_ONLY
+        if (doci->get_uuid() != m_core.get_current_idocument_info().get_uuid())
+            continue;
+#endif
         auto mi = DocumentItem::create();
         mi->m_uuid = doci->get_uuid();
         mi->m_close_sensitive = doci->can_close();
         Glib::RefPtr<BodyItem> body_item = BodyItem::create();
         body_item->m_doc = mi->m_uuid;
-        body_item->m_name = "Missing";
+        body_item->m_name = m_sketcher_folder_name.value_or("Missing");
+#ifdef DUNE_SKETCHER_ONLY
+        body_item->m_show_in_sketcher = m_sketcher_folder_name.has_value();
+#endif
         for (auto gr : doci->get_document().get_groups_sorted()) {
             if (gr->m_body.has_value()) {
                 body_item = BodyItem::create();
-                body_item->m_name = gr->m_body->m_name;
+                body_item->m_name = m_sketcher_folder_name.value_or(gr->m_body->m_name);
                 body_item->m_has_color = gr->m_body->m_color.has_value();
                 if (gr->m_body->m_color.has_value())
                     body_item->m_color = rgba_from_color(gr->m_body->m_color.value());
                 body_item->m_uuid = gr->m_uuid;
                 body_item->m_doc = mi->m_uuid;
+#ifdef DUNE_SKETCHER_ONLY
+                body_item->m_show_in_sketcher = m_sketcher_folder_name.has_value();
+#endif
                 mi->m_body_store->append(body_item);
             }
 
@@ -177,6 +189,10 @@ void WorkspaceBrowser::update_documents(const std::map<UUID, DocumentView> &doc_
             gi->m_name = gr->m_name;
             gi->m_uuid = gr->m_uuid;
             gi->m_doc = doci->get_uuid();
+#ifdef DUNE_SKETCHER_ONLY
+            if (gr->get_type() == Group::Type::REFERENCE)
+                continue;
+#endif
             body_item->m_group_store->append(gi);
         }
         store->append(mi);
@@ -268,7 +284,9 @@ void WorkspaceBrowser::update_current_group(const std::map<UUID, DocumentView> &
             source_groups = group_src->get_source_groups(doc);
         auto body = current_group.find_body(doc);
         UUID body_uu = body.group.m_uuid;
+#ifndef DUNE_SKETCHER_ONLY
         bool after_active = false;
+#endif
         for (size_t i_body = 0; i_body < it_doc.m_body_store->get_n_items(); i_body++) {
             auto &it_body = *it_doc.m_body_store->get_item(i_body);
             const bool is_current_body = body_uu == it_body.m_uuid && is_current_doc;
@@ -295,6 +313,12 @@ void WorkspaceBrowser::update_current_group(const std::map<UUID, DocumentView> &
                     it_group.m_check_active = true;
                     it_group.m_check_sensitive = false;
                 }
+#ifdef DUNE_SKETCHER_ONLY
+                else {
+                    it_group.m_check_sensitive = true;
+                    it_group.m_check_active = doc_view.group_is_visible(it_group.m_uuid);
+                }
+#else
                 else if (after_active) {
                     it_group.m_check_active = false;
                     it_group.m_check_sensitive = false;
@@ -303,6 +327,7 @@ void WorkspaceBrowser::update_current_group(const std::map<UUID, DocumentView> &
                     it_group.m_check_sensitive = true;
                     it_group.m_check_active = doc_view.group_is_visible(it_group.m_uuid);
                 }
+#endif
                 {
                     auto msgs = gr.get_messages();
                     it_group.m_status = GroupStatusMessage::summarize(msgs);
@@ -314,8 +339,10 @@ void WorkspaceBrowser::update_current_group(const std::map<UUID, DocumentView> &
                     }
                     it_group.m_status_message = txt;
                 }
+#ifndef DUNE_SKETCHER_ONLY
                 if (is_current)
                     after_active = true;
+#endif
             }
         }
         select_group(doci.get_uuid(), doci.get_current_group());
@@ -353,6 +380,15 @@ void WorkspaceBrowser::update_needs_save()
         auto &doci = m_core.get_idocument_info(it_doc.m_uuid);
         update_name(it_doc, doci);
     }
+}
+
+void WorkspaceBrowser::set_sketcher_folder_mode(const std::optional<std::string> &folder_name)
+{
+#ifdef DUNE_SKETCHER_ONLY
+    m_sketcher_folder_name = folder_name;
+#else
+    (void)folder_name;
+#endif
 }
 
 class SolidModelToggleButton : public Gtk::ToggleButton {
@@ -429,6 +465,7 @@ class WorkspaceBrowser::WorkspaceRow : public Gtk::TreeExpander {
 public:
     WorkspaceRow(WorkspaceBrowser &browser) : m_browser(browser)
     {
+        set_indent_for_depth(false);
         m_checkbutton = Gtk::make_managed<Gtk::CheckButton>();
         m_checkbutton->set_active(true);
 
@@ -534,6 +571,15 @@ public:
     {
         m_doc = &it;
         m_browser.block_signals();
+#ifdef DUNE_SKETCHER_ONLY
+        set_visible(false);
+        if (auto row_widget = get_parent())
+            row_widget->set_visible(false);
+#else
+        set_visible(true);
+        if (auto row_widget = get_parent())
+            row_widget->set_visible(true);
+#endif
         m_checkbutton->set_visible(true);
         m_solid_toggle->set_visible(false);
         m_dof_label->set_visible(false);
@@ -566,10 +612,29 @@ public:
     void bind(BodyItem &it)
     {
         m_browser.block_signals();
+#ifdef DUNE_SKETCHER_ONLY
+        const bool is_current_doc = it.m_doc == m_browser.m_core.get_current_idocument_info().get_uuid();
+        const bool show_row = it.m_show_in_sketcher && is_current_doc;
+        set_visible(show_row);
+        if (auto row_widget = get_parent())
+            row_widget->set_visible(show_row);
+#else
+        set_visible(true);
+        if (auto row_widget = get_parent())
+            row_widget->set_visible(true);
+#endif
         m_body = &it;
+#ifdef DUNE_SKETCHER_ONLY
+        const bool is_folder_row = it.m_show_in_sketcher;
+        m_checkbutton->set_visible(!is_folder_row);
+        m_checkbutton->set_active(true);
+        m_checkbutton->set_sensitive(!is_folder_row);
+        m_solid_toggle->set_visible(false);
+#else
         m_checkbutton->set_active(true);
         m_checkbutton->set_sensitive(true);
         m_solid_toggle->set_visible(true);
+#endif
         m_dof_label->set_visible(false);
         m_status_button->set_visible(false);
         m_close_button->set_visible(false);
@@ -614,6 +679,9 @@ public:
     void bind(GroupItem &it)
     {
         m_browser.block_signals();
+        set_visible(true);
+        if (auto row_widget = get_parent())
+            row_widget->set_visible(true);
         m_solid_toggle->set_visible(false);
         m_dof_label->set_visible(true);
         m_status_button->set_visible(true);
@@ -794,6 +862,16 @@ WorkspaceBrowser::WorkspaceBrowser(Core &core) : Gtk::Box(Gtk::Orientation::VERT
         }
     });
     m_view->add_css_class("navigation-sidebar");
+#ifdef DUNE_SKETCHER_ONLY
+    m_sketcher_open_box = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL);
+    m_sketcher_open_box->set_margin_start(6);
+    m_sketcher_open_box->set_margin_end(6);
+    m_sketcher_open_box->set_margin_top(6);
+    m_sketcher_open_box->set_margin_bottom(6);
+    m_sketcher_open_box->set_halign(Gtk::Align::CENTER);
+    m_sketcher_open_box->set_hexpand(true);
+    append(*m_sketcher_open_box);
+#endif
     {
         auto sc = Gtk::make_managed<Gtk::ScrolledWindow>();
         sc->set_child(*m_view);
@@ -861,65 +939,44 @@ WorkspaceBrowser::WorkspaceBrowser(Core &core) : Gtk::Box(Gtk::Orientation::VERT
 
     {
         auto box = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL);
+#ifdef DUNE_SKETCHER_ONLY
+        m_sketcher_actions_box = box;
+#endif
         box->add_css_class("toolbar");
+        box->set_homogeneous(true);
+        box->set_hexpand(true);
         {
-            auto button = Gtk::make_managed<Gtk::MenuButton>();
-            {
-                auto top = Gio::Menu::create();
-                auto actions = Gio::SimpleActionGroup::create();
-                actions->add_action("sketch", [this] { emit_add_group(Group::Type::SKETCH); });
-                actions->add_action("sketch_in_new_body",
-                                    [this] { emit_add_group(Group::Type::SKETCH, AddGroupMode::WITH_BODY); });
-                actions->add_action("extrude", [this] { emit_add_group(Group::Type::EXTRUDE); });
-                actions->add_action("lathe", [this] { emit_add_group(Group::Type::LATHE); });
-                actions->add_action("revolve", [this] { emit_add_group(Group::Type::REVOLVE); });
-                actions->add_action("loft", [this] { emit_add_group(Group::Type::LOFT); });
-                actions->add_action("fillet", [this] { emit_add_group(Group::Type::FILLET); });
-                actions->add_action("chamfer", [this] { emit_add_group(Group::Type::CHAMFER); });
-                actions->add_action("linear_array", [this] { emit_add_group(Group::Type::LINEAR_ARRAY); });
-                actions->add_action("polar_array", [this] { emit_add_group(Group::Type::POLAR_ARRAY); });
-                actions->add_action("mirror_horizontal", [this] { emit_add_group(Group::Type::MIRROR_HORIZONTAL); });
-                actions->add_action("mirror_vertical", [this] { emit_add_group(Group::Type::MIRROR_VERTICAL); });
-                actions->add_action("clone", [this] { emit_add_group(Group::Type::CLONE); });
-                actions->add_action("solid_model_operation",
-                                    [this] { emit_add_group(Group::Type::SOLID_MODEL_OPERATION); });
-                actions->add_action("pipe", [this] { emit_add_group(Group::Type::PIPE); });
-                top->append_item(Gio::MenuItem::create("Sketch", "groups.sketch"));
-                top->append_item(Gio::MenuItem::create("Sketch in new Body", "groups.sketch_in_new_body"));
-                top->append_item(Gio::MenuItem::create("Extrude", "groups.extrude"));
-                top->append_item(Gio::MenuItem::create("Lathe", "groups.lathe"));
-                top->append_item(Gio::MenuItem::create("Revolve", "groups.revolve"));
-                top->append_item(Gio::MenuItem::create("Loft", "groups.loft"));
-                top->append_item(Gio::MenuItem::create("Linear array", "groups.linear_array"));
-                top->append_item(Gio::MenuItem::create("Polar array", "groups.polar_array"));
-                top->append_item(Gio::MenuItem::create("Fillet", "groups.fillet"));
-                top->append_item(Gio::MenuItem::create("Chamfer", "groups.chamfer"));
-                top->append_item(Gio::MenuItem::create("Mirror horizontally", "groups.mirror_horizontal"));
-                top->append_item(Gio::MenuItem::create("Mirror vertically", "groups.mirror_vertical"));
-                top->append_item(Gio::MenuItem::create("Clone", "groups.clone"));
-                top->append_item(Gio::MenuItem::create("Solid model operation", "groups.solid_model_operation"));
-                top->append_item(Gio::MenuItem::create("Pipe", "groups.pipe"));
-
-
-                insert_action_group("groups", actions);
-                button->set_menu_model(top);
-            }
+            auto button = Gtk::make_managed<Gtk::Button>();
             button->set_icon_name("list-add-symbolic");
-            button->set_tooltip_text("Add new group");
-            button->set_direction(Gtk::ArrowType::UP);
+            button->set_tooltip_text("Add sketch");
+            button->set_hexpand(true);
+            button->signal_clicked().connect([this] { emit_add_group(Group::Type::SKETCH); });
             box->append(*button);
         }
         {
             auto button = Gtk::make_managed<Gtk::Button>();
             button->set_icon_name("list-remove-symbolic");
             button->set_tooltip_text("Delete current group");
-            button->signal_clicked().connect([this] { m_signal_delete_current_group.emit(); });
+            button->set_hexpand(true);
+            auto delete_with_file = std::make_shared<bool>(false);
+            auto controller = Gtk::GestureClick::create();
+            controller->set_button(GDK_BUTTON_PRIMARY);
+            controller->signal_pressed().connect([controller, delete_with_file](int, double, double) {
+                *delete_with_file = static_cast<bool>(controller->get_current_event_state()
+                                                      & Gdk::ModifierType::SHIFT_MASK);
+            });
+            button->add_controller(controller);
+            button->signal_clicked().connect([this, delete_with_file] {
+                m_signal_delete_current_group.emit(*delete_with_file);
+                *delete_with_file = false;
+            });
             box->append(*button);
         }
         {
             auto button = Gtk::make_managed<Gtk::Button>();
             button->set_icon_name("go-up-symbolic");
             button->set_tooltip_text("Move group up");
+            button->set_hexpand(true);
             button->signal_clicked().connect([this] { m_signal_move_group.emit(Document::MoveGroup::UP); });
             box->append(*button);
         }
@@ -927,13 +984,24 @@ WorkspaceBrowser::WorkspaceBrowser(Core &core) : Gtk::Box(Gtk::Orientation::VERT
             auto button = Gtk::make_managed<Gtk::Button>();
             button->set_icon_name("go-down-symbolic");
             button->set_tooltip_text("Move group down");
+            button->set_hexpand(true);
             button->signal_clicked().connect([this] { m_signal_move_group.emit(Document::MoveGroup::DOWN); });
             box->append(*button);
         }
         {
             auto button = Gtk::make_managed<Gtk::Button>();
+            button->set_icon_name("folder-open-symbolic");
+            button->set_tooltip_text("Open folder");
+            button->set_hexpand(true);
+            button->signal_clicked().connect([this] { m_signal_open_folder.emit(); });
+            box->append(*button);
+        }
+#ifndef DUNE_SKETCHER_ONLY
+        {
+            auto button = Gtk::make_managed<Gtk::Button>();
             button->set_icon_name("action-move-group-down2-symbolic");
             button->set_tooltip_text("Move group to end of body / next body");
+            button->set_hexpand(true);
             button->signal_clicked().connect([this] { m_signal_move_group.emit(Document::MoveGroup::END_OF_BODY); });
             box->append(*button);
         }
@@ -941,10 +1009,12 @@ WorkspaceBrowser::WorkspaceBrowser(Core &core) : Gtk::Box(Gtk::Orientation::VERT
             auto button = Gtk::make_managed<Gtk::Button>();
             button->set_icon_name("action-move-group-down3-symbolic");
             button->set_tooltip_text("Move group to end of document");
+            button->set_hexpand(true);
             button->signal_clicked().connect(
                     [this] { m_signal_move_group.emit(Document::MoveGroup::END_OF_DOCUMENT); });
             box->append(*button);
         }
+#endif
         append(*box);
     }
 
@@ -964,6 +1034,47 @@ WorkspaceBrowser::WorkspaceBrowser(Core &core) : Gtk::Box(Gtk::Orientation::VERT
     m_body_popover->set_menu_model(m_body_menu);
 
     m_body_popover->set_parent(*this);
+}
+
+void WorkspaceBrowser::set_sketcher_open_controls(Gtk::Button &open_button, Gtk::MenuButton &open_menu_button)
+{
+#ifdef DUNE_SKETCHER_ONLY
+    if (!m_sketcher_open_box || !m_sketcher_actions_box)
+        return;
+    if (auto parent = dynamic_cast<Gtk::Box *>(open_button.get_parent())) {
+        parent->remove(open_button);
+        if (!parent->get_first_child())
+            parent->set_visible(false);
+    }
+    if (auto parent = dynamic_cast<Gtk::Box *>(open_menu_button.get_parent())) {
+        parent->remove(open_menu_button);
+        if (!parent->get_first_child())
+            parent->set_visible(false);
+    }
+
+    open_menu_button.unset_child();
+    open_menu_button.set_label("Recent");
+    open_menu_button.set_always_show_arrow(true);
+    open_menu_button.set_has_frame(false);
+    open_menu_button.add_css_class("flat");
+    open_menu_button.set_tooltip_text("Recent files");
+    auto open_icon = Gtk::make_managed<Gtk::Image>();
+    open_icon->set_from_icon_name("document-open-symbolic");
+    open_button.set_child(*open_icon);
+    open_button.set_tooltip_text("Open file");
+    open_button.set_hexpand(true);
+    open_button.set_has_frame(true);
+    open_button.remove_css_class("flat");
+    open_button.set_visible(true);
+    open_menu_button.set_visible(true);
+    if (open_menu_button.get_parent() != m_sketcher_open_box)
+        m_sketcher_open_box->append(open_menu_button);
+    if (open_button.get_parent() != m_sketcher_actions_box)
+        m_sketcher_actions_box->append(open_button);
+#else
+    (void)open_button;
+    (void)open_menu_button;
+#endif
 }
 
 void WorkspaceBrowser::emit_add_group(GroupType type, AddGroupMode add_group_mode)

@@ -10,6 +10,7 @@ class ICore;
 class SelectionFilterWindow : public Gtk::Window, public Changeable, public ISelectionFilter {
 public:
     SelectionFilterWindow(ICore &icore);
+    void set_current_group_only_locked(bool locked);
 
     bool is_active() const;
     bool can_select(const SelectableRef &sr) const override;

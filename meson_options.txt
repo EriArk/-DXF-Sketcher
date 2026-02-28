@@ -1,0 +1,6 @@
+option(
+  'sketcher_only',
+  type: 'boolean',
+  value: false,
+  description: 'Build without OpenCASCADE/STEP/solid-model backends',
+)

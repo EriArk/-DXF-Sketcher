@@ -122,6 +122,15 @@ void Dune3DApplication::on_startup()
 void Dune3DApplication::on_shutdown()
 {
     m_user_config.save(get_user_config_filename());
+#ifdef DUNE_SKETCHER_ONLY
+    try {
+        const auto cache_dir = std::filesystem::path(Glib::get_user_cache_dir()) / "dune3d-sketcher" / "workspaces";
+        std::filesystem::remove_all(cache_dir);
+    }
+    catch (...) {
+        // Best-effort cleanup of temporary workspace files.
+    }
+#endif
     Gtk::Application::on_shutdown();
 }
 
@@ -170,6 +179,7 @@ std::filesystem::path Dune3DApplication::get_user_config_filename()
 void Dune3DApplication::UserConfig::load(const std::filesystem::path &filename)
 {
     json j = load_json_from_file(filename);
+    sidebar_visible = j.value("sidebar_visible", true);
     if (j.count("recent")) {
         const json &o = j["recent"];
         for (const auto &[fn, v] : o.items()) {
@@ -201,6 +211,7 @@ void Dune3DApplication::UserConfig::load(const std::filesystem::path &filename)
 void Dune3DApplication::UserConfig::save(const std::filesystem::path &filename)
 {
     json j;
+    j["sidebar_visible"] = sidebar_visible;
     for (const auto &[path, mod] : recent_items) {
         j["recent"][path_to_string(path)] = mod.to_unix();
     }

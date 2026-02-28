@@ -16,6 +16,62 @@
 
 namespace dune3d {
 
+#ifdef DUNE_SKETCHER_ONLY
+static bool skip_in_sketcher(const ActionToolID &action_tool_id)
+{
+    if (const auto action = std::get_if<ActionID>(&action_tool_id)) {
+        switch (*action) {
+        case ActionID::VIEW_ROTATE_UP:
+        case ActionID::VIEW_ROTATE_DOWN:
+        case ActionID::VIEW_ROTATE_LEFT:
+        case ActionID::VIEW_ROTATE_RIGHT:
+        case ActionID::VIEW_TILT_LEFT:
+        case ActionID::VIEW_TILT_RIGHT:
+        case ActionID::VIEW_TOGGLE_PERSP_ORTHO:
+        case ActionID::VIEW_PERSP:
+        case ActionID::VIEW_ORTHO:
+        case ActionID::VIEW_RESET_TILT:
+        case ActionID::VIEW_FRONT:
+        case ActionID::VIEW_BACK:
+        case ActionID::VIEW_BOTTOM:
+        case ActionID::VIEW_LEFT:
+        case ActionID::VIEW_RIGHT:
+        case ActionID::TOGGLE_WORKPLANE:
+            return true;
+        default:
+            return false;
+        }
+    }
+    if (const auto tool = std::get_if<ToolID>(&action_tool_id)) {
+        switch (*tool) {
+        case ToolID::SET_WORKPLANE:
+        case ToolID::UNSET_WORKPLANE:
+        case ToolID::DRAW_WORKPLANE:
+        case ToolID::DRAW_LINE_3D:
+        case ToolID::IMPORT_STEP:
+        case ToolID::SELECT_EDGES:
+            return true;
+        default:
+            return false;
+        }
+    }
+    return false;
+}
+
+static bool skip_in_sketcher(InToolActionID action)
+{
+    switch (action) {
+    case InToolActionID::ROTATE_X:
+    case InToolActionID::ROTATE_Y:
+    case InToolActionID::ROTATE_Z:
+    case InToolActionID::TOGGLE_AUTO_NORMAL:
+        return true;
+    default:
+        return false;
+    }
+}
+#endif
+
 Preferences::Preferences()
 {
 }
@@ -75,6 +131,10 @@ void KeySequencesPreferences::append_from_json(const json &j)
             else if (it.contains("tool"))
                 action_tool_id = tool_lut.lookup_opt(it.at("tool").get<std::string>());
             if (action_tool_id.has_value()) {
+#ifdef DUNE_SKETCHER_ONLY
+                if (skip_in_sketcher(*action_tool_id))
+                    continue;
+#endif
                 if (keys.count(*action_tool_id) == 0) {
                     for (const auto &it3 : it.at("keys")) {
                         auto &ks = keys[*action_tool_id].emplace_back();
@@ -130,6 +190,10 @@ void InToolKeySequencesPreferences::append_from_json(const json &j)
         try {
             auto action = in_tool_action_lut.lookup(a_str, InToolActionID::NONE);
             if (action != InToolActionID::NONE) {
+#ifdef DUNE_SKETCHER_ONLY
+                if (skip_in_sketcher(action))
+                    continue;
+#endif
                 if (keys.count(action) == 0) {
                     for (const auto &seq : keys_seqs) {
                         keys[action].emplace_back();

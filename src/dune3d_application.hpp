@@ -32,6 +32,7 @@ public:
 
     public:
         std::map<std::filesystem::path, Glib::DateTime> recent_items;
+        bool sidebar_visible = true;
         struct ExportPaths {
             std::string step;
             std::string stl;

@@ -3,6 +3,7 @@
 #include "util/uuid.hpp"
 #include "document/group/group.hpp"
 #include "document/document.hpp"
+#include <optional>
 
 namespace dune3d {
 
@@ -14,6 +15,8 @@ enum class WorkspaceBrowserAddGroupMode { WITH_BODY, WITHOUT_BODY };
 class WorkspaceBrowser : public Gtk::Box {
 public:
     WorkspaceBrowser(Core &core);
+    void set_sketcher_open_controls(Gtk::Button &open_button, Gtk::MenuButton &open_menu_button);
+    void set_sketcher_folder_mode(const std::optional<std::string> &folder_name);
 
     void update_documents(const std::map<UUID, DocumentView> &doc_views);
     void update_current_group(const std::map<UUID, DocumentView> &doc_views);
@@ -63,7 +66,7 @@ public:
         return m_signal_document_checked;
     }
 
-    using type_signal_delete_current_group = sigc::signal<void()>;
+    using type_signal_delete_current_group = sigc::signal<void(bool)>;
 
     using AddGroupMode = WorkspaceBrowserAddGroupMode;
     using type_signal_add_group = sigc::signal<void(Group::Type, AddGroupMode)>;
@@ -82,6 +85,11 @@ public:
     type_signal_move_group signal_move_group()
     {
         return m_signal_move_group;
+    }
+    using type_signal_open_folder = sigc::signal<void()>;
+    type_signal_open_folder signal_open_folder()
+    {
+        return m_signal_open_folder;
     }
 
     using type_signal_close_document = sigc::signal<void(UUID)>;
@@ -127,6 +135,9 @@ private:
     Gtk::InfoBar *m_info_bar = nullptr;
     Gtk::Image *m_info_bar_icon = nullptr;
     Gtk::Label *m_info_bar_label = nullptr;
+    Gtk::Box *m_sketcher_open_box = nullptr;
+    Gtk::Box *m_sketcher_actions_box = nullptr;
+    std::optional<std::string> m_sketcher_folder_name;
 
     Core &m_core;
 
@@ -139,6 +150,7 @@ private:
     type_signal_delete_current_group m_signal_delete_current_group;
     type_signal_add_group m_signal_add_group;
     type_signal_move_group m_signal_move_group;
+    type_signal_open_folder m_signal_open_folder;
     type_signal_close_document m_signal_close_document;
     type_signal_activate_link m_signal_activate_link;
 

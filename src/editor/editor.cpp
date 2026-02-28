@@ -8,6 +8,8 @@
 #include "canvas/canvas.hpp"
 #include "document/entity/entity.hpp"
 #include "document/entity/entity_document.hpp"
+#include "document/group/group_sketch.hpp"
+#include "document/group/group_reference.hpp"
 #include "tool_popover.hpp"
 #include "dune3d_application.hpp"
 #include "util/selection_util.hpp"
@@ -22,6 +24,9 @@
 #include "preferences/color_presets.hpp"
 #include "workspace_browser.hpp"
 #include "document/constraint/iconstraint_workplane.hpp"
+#include "document/export_dxf.hpp"
+#include "document/export_paths.hpp"
+#include "import_dxf/dxf_importer.hpp"
 #include "widgets/clipping_plane_window.hpp"
 #include "widgets/selection_filter_window.hpp"
 #include "system/system.hpp"
@@ -29,8 +34,23 @@
 #include "nlohmann/json.hpp"
 #include "buffer.hpp"
 #include <iostream>
+#include <cctype>
+#include <algorithm>
+#include <vector>
+#include <filesystem>
 
 namespace dune3d {
+namespace {
+std::filesystem::path normalize_group_path(const std::filesystem::path &path)
+{
+    try {
+        return std::filesystem::absolute(path).lexically_normal();
+    }
+    catch (...) {
+        return path.lexically_normal();
+    }
+}
+} // namespace
 
 Editor::CanvasUpdater::CanvasUpdater(Editor &editor) : m_editor(editor)
 {
@@ -101,7 +121,11 @@ void Editor::init()
                 wsv.m_documents[doc->get_uuid()];
             }
         }
+#ifdef DUNE_SKETCHER_ONLY
+        m_win.get_workspace_notebook().set_visible(false);
+#else
         m_win.get_workspace_notebook().set_visible(m_core.has_documents());
+#endif
         CanvasUpdater canvas_updater{*this};
         m_workspace_browser->update_documents(get_current_document_views());
         update_group_editor();
@@ -118,30 +142,24 @@ void Editor::init()
 
     attach_action_button(m_win.get_welcome_open_button(), ActionID::OPEN_DOCUMENT);
     attach_action_button(m_win.get_welcome_new_button(), ActionID::NEW_DOCUMENT);
+#ifdef DUNE_SKETCHER_ONLY
+    m_win.get_welcome_open_folder_button().signal_clicked().connect(sigc::mem_fun(*this, &Editor::on_open_folder));
+#endif
 
     create_action_bar_button(ToolID::DRAW_CONTOUR);
     create_action_bar_button(ToolID::DRAW_RECTANGLE);
     create_action_bar_button(ToolID::DRAW_CIRCLE_2D);
     create_action_bar_button(ToolID::DRAW_REGULAR_POLYGON);
     create_action_bar_button(ToolID::DRAW_TEXT);
-    create_action_bar_button(ToolID::DRAW_WORKPLANE);
 
     init_view_options();
-
-    m_clipping_plane_window = std::make_unique<ClippingPlaneWindow>();
-    m_clipping_plane_window->set_transient_for(m_win);
-    connect_action(ActionID::CLIPPING_PLANE_WINDOW, [this](const auto &a) { m_clipping_plane_window->present(); });
-    connect_action(ActionID::TOGGLE_CLIPPING_PLANES,
-                   [this](const auto &a) { m_clipping_plane_window->toggle_global(); });
-    m_clipping_plane_window->signal_changed().connect([this] {
-        get_canvas().set_clipping_planes(m_clipping_plane_window->get_planes());
-        update_view_hints();
-    });
-    m_clipping_plane_window->set_hide_on_close(true);
 
     m_selection_filter_window = std::make_unique<SelectionFilterWindow>(m_core);
     m_selection_filter_window->set_transient_for(m_win);
     m_selection_filter_window->set_hide_on_close(true);
+#ifdef DUNE_SKETCHER_ONLY
+    m_selection_filter_window->set_current_group_only_locked(true);
+#endif
     connect_action(ActionID::SELECTION_FILTER, [this](const auto &a) { m_selection_filter_window->present(); });
     get_canvas().set_selection_filter(*m_selection_filter_window);
     m_selection_filter_window->signal_changed().connect(sigc::mem_fun(*this, &Editor::update_view_hints));
@@ -187,6 +205,26 @@ void Editor::init()
         set_current_workspace_view(pg.m_uuid);
     });
 
+#ifdef DUNE_SKETCHER_ONLY
+    {
+        auto controller = Gtk::EventControllerKey::create();
+        controller->set_propagation_phase(Gtk::PropagationPhase::CAPTURE);
+        controller->signal_key_pressed().connect(
+                [this](guint keyval, guint keycode, Gdk::ModifierType state) -> bool {
+                    if (keyval == GDK_KEY_Tab
+                        && (state & (Gdk::ModifierType::SHIFT_MASK | Gdk::ModifierType::CONTROL_MASK
+                                     | Gdk::ModifierType::ALT_MASK))
+                                   == static_cast<Gdk::ModifierType>(0)) {
+                        toggle_sidebar_visibility();
+                        return true;
+                    }
+                    return false;
+                },
+                true);
+        m_win.add_controller(controller);
+    }
+#endif
+
     apply_preferences();
 }
 
@@ -222,14 +260,14 @@ void Editor::init_view_options()
         set_hide_irrelevant_workplanes(b);
     });
 
-    add_tool_action(ActionID::CLIPPING_PLANE_WINDOW, "clipping_planes");
     add_tool_action(ActionID::SELECTION_FILTER, "selection_filter");
 
     m_view_options_menu->append("Selection filter", "win.selection_filter");
-    m_view_options_menu->append("Clipping planes", "win.clipping_planes");
+#ifndef DUNE_SKETCHER_ONLY
     m_view_options_menu->append("Previous construction entities", "win.previous_construction");
     m_view_options_menu->append("Hide irrelevant workplanes", "win.irrelevant_workplanes");
     m_view_options_menu->append("Perspective projection", "win.perspective");
+#endif
     {
         auto it = Gio::MenuItem::create("scale", "scale");
         it->set_attribute_value("custom", Glib::Variant<Glib::ustring>::create("scale"));
@@ -276,8 +314,9 @@ Gtk::Button &Editor::create_action_bar_button(ActionToolID action)
             {ToolID::DRAW_CIRCLE_2D, "action-draw-line-circle-symbolic"},
             {ToolID::DRAW_RECTANGLE, "action-draw-line-rectangle-symbolic"},
             {ToolID::DRAW_REGULAR_POLYGON, "action-draw-line-regular-polygon-symbolic"},
-            {ToolID::DRAW_WORKPLANE, "action-draw-workplane-symbolic"},
             {ToolID::DRAW_TEXT, "action-draw-text-symbolic"},
+            {ActionID::EXPORT_PATHS, "document-save-as-symbolic"},
+            {ActionID::EXPORT_DXF_CURRENT_GROUP, "document-save-symbolic"},
     };
     auto bu = Gtk::make_managed<Gtk::Button>();
     auto img = Gtk::make_managed<Gtk::Image>();
@@ -285,10 +324,14 @@ Gtk::Button &Editor::create_action_bar_button(ActionToolID action)
         img->set_from_icon_name(action_icons.at(action));
     else
         img->set_from_icon_name("face-worried-symbolic");
-    img->set_icon_size(Gtk::IconSize::LARGE);
+    img->set_icon_size(Gtk::IconSize::NORMAL);
     bu->set_child(*img);
+#ifdef DUNE_SKETCHER_ONLY
+    bu->set_has_frame(true);
+#else
     bu->add_css_class("osd");
     bu->add_css_class("action-button");
+#endif
     bu->signal_clicked().connect([this, action] {
         if (force_end_tool())
             trigger_action(action);
@@ -762,6 +805,9 @@ void Editor::open_context_menu(ContextMenuMode mode)
 
 void Editor::init_properties_notebook()
 {
+#ifdef DUNE_SKETCHER_ONLY
+    return;
+#endif
     m_properties_notebook = Gtk::make_managed<Gtk::Notebook>();
     m_properties_notebook->set_show_border(false);
     m_properties_notebook->set_tab_pos(Gtk::PositionType::BOTTOM);
@@ -822,6 +868,8 @@ void Editor::init_properties_notebook()
 
 void Editor::update_selection_editor()
 {
+    if (!m_selection_editor)
+        return;
     if (get_canvas().get_selection_mode() == SelectionMode::HOVER)
         m_selection_editor->set_selection({});
     else
@@ -837,6 +885,13 @@ void Editor::init_header_bar()
     attach_action_button(m_win.get_save_as_button(), ActionID::SAVE_AS);
 
     {
+#ifdef DUNE_SKETCHER_ONLY
+        if (auto sidebar_button = m_win.get_sidebar_floating_button()) {
+            m_win.get_header_bar().pack_start(*sidebar_button);
+            auto sep = Gtk::make_managed<Gtk::Separator>(Gtk::Orientation::VERTICAL);
+            m_win.get_header_bar().pack_start(*sep);
+        }
+#endif
         auto undo_redo_box = Gtk::manage(new Gtk::Box(Gtk::Orientation::HORIZONTAL, 0));
         undo_redo_box->add_css_class("linked");
 
@@ -851,6 +906,12 @@ void Editor::init_header_bar()
         undo_redo_box->append(*redo_button);
 
         m_win.get_header_bar().pack_start(*undo_redo_box);
+#ifdef DUNE_SKETCHER_ONLY
+        auto sep = Gtk::make_managed<Gtk::Separator>(Gtk::Orientation::VERTICAL);
+        m_win.get_header_bar().pack_start(*sep);
+        if (auto header_action_box = m_win.get_header_action_box())
+            m_win.get_header_bar().pack_start(*header_action_box);
+#endif
     }
 
     {
@@ -898,6 +959,40 @@ void Editor::update_view_hints()
 
 void Editor::on_open_document(const ActionConnection &conn)
 {
+#ifdef DUNE_SKETCHER_ONLY
+    if (m_sidebar_popover)
+        m_sidebar_popover->popdown();
+    auto dialog = Gtk::FileDialog::create();
+
+    auto filters = Gio::ListStore<Gtk::FileFilter>::create();
+    auto filter_any = Gtk::FileFilter::create();
+    filter_any->set_name("Sketch files");
+    filter_any->add_pattern("*.dxf");
+    filter_any->add_pattern("*.DXF");
+    filter_any->add_pattern("*.svg");
+    filter_any->add_pattern("*.SVG");
+    filters->append(filter_any);
+    dialog->set_filters(filters);
+
+    dialog->open_multiple(m_win, [this, dialog](const Glib::RefPtr<Gio::AsyncResult> &result) {
+        try {
+            auto files = dialog->open_multiple_finish(result);
+            for (const auto &file : files) {
+                if (!file)
+                    continue;
+                open_file(path_from_string(file->get_path()));
+            }
+            m_workspace_browser->update_documents(get_current_document_views());
+        }
+        catch (const Gtk::DialogError &err) {
+            std::cout << "No file selected. " << err.what() << std::endl;
+        }
+        catch (const Glib::Error &err) {
+            std::cout << "Unexpected exception. " << err.what() << std::endl;
+        }
+    });
+    return;
+#else
     auto dialog = Gtk::FileDialog::create();
     if (m_core.has_documents()) {
         if (m_core.get_current_idocument_info().has_path()) {
@@ -910,8 +1005,16 @@ void Editor::on_open_document(const ActionConnection &conn)
     auto filters = Gio::ListStore<Gtk::FileFilter>::create();
 
     auto filter_any = Gtk::FileFilter::create();
+#ifdef DUNE_SKETCHER_ONLY
+    filter_any->set_name("Sketch files");
+    filter_any->add_pattern("*.dxf");
+    filter_any->add_pattern("*.DXF");
+    filter_any->add_pattern("*.svg");
+    filter_any->add_pattern("*.SVG");
+#else
     filter_any->set_name("Dune 3D documents");
     filter_any->add_pattern("*.d3ddoc");
+#endif
     filters->append(filter_any);
 
     dialog->set_filters(filters);
@@ -920,7 +1023,7 @@ void Editor::on_open_document(const ActionConnection &conn)
     dialog->open(m_win, [this, dialog](const Glib::RefPtr<Gio::AsyncResult> &result) {
         try {
             auto file = dialog->open_finish(result);
-            m_win.open_file_view(file);
+            open_file(path_from_string(file->get_path()));
             // Notice that this is a std::string, not a Glib::ustring.
             auto filename = file->get_path();
             std::cout << "File selected: " << filename << std::endl;
@@ -933,11 +1036,120 @@ void Editor::on_open_document(const ActionConnection &conn)
             std::cout << "Unexpected exception. " << err.what() << std::endl;
         }
     });
+#endif
+}
+
+void Editor::on_open_folder()
+{
+#ifdef DUNE_SKETCHER_ONLY
+    if (m_sidebar_popover)
+        m_sidebar_popover->popdown();
+    auto dialog = Gtk::FileDialog::create();
+    dialog->select_folder(m_win, [this, dialog](const Glib::RefPtr<Gio::AsyncResult> &result) {
+        try {
+            auto folder = dialog->select_folder_finish(result);
+            auto folder_path = path_from_string(folder->get_path());
+            std::vector<std::filesystem::path> dxf_files;
+            for (const auto &entry : std::filesystem::directory_iterator(folder_path)) {
+                if (!entry.is_regular_file())
+                    continue;
+                auto ext = entry.path().extension().string();
+                std::transform(ext.begin(), ext.end(), ext.begin(),
+                               [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+                if (ext == ".dxf")
+                    dxf_files.push_back(entry.path());
+            }
+            std::sort(dxf_files.begin(), dxf_files.end());
+
+            trigger_action(ActionID::NEW_DOCUMENT);
+            if (m_core.tool_is_active())
+                force_end_tool();
+            m_group_export_paths.clear();
+            m_sketcher_folder_path = folder_path;
+
+            m_workspace_browser->set_sketcher_folder_mode(path_to_string(folder_path.filename()));
+            m_sketcher_opening_folder_batch = true;
+            for (const auto &path : dxf_files)
+                open_file(path);
+            m_sketcher_opening_folder_batch = false;
+            m_workspace_browser->update_documents(get_current_document_views());
+        }
+        catch (const Gtk::DialogError &err) {
+            std::cout << "No folder selected. " << err.what() << std::endl;
+        }
+        catch (const Glib::Error &err) {
+            std::cout << "Unexpected exception. " << err.what() << std::endl;
+        }
+    });
+#endif
 }
 
 
 void Editor::on_save_as(const ActionConnection &conn)
 {
+#ifdef DUNE_SKETCHER_ONLY
+    if (m_sidebar_popover)
+        m_sidebar_popover->popdown();
+    auto dialog = Gtk::FileDialog::create();
+    if (auto group_path = get_group_export_path(m_core.get_current_group())) {
+        dialog->set_initial_file(Gio::File::create_for_path(path_to_string(*group_path)));
+    }
+    else if (m_core.get_current_idocument_info().has_path()) {
+        dialog->set_initial_file(
+                Gio::File::create_for_path(path_to_string(m_core.get_current_idocument_info().get_path())));
+    }
+
+    auto filters = Gio::ListStore<Gtk::FileFilter>::create();
+    auto filter_dxf = Gtk::FileFilter::create();
+    filter_dxf->set_name("DXF");
+    filter_dxf->add_pattern("*.dxf");
+    filter_dxf->add_pattern("*.DXF");
+    filters->append(filter_dxf);
+    auto filter_svg = Gtk::FileFilter::create();
+    filter_svg->set_name("SVG");
+    filter_svg->add_pattern("*.svg");
+    filter_svg->add_pattern("*.SVG");
+    filters->append(filter_svg);
+    dialog->set_filters(filters);
+
+    dialog->save(m_win, [this, dialog](const Glib::RefPtr<Gio::AsyncResult> &result) {
+        try {
+            auto file = dialog->save_finish(result);
+            auto filename = path_from_string(file->get_path());
+            auto ext = filename.extension().string();
+            bool save_svg = (ext == ".svg" || ext == ".SVG");
+            if (!save_svg && ext != ".dxf" && ext != ".DXF")
+                filename = path_from_string(append_suffix_if_required(file->get_path(), ".dxf"));
+
+            if (save_svg) {
+                auto group_filter = [this](const Group &group) { return group.m_uuid == m_core.get_current_group(); };
+                export_paths(filename, m_core.get_current_document(), m_core.get_current_group(), group_filter);
+            }
+            else {
+                export_dxf(filename, m_core.get_current_document(), m_core.get_current_group());
+            }
+            auto &group = m_core.get_current_document().get_group(m_core.get_current_group());
+            group.m_name = path_to_string(filename.filename());
+            set_group_export_path(group.m_uuid, filename);
+            m_core.set_current_document_path(filename);
+            m_core.clear_needs_save();
+            m_win.get_app().add_recent_item(filename);
+            save_workspace_view(m_core.get_current_idocument_info().get_uuid());
+            m_workspace_browser->update_documents(get_current_document_views());
+            update_version_info();
+            update_title();
+            if (m_after_save_cb)
+                m_after_save_cb();
+            m_after_save_cb = nullptr;
+        }
+        catch (const Gtk::DialogError &err) {
+            std::cout << "No file selected. " << err.what() << std::endl;
+        }
+        catch (const Glib::Error &err) {
+            std::cout << "Unexpected exception. " << err.what() << std::endl;
+        }
+    });
+#else
     auto dialog = Gtk::FileDialog::create();
     if (m_core.get_current_idocument_info().has_path()) {
         dialog->set_initial_file(
@@ -980,6 +1192,7 @@ void Editor::on_save_as(const ActionConnection &conn)
             std::cout << "Unexpected exception. " << err.what() << std::endl;
         }
     });
+#endif
 }
 
 
@@ -1029,6 +1242,10 @@ const Canvas &Editor::get_canvas() const
 void Editor::show_save_dialog(const std::string &doc_name, std::function<void()> save_cb,
                               std::function<void()> no_save_cb)
 {
+#ifdef DUNE_SKETCHER_ONLY
+    if (m_sidebar_popover)
+        m_sidebar_popover->popdown();
+#endif
     auto dialog = Gtk::AlertDialog::create("Save changes to document \"" + doc_name + "\" before closing?");
     dialog->set_detail(
             "If you don't save, all your changes will be permanently "
@@ -1083,6 +1300,8 @@ void Editor::do_close_document(const UUID &doc_uu)
 
 void Editor::update_group_editor()
 {
+    if (!m_group_editor_box)
+        return;
     if (m_group_editor) {
         if (m_delayed_commit_connection.connected()) {
             commit_from_editor();
@@ -1109,8 +1328,10 @@ void Editor::handle_commit_from_editor(CommitMode mode)
                     return false;
                 },
                 1000);
-        m_group_commit_pending_revealer->set_reveal_child(true);
-        m_selection_commit_pending_revealer->set_reveal_child(true);
+        if (m_group_commit_pending_revealer)
+            m_group_commit_pending_revealer->set_reveal_child(true);
+        if (m_selection_commit_pending_revealer)
+            m_selection_commit_pending_revealer->set_reveal_child(true);
     }
     else if (mode == CommitMode::IMMEDIATE
              || (mode == CommitMode::EXECUTE_DELAYED && m_delayed_commit_connection.connected())) {
@@ -1123,8 +1344,10 @@ void Editor::handle_commit_from_editor(CommitMode mode)
 void Editor::commit_from_editor()
 {
     m_delayed_commit_connection.disconnect();
-    m_group_commit_pending_revealer->set_reveal_child(false);
-    m_selection_commit_pending_revealer->set_reveal_child(false);
+    if (m_group_commit_pending_revealer)
+        m_group_commit_pending_revealer->set_reveal_child(false);
+    if (m_selection_commit_pending_revealer)
+        m_selection_commit_pending_revealer->set_reveal_child(false);
     m_core.rebuild("group/selection edited");
 }
 
@@ -1527,8 +1750,142 @@ bool Editor::has_file(const std::filesystem::path &path)
     return m_core.get_idocument_info_by_path(path);
 }
 
+std::optional<std::filesystem::path> Editor::get_group_export_path(const UUID &group) const
+{
+    if (!m_group_export_paths.contains(group))
+        return {};
+    return m_group_export_paths.at(group);
+}
+
+void Editor::set_group_export_path(const UUID &group, const std::filesystem::path &path)
+{
+    m_group_export_paths[group] = normalize_group_path(path);
+}
+
 void Editor::open_file(const std::filesystem::path &path)
 {
+#ifdef DUNE_SKETCHER_ONLY
+    auto ext = path.extension().string();
+    std::transform(ext.begin(), ext.end(), ext.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    if (ext == ".dxf" || ext == ".svg") {
+        CanvasUpdater canvas_updater{*this};
+        if (ext == ".svg") {
+            m_workspace_browser->show_toast("SVG import isn't implemented yet. Please open DXF.");
+            return;
+        }
+
+        if (!m_core.has_documents())
+            trigger_action(ActionID::NEW_DOCUMENT);
+        if (m_core.tool_is_active())
+            force_end_tool();
+
+        auto &doc = m_core.get_current_document();
+        const auto normalized_path = normalize_group_path(path);
+        const auto imported_group_name = path_to_string(path.filename());
+        const auto group_has_user_entities = [&doc](const UUID &group_uuid) {
+            for (const auto &[uu, en] : doc.m_entities) {
+                if (en->m_group == group_uuid && en->m_kind == ItemKind::USER)
+                    return true;
+            }
+            return false;
+        };
+        for (auto gr : doc.get_groups_sorted()) {
+            auto sketch = dynamic_cast<const GroupSketch *>(gr);
+            if (!sketch)
+                continue;
+
+            bool is_duplicate = false;
+            if (auto it = m_group_export_paths.find(gr->m_uuid); it != m_group_export_paths.end()) {
+                is_duplicate = (normalize_group_path(it->second) == normalized_path);
+            }
+            else if (gr->m_name == imported_group_name && group_has_user_entities(gr->m_uuid)) {
+                is_duplicate = true;
+            }
+            if (!is_duplicate)
+                continue;
+
+            set_current_group(gr->m_uuid);
+            m_core.set_current_document_path(normalized_path);
+            set_group_export_path(gr->m_uuid, normalized_path);
+            m_win.get_app().add_recent_item(path);
+            m_workspace_browser->show_toast("File already imported: switched to existing sketch");
+            update_title();
+            return;
+        }
+
+        auto group_uu = m_core.get_current_group();
+        auto &current_group = doc.get_group(group_uu);
+
+        bool current_group_is_empty = true;
+        current_group_is_empty = !group_has_user_entities(group_uu);
+
+        if (!current_group_is_empty) {
+            auto &new_group = doc.insert_group<GroupSketch>(UUID::random(), current_group.m_uuid);
+            new_group.m_name = doc.find_next_group_name(Group::Type::SKETCH);
+            if (current_group.m_active_wrkpl) {
+                new_group.m_active_wrkpl = current_group.m_active_wrkpl;
+            }
+            else {
+                for (auto gr : doc.get_groups_sorted()) {
+                    if (auto ref = dynamic_cast<const GroupReference *>(gr)) {
+                        new_group.m_active_wrkpl = ref->get_workplane_xy_uuid();
+                        break;
+                    }
+                }
+            }
+            doc.set_group_generate_pending(new_group.m_uuid);
+            m_core.rebuild("add group");
+            set_current_group(new_group.m_uuid);
+            group_uu = new_group.m_uuid;
+        }
+
+        auto wrkpl_uu = m_core.get_current_workplane();
+        if (!wrkpl_uu) {
+            m_workspace_browser->show_toast("Couldn't import DXF: no active workplane");
+            return;
+        }
+
+        DXFImporter importer(doc, group_uu, wrkpl_uu);
+        if (!importer.import(path)) {
+            m_workspace_browser->show_toast("Couldn't import DXF");
+            return;
+        }
+
+        auto export_path = normalized_path;
+        if (m_sketcher_folder_path.has_value() && !m_sketcher_opening_folder_batch)
+            export_path = normalize_group_path(*m_sketcher_folder_path / path.filename());
+
+        doc.get_group(group_uu).m_name = imported_group_name;
+        set_group_export_path(group_uu, export_path);
+        bool export_written = true;
+        if (m_sketcher_folder_path.has_value() && !m_sketcher_opening_folder_batch) {
+            try {
+                export_dxf(export_path, m_core.get_current_document(), group_uu);
+            }
+            catch (...) {
+                export_written = false;
+                m_workspace_browser->show_toast("Couldn't write imported file to folder");
+            }
+        }
+        doc.set_group_generate_pending(group_uu);
+        m_core.rebuild("import dxf");
+        set_current_group(group_uu);
+        m_core.set_current_document_path(export_path);
+        if (export_written)
+            m_core.clear_needs_save();
+        else
+            m_core.set_needs_save();
+        m_win.get_app().add_recent_item(path);
+        save_workspace_view(m_core.get_current_idocument_info().get_uuid());
+        m_workspace_browser->update_documents(get_current_document_views());
+        update_version_info();
+        update_title();
+        add_to_recent_docs(path);
+        return;
+    }
+#endif
+
     if (has_file(path))
         return;
     for (auto win : m_win.get_app().get_windows()) {
@@ -1637,11 +1994,13 @@ void Editor::set_current_group(const UUID &uu_group)
     m_core.set_current_group(uu_group);
     m_workspace_browser->update_current_group(get_current_document_views());
     update_workplane_label();
-    m_constraints_box->update();
+    if (m_constraints_box)
+        m_constraints_box->update();
     update_group_editor();
     update_action_sensitivity();
     update_action_bar_buttons_sensitivity();
     update_selection_editor();
+    update_title();
 }
 
 void Editor::tool_bar_set_tool_tip(const std::string &s)
@@ -1689,11 +2048,16 @@ WorkspaceView &Editor::get_current_workspace_view()
 void Editor::update_title()
 {
     if (m_core.has_documents()) {
+#ifdef DUNE_SKETCHER_ONLY
+        const auto &group = m_core.get_current_document().get_group(m_core.get_current_group());
+        m_win.set_window_title(group.m_name);
+#else
         auto &doc = m_core.get_current_idocument_info();
         if (doc.has_path())
             m_win.set_window_title_from_path(doc.get_path());
         else
             m_win.set_window_title("New Document");
+#endif
     }
     else {
         m_win.set_window_title("");

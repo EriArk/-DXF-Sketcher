@@ -79,6 +79,9 @@ public:
     ~Editor();
 
 private:
+    std::optional<std::filesystem::path> get_group_export_path(const UUID &group) const;
+    void set_group_export_path(const UUID &group, const std::filesystem::path &path);
+
     void init_workspace_browser();
     void init_properties_notebook();
     void init_header_bar();
@@ -90,7 +93,7 @@ private:
     void on_workspace_browser_group_selected(const UUID &uu_doc, const UUID &uu_group);
     void on_add_group(Group::Type group_type, WorkspaceBrowserAddGroupMode add_group_mode);
     void finish_add_group(Group *new_group);
-    void on_delete_current_group();
+    void on_delete_current_group(bool delete_file_too = false);
     void on_move_group(Document::MoveGroup op);
     void on_workspace_browser_document_checked(const UUID &uu_doc, bool checked);
     void on_workspace_browser_group_checked(const UUID &uu_doc, const UUID &uu_group, bool checked);
@@ -110,6 +113,7 @@ private:
     void on_export_paths(const ActionConnection &conn);
     void on_export_projection(const ActionConnection &conn);
     void on_open_document(const ActionConnection &conn);
+    void on_open_folder();
     void on_save_as(const ActionConnection &conn);
     void on_create_group_action(const ActionConnection &conn);
     void on_move_group_action(const ActionConnection &conn);
@@ -221,6 +225,10 @@ private:
     ToolPopover *m_tool_popover = nullptr;
 
     WorkspaceBrowser *m_workspace_browser = nullptr;
+    Gtk::Revealer *m_workspace_browser_revealer = nullptr;
+    Gtk::Popover *m_sidebar_popover = nullptr;
+    void set_sidebar_visible(bool visible);
+    void toggle_sidebar_visibility();
 
     void update_workplane_label();
     void update_selection_mode_label();
@@ -310,5 +318,8 @@ private:
 
     void update_title();
     UUID m_update_groups_after;
+    std::map<UUID, std::filesystem::path> m_group_export_paths;
+    bool m_sketcher_opening_folder_batch = false;
+    std::optional<std::filesystem::path> m_sketcher_folder_path;
 };
 } // namespace dune3d

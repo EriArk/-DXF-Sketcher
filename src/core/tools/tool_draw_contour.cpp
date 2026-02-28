@@ -982,6 +982,15 @@ void ToolDrawContour::update_tip()
 
     std::string tip;
 
+    if (m_constrain) {
+        tip += "auto: coincident";
+        if (m_temp_line && m_constrain_hv)
+            tip += ", h/v";
+        if ((m_last_tangent_point && m_constrain_tangent) || (m_has_tangent_head && m_constrain_tangent_head))
+            tip += ", tangent";
+        tip += "  ";
+    }
+
     if (!m_tangent_valid) {
         tip += "invalid tangent ";
     }

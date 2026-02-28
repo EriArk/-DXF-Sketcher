@@ -180,8 +180,13 @@ void Canvas::setup_controllers()
                     if (source == Gdk::InputSource::TRACKPOINT || source == Gdk::InputSource::TOUCHPAD) {
                         if ((state & Gdk::ModifierType::CONTROL_MASK) == Gdk::ModifierType::CONTROL_MASK)
                             scroll_zoom(x, y, *controller);
-                        else if ((state & Gdk::ModifierType::SHIFT_MASK) == Gdk::ModifierType::SHIFT_MASK)
+                        else if ((state & Gdk::ModifierType::SHIFT_MASK) == Gdk::ModifierType::SHIFT_MASK) {
+#ifdef DUNE_SKETCHER_ONLY
+                            scroll_move(x, y, *controller);
+#else
                             scroll_rotate(x, y, *controller);
+#endif
+                        }
                         else
                             scroll_move(x, y, *controller);
                         return GDK_EVENT_STOP;
@@ -208,11 +213,13 @@ void Canvas::setup_controllers()
     m_gesture_zoom->set_propagation_phase(Gtk::PropagationPhase::CAPTURE);
     add_controller(m_gesture_zoom);
 
+#ifndef DUNE_SKETCHER_ONLY
     m_gesture_rotate = Gtk::GestureRotate::create();
     m_gesture_rotate->signal_begin().connect(sigc::mem_fun(*this, &Canvas::rotate_gesture_begin_cb));
     m_gesture_rotate->signal_update().connect(sigc::mem_fun(*this, &Canvas::rotate_gesture_update_cb));
     m_gesture_rotate->set_propagation_phase(Gtk::PropagationPhase::CAPTURE);
     add_controller(m_gesture_rotate);
+#endif
 
     {
         auto controller = Gtk::GestureClick::create();
@@ -252,12 +259,18 @@ void Canvas::setup_controllers()
         auto controller = Gtk::GestureClick::create();
         controller->set_button(0);
         controller->signal_pressed().connect([this, controller](int n_press, double x, double y) {
+#ifndef DUNE_SKETCHER_ONLY
             const auto shift = static_cast<bool>(controller->get_current_event_state() & Gdk::ModifierType::SHIFT_MASK);
             const auto ctrl =
                     static_cast<bool>(controller->get_current_event_state() & Gdk::ModifierType::CONTROL_MASK);
+#endif
             const auto button = controller->get_current_button();
             if (button == 2 || button == 3) {
                 m_pointer_pos_orig = {x, y};
+#ifdef DUNE_SKETCHER_ONLY
+                m_pan_mode = PanMode::MOVE;
+                m_center_orig = m_center;
+#else
                 if (button == 3 && ctrl) {
                     m_pan_mode = PanMode::TILT;
                     m_cam_quat_orig = m_cam_quat;
@@ -270,6 +283,7 @@ void Canvas::setup_controllers()
                     m_pan_mode = PanMode::MOVE;
                     m_center_orig = m_center;
                 }
+#endif
             }
         });
         controller->signal_released().connect([this](int n_press, double x, double y) { end_pan(); });
@@ -558,7 +572,11 @@ void Canvas::rotate_gesture_update_cb(Gdk::EventSequence *seq)
 
 void Canvas::set_cam_quat(const glm::quat &q)
 {
+#ifdef DUNE_SKETCHER_ONLY
+    m_cam_quat = glm::quat_identity<float, glm::defaultp>();
+#else
     m_cam_quat = glm::normalize(q);
+#endif
     queue_draw();
     m_signal_view_changed.emit();
 }

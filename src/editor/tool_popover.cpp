@@ -202,6 +202,10 @@ ToolPopover::ToolPopover() : Gtk::Popover()
     m_group_store = GroupItemListModel::create();
 
     for (const auto &[id, it] : action_catalog) {
+#ifdef DUNE_SKETCHER_ONLY
+        if (!(it.group == ActionGroup::DRAW || it.group == ActionGroup::CONSTRAIN || it.group == ActionGroup::MEASURE))
+            continue;
+#endif
         if (!(it.flags & ActionCatalogItem::FLAGS_NO_POPOVER)) {
             auto mi = ActionItem::create();
             mi->m_id = id;

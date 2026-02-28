@@ -7,6 +7,7 @@
 #include "util/util.hpp"
 #include "util/gtk_util.hpp"
 #include <format>
+#include <glibmm.h>
 
 namespace dune3d {
 
@@ -216,15 +217,25 @@ void Editor::save_workspace_view(const UUID &doc_uu)
         return;
 
     json j = {{"workspace_views", wsvs}};
-    save_json_to_file(get_workspace_filename_from_document_filename(doci.get_path()), j);
+    const auto workspace_filename = get_workspace_filename_from_document_filename(doci.get_path());
+    std::filesystem::create_directories(workspace_filename.parent_path());
+    save_json_to_file(workspace_filename, j);
 }
 
 std::filesystem::path Editor::get_workspace_filename_from_document_filename(const std::filesystem::path &path)
 {
+#ifdef DUNE_SKETCHER_ONLY
+    const auto cache_dir = std::filesystem::path(Glib::get_user_cache_dir()) / "dune3d-sketcher" / "workspaces";
+    const auto normalized_path = path.lexically_normal();
+    const auto hash = std::hash<std::string>{}(path_to_string(normalized_path));
+    const auto filename = std::format("{:016x}_{}.wrk", hash, path_to_string(path.filename()));
+    return cache_dir / path_from_string(filename);
+#else
     const auto dn = path.parent_path();
     auto fn = path_to_string(path.filename());
     auto wsn = fn.substr(0, fn.size() - 3);
     return dn / path_from_string(wsn + "wrk");
+#endif
 }
 
 } // namespace dune3d

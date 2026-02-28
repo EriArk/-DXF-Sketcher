@@ -6,6 +6,7 @@ project('dune3d', ['cpp', 'c'],
 
 cxx = meson.get_compiler('cpp')
 is_windows = target_machine.system() == 'windows'
+sketcher_only = get_option('sketcher_only')
 
 
 
@@ -21,23 +22,26 @@ png = dependency('libpng')
 libpython = dependency('python3', required: false, disabler:true)
 pybind11 = dependency('pybind11', required: false, disabler:true)
 
-opencascade = dependency('OpenCASCADE', method : 'cmake')
-if target_machine.system() == 'darwin'
-  message('meson\'s framework handling on macos with the cmake method is broken, replacing')
-  opencascade_link_args = []
-  brew = find_program('brew', required : false)
-  if brew.found()
-    brew_prefix_cmd = run_command('brew', '--prefix', check: true)
-    brew_prefix = brew_prefix_cmd.stdout().strip() + '/lib'
-    opencascade_link_args += ['-Wl,-L' + brew_prefix]
-  endif
-  if opencascade.version().version_compare('>=7.8')
-    opencascade_link_args += ['-lTKDESTEP', '-lTKernel', '-lTKXCAF', '-lTKXSBase', '-lTKBRep', '-lTKCDF', '-lTKLCAF', '-lTKMath', '-lTKMesh', '-lTKTopAlgo', '-lTKPrim', '-lTKBO', '-lTKShHealing', '-lTKG3d', '-lTKGeomBase', '-lTKHLR', '-lTKDESTL', '-lTKFillet', '-lTKOffset']
-  else
-    opencascade_link_args += ['-lTKSTEP', '-lTKernel', '-lTKXCAF', '-lTKXSBase', '-lTKBRep', '-lTKCDF', '-lTKXDESTEP', '-lTKLCAF', '-lTKMath', '-lTKMesh', '-lTKTopAlgo', '-lTKPrim', '-lTKBO', '-lTKShHealing', '-lTKG3d', '-lTKGeomBase', '-lTKHLR', '-lTKSTL', '-lTKFillet', '-lTKOffset']
-  endif
+opencascade = []
+if not sketcher_only
+  opencascade = dependency('OpenCASCADE', method : 'cmake')
+  if target_machine.system() == 'darwin'
+    message('meson\'s framework handling on macos with the cmake method is broken, replacing')
+    opencascade_link_args = []
+    brew = find_program('brew', required : false)
+    if brew.found()
+      brew_prefix_cmd = run_command('brew', '--prefix', check: true)
+      brew_prefix = brew_prefix_cmd.stdout().strip() + '/lib'
+      opencascade_link_args += ['-Wl,-L' + brew_prefix]
+    endif
+    if opencascade.version().version_compare('>=7.8')
+      opencascade_link_args += ['-lTKDESTEP', '-lTKernel', '-lTKXCAF', '-lTKXSBase', '-lTKBRep', '-lTKCDF', '-lTKLCAF', '-lTKMath', '-lTKMesh', '-lTKTopAlgo', '-lTKPrim', '-lTKBO', '-lTKShHealing', '-lTKG3d', '-lTKGeomBase', '-lTKHLR', '-lTKDESTL', '-lTKFillet', '-lTKOffset']
+    else
+      opencascade_link_args += ['-lTKSTEP', '-lTKernel', '-lTKXCAF', '-lTKXSBase', '-lTKBRep', '-lTKCDF', '-lTKXDESTEP', '-lTKLCAF', '-lTKMath', '-lTKMesh', '-lTKTopAlgo', '-lTKPrim', '-lTKBO', '-lTKShHealing', '-lTKG3d', '-lTKGeomBase', '-lTKHLR', '-lTKSTL', '-lTKFillet', '-lTKOffset']
+    endif
 
-  opencascade = declare_dependency(dependencies: opencascade.partial_dependency(compile_args: true, includes:true), link_args: opencascade_link_args)
+    opencascade = declare_dependency(dependencies: opencascade.partial_dependency(compile_args: true, includes:true), link_args: opencascade_link_args)
+  endif
 endif
 
 spnav = dependency('spnav', required: false)
@@ -98,18 +102,6 @@ src_common = files(
   'src/document/constraint/constraint_point_on_bezier.cpp',
   'src/document/constraint/constraint_bezier_bezier_same_curvature.cpp',
   'src/document/constraint/constraint_bezier_arc_same_curvature.cpp',
-  'src/document/solid_model/solid_model.cpp',
-  'src/document/solid_model/solid_model_export.cpp',
-  'src/document/solid_model/solid_model_occ.cpp',
-  'src/document/solid_model/solid_model_replicate.cpp',
-  'src/document/solid_model/solid_model_local_operation.cpp',
-  'src/document/solid_model/solid_model_circular_sweep.cpp',
-  'src/document/solid_model/solid_model_extrude.cpp',
-  'src/document/solid_model/solid_model_util.cpp',
-  'src/document/solid_model/solid_model_loft.cpp',
-  'src/document/solid_model/solid_model_sketch.cpp',
-  'src/document/solid_model/solid_model_solid_model_operation.cpp',
-  'src/document/solid_model/solid_model_pipe.cpp',
   'src/document/group/group.cpp',
   'src/document/group/igroup_solid_model.cpp',
   'src/document/group/group_sketch.cpp',
@@ -143,7 +135,6 @@ src_common = files(
   'src/util/glm_util.cpp',
   'src/logger/logger.cpp',
   'src/util/arc_util.cpp',
-  'src/import_step/step_importer.cpp',
   'src/import_step/step_import_manager.cpp',
   'src/util/cluster_content.cpp',
   'src/preferences/preferences.cpp',
@@ -158,8 +149,30 @@ src_common = files(
   'src/util/picture_load.cpp',
   'src/util/picture_util.cpp',
   'src/util/paths.cpp',
-  'src/util/step_exporter.cpp',
 )
+
+if sketcher_only
+  src_common += files(
+    'src/sketcher_only_stubs.cpp',
+  )
+else
+  src_common += files(
+    'src/document/solid_model/solid_model.cpp',
+    'src/document/solid_model/solid_model_export.cpp',
+    'src/document/solid_model/solid_model_occ.cpp',
+    'src/document/solid_model/solid_model_replicate.cpp',
+    'src/document/solid_model/solid_model_local_operation.cpp',
+    'src/document/solid_model/solid_model_circular_sweep.cpp',
+    'src/document/solid_model/solid_model_extrude.cpp',
+    'src/document/solid_model/solid_model_util.cpp',
+    'src/document/solid_model/solid_model_loft.cpp',
+    'src/document/solid_model/solid_model_sketch.cpp',
+    'src/document/solid_model/solid_model_solid_model_operation.cpp',
+    'src/document/solid_model/solid_model_pipe.cpp',
+    'src/import_step/step_importer.cpp',
+    'src/util/step_exporter.cpp',
+  )
+endif
 
 src_gui = files(
   'src/main.cpp',
@@ -376,6 +389,9 @@ resources = gnome.compile_resources(
 )
 
 cpp_args = ['-DLIBRARY', '-DUSINGZ', '-D_USE_MATH_DEFINES', '-DGLM_ENABLE_EXPERIMENTAL']
+if sketcher_only
+    cpp_args += '-DDUNE_SKETCHER_ONLY'
+endif
 
 if spnav.found()
     cpp_args += '-DHAVE_SPNAV'
@@ -393,7 +409,10 @@ if is_libstdcpp
     stdlibs += cxx.find_library('stdc++fs', required:false)
 endif
 
-build_dependencies = [gtk4, gtkmm, epoxy, opencascade, eigen, glm, stdlibs, spnav, harfbuzz, freetype, png, pthread]
+build_dependencies = [gtk4, gtkmm, epoxy, eigen, glm, stdlibs, spnav, harfbuzz, freetype, png, pthread]
+if not sketcher_only
+    build_dependencies += [opencascade]
+endif
 if not is_windows
 	uuid = dependency('uuid')
 	build_dependencies += uuid
