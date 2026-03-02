@@ -1,91 +1,76 @@
 # DXF Sketcher
 
-DXF Sketcher is a practical 2D CAD sketch editor focused on fast DXF workflows.
+DXF Sketcher — это 2D-редактор для DXF, заточенный под быструю и понятную повседневную работу.
 
-This project is a customized fork of [dune3d](https://github.com/dune3d/dune3d), with most 3D/solid-model complexity removed from daily UI in favor of a cleaner sketching experience.
+Проект сделан на базе [dune3d](https://github.com/dune3d/dune3d) и переработан в сторону более удобного DXF-скетчинга без лишней 3D-сложности в основном сценарии.
 
-Repository: <https://github.com/EriArk/-DXF-Sketcher>
+Репозиторий: <https://github.com/EriArk/-DXF-Sketcher>
 
-## What Changed In This Fork
+## Что это дает обычному пользователю
 
-### 1) Sketcher-only mode and simplified UX
+- Быстрый старт: открыл DXF и сразу редактируешь.
+- Папочный сценарий: можно открыть целую папку DXF за один шаг.
+- Понятное сохранение: `Save` сохраняет текущий скетч в привязанный файл, `Save As` экспортирует `DXF` или `SVG`.
+- Более прямое управление инструментами: меньше лишних действий в типовых задачах.
 
-- Added build option `-Dsketcher_only=true`.
-- In sketcher mode, 3D-oriented tools and OpenCASCADE/STEP paths are disabled/hidden.
-- Header/actions are redesigned around quick 2D operations.
-- Compact sidebar + popover interactions for common controls.
+## Два подхода работы (и можно сочетать оба)
 
-### 2) DXF-first file workflow
+В DXF Sketcher сохранен **параметрический подход**:
+- геометрия и ограничения (constraints) остаются основой точного редактирования;
+- размеры, зависимости и параметрическая логика никуда не исчезли.
 
-- `Open file` supports opening multiple files in one action.
-- `Open folder` imports all `*.dxf` files in the selected folder.
-- Each imported DXF becomes its own sketch group.
-- Duplicate imports are detected and redirected to the existing sketch.
-- In folder mode, imported sketches are mapped to files in that folder.
+И одновременно добавлен **более “объектный” стиль работы**, ближе к графическим редакторам:
+- быстрее выбирать, двигать и править то, что видишь на сцене;
+- больше прямых действий из интерфейса (toolbar/popover, локальные hotkeys, быстрые режимы инструментов).
 
-### 3) Save/export behavior aligned to sketch workflow
+Итог: пользователь сам выбирает, как работать в каждом моменте — строго параметрически, более свободно “как в графическом редакторе”, или смешанно.
 
-- `Save` writes the current sketch directly to its mapped file path.
-- `Save As` supports both `DXF` and `SVG` for the current sketch.
-- Group names are synced with file names after save/export.
+## Что изменено в этом форке
 
-### 4) Expanded drawing and editing tools
+### DXF-first workflow
 
-- Rectangle tool: center/corner mode, square mode, rounded corners, corner radius controls.
-- Circle tool: circle/oval mode, slice/sector mode, arc span controls.
-- Regular polygon tool: quick side count editing, rounded corners, corner radius controls.
-- Text tool: quick bold/italic toggles and font controls.
-- Picture import upgraded: supports raster images and SVG path conversion for sketch insertion.
+- `Open file` открывает сразу несколько файлов.
+- `Open folder` импортирует все `*.dxf` из выбранной папки.
+- Каждый импортированный DXF становится отдельным sketch group.
+- Повторный импорт уже открытого файла распознается, дубли не создаются.
 
-### 5) In-tool keyboard actions (new defaults + customization)
+### Упрощенный интерфейс для 2D
 
-- Added dedicated in-tool action keymap (for tool-local actions like mode/radius/span toggles).
-- Configurable from Preferences.
-- Help window now shows both:
-  - Main keys
-  - In-tool keys
+- Режим сборки `-Dsketcher_only=true` убирает 3D/solid-model шум из обычного потока.
+- Переработан верхний toolbar под частые 2D-задачи.
+- Быстрые popover-настройки для grid/symmetry и связанных инструментов.
+- Переключение видимости sidebar по `Tab`.
 
-Examples of default in-tool keys:
+### Инструменты, ускоряющие работу
 
-- Rectangle: `m` mode, `s` square, `r` rounded, `[` / `]` corner radius
-- Circle: `o` oval, `a` slice, `[` / `]` span
-- Polygon: `+` / `-` sides, `r` rounded, `[` / `]` corner radius
-- Text: `b` bold, `i` italic
+- Rectangle: corner/center, square mode, rounded corners, радиус скругления.
+- Circle: circle/oval, slice/sector, управление углом дуги.
+- Regular Polygon: быстрое изменение числа сторон, rounded corners.
+- Text: быстрые toggles для bold/italic и настройки шрифта.
+- Import Picture: вставка растров и SVG-путей в скетч.
 
-### 6) Sketcher UX additions
+### Горячие клавиши внутри инструментов
 
-- Header toolbar includes direct sketch tools (contour, rectangle, circle, polygon, text, picture import).
-- Grid quick controls (toggle, snap, spacing).
-- Symmetry quick controls (horizontal/vertical/radial with live settings).
-- Sidebar visibility toggle (`Tab`).
-- Updated branding, logo, icon, About/Help text.
+- Добавлена отдельная система **in-tool keybindings**.
+- Настраивается в Preferences.
+- В Help выводятся и основные шорткаты, и in-tool шорткаты.
 
-### 7) Workspace metadata handling
+## Быстрый старт
 
-In sketcher mode, workspace helper files are stored in user cache instead of project folders:
+1. Запустите DXF Sketcher.
+2. Нажмите `Open file` (один или несколько DXF) или `Open folder` (вся папка DXF).
+3. Отредактируйте активный скетч.
+4. Нажмите `Save` для сохранения в привязанный файл, либо `Save As` для DXF/SVG.
 
-- Cache path: `~/.cache/dune3d-sketcher/workspaces/`
-- Helper workspace files are cleaned on app shutdown (best effort).
+## Текущие ограничения
 
-## Quick Start
+- В режиме sketch-open редактируемый вход через `Open file` ориентирован на DXF.
+- Прямое открытие SVG как документа в этом потоке пока не реализовано.
+- SVG можно импортировать в скетч через `Import Picture`.
 
-1. Start DXF Sketcher.
-2. Use `Open file` to import one or more DXF files, or `Open folder` to load a full folder.
-3. Edit the active sketch.
-4. Use `Save` to write back to the mapped file, or `Save As` to export as DXF/SVG.
+## Сборка (для разработчиков)
 
-## Build
-
-### Dependencies
-
-Minimum toolchain:
-
-- `meson`
-- `ninja`
-- `gtk4` / `gtkmm-4.0`
-- standard C++20 compiler toolchain
-
-### Build sketcher-only (recommended for this fork)
+### Рекомендуемый режим этого форка
 
 ```bash
 meson setup build-sketcher -Dsketcher_only=true
@@ -93,7 +78,7 @@ meson compile -C build-sketcher
 ./build-sketcher/dune3d
 ```
 
-### Build full upstream-like mode
+### Полный режим (ближе к upstream)
 
 ```bash
 meson setup build
@@ -101,19 +86,33 @@ meson compile -C build
 ./build/dune3d
 ```
 
-Note: full mode requires OpenCASCADE/STEP-related dependencies.
+## Лицензия и используемые проекты
 
-## Current Limits
+### Лицензия проекта
 
-- `Open file` currently accepts DXF as editable sketch input.
-- Direct SVG document opening is not implemented in sketch-open flow.
-- SVG content can still be brought into a sketch via **Import Picture**.
+- DXF Sketcher распространяется под **GNU GPL v3.0** (см. [LICENSE](LICENSE)).
 
-## Credits
+### Сторонние компоненты в репозитории
 
-- Based on [dune3d/dune3d](https://github.com/dune3d/dune3d)
-- DXF Sketcher contributors
+По текущему содержимому `3rd_party/` используются, в частности:
 
-## License
+- **SolveSpace** — GPL (см. `3rd_party/solvespace/COPYING.txt`)
+- **dxflib** — GPL v2 or later / dual-licensed upstream (см. `3rd_party/dxflib/gpl-2.0greater.txt` и заголовки `3rd_party/dxflib/*.h`)
+- **Clipper2Lib** — Boost Software License 1.0 (см. заголовки `3rd_party/Clipper2Lib/include/clipper2/*.h`)
+- **nlohmann/json** — MIT (SPDX в `3rd_party/nlohmann/*.hpp`)
+- **NanoSVG** — permissive license (см. шапку `3rd_party/nanosvg.h`)
 
-GPL-3.0 (same as upstream, see [LICENSE](LICENSE)).
+Если вы распространяете сборки, сохраняйте лицензионные уведомления и attribution для этих компонентов.
+
+## Благодарности
+
+Проект основан на работе и идеях открытого сообщества:
+
+- [dune3d](https://github.com/dune3d/dune3d) — основа архитектуры и функциональности (Lukas K. и контрибьюторы)
+- [SolveSpace](https://github.com/solvespace/solvespace) — параметрическая CAD-база/наследие подхода
+- [dxflib](https://www.ribbonsoft.com/dxflib.html) — DXF parsing/writing foundation
+- [Clipper2](http://www.angusj.com/clipper2/Docs/Overview.htm) — геометрические операции
+- [nlohmann/json](https://github.com/nlohmann/json) — JSON-инфраструктура
+- [NanoSVG](https://github.com/memononen/nanosvg) — SVG parsing
+
+Отдельное спасибо всем контрибьюторам DXF Sketcher и upstream-проектов.
