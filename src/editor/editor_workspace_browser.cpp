@@ -22,6 +22,18 @@ using json = nlohmann::json;
 
 namespace {
 constexpr int sketch_sidebar_width = 252;
+
+bool can_popup_from_widget(Gtk::Widget *widget)
+{
+    if (!widget)
+        return false;
+    if (!widget->get_root() || !widget->get_mapped())
+        return false;
+    auto *native = gtk_widget_get_native(widget->gobj());
+    if (!native)
+        return false;
+    return gtk_native_get_surface(native) != nullptr;
+}
 }
 
 void Editor::init_workspace_browser()
@@ -51,7 +63,8 @@ void Editor::init_workspace_browser()
             Glib::signal_idle().connect_once([this] {
                 if (!m_sidebar_popover)
                     return;
-                m_sidebar_popover->popup();
+                if (can_popup_from_widget(m_sidebar_popover->get_parent()))
+                    m_sidebar_popover->popup();
             });
         });
     }
@@ -132,7 +145,15 @@ void Editor::set_sidebar_visible(bool visible)
     if (visible) {
         const auto max_height = std::max(220, static_cast<int>((m_win.get_height() - 120) * 0.8));
         m_sidebar_popover->set_size_request(sketch_sidebar_width, max_height);
-        m_sidebar_popover->popup();
+        if (can_popup_from_widget(m_sidebar_popover->get_parent()))
+            m_sidebar_popover->popup();
+        else
+            Glib::signal_idle().connect_once([this] {
+                if (!m_sidebar_popover)
+                    return;
+                if (can_popup_from_widget(m_sidebar_popover->get_parent()))
+                    m_sidebar_popover->popup();
+            });
     }
     else {
         if (auto open_popover = m_win.get_open_popover())

@@ -203,7 +203,8 @@ static HelpColumns build_help_columns(const Preferences &prefs)
 }
 } // namespace
 
-Dune3DApplication::Dune3DApplication() : Gtk::Application("org.dune3d.dune3d", Gio::Application::Flags::HANDLES_OPEN)
+Dune3DApplication::Dune3DApplication()
+    : Gtk::Application("io.github.eriark.dxfsketcher", Gio::Application::Flags::HANDLES_OPEN)
 {
 }
 
@@ -321,7 +322,7 @@ void Dune3DApplication::on_shutdown()
     m_user_config.save(get_user_config_filename());
 #ifdef DUNE_SKETCHER_ONLY
     try {
-        const auto cache_dir = std::filesystem::path(Glib::get_user_cache_dir()) / "dune3d-sketcher" / "workspaces";
+        const auto cache_dir = std::filesystem::path(Glib::get_user_cache_dir()) / "dxfsketcher" / "workspaces";
         std::filesystem::remove_all(cache_dir);
     }
     catch (...) {
@@ -477,6 +478,21 @@ void Dune3DApplication::UserConfig::load(const std::filesystem::path &filename)
             try {
                 if (std::filesystem::is_regular_file(path))
                     recent_items.emplace(path, Glib::DateTime::create_now_local(v.get<int64_t>()));
+                else if (std::filesystem::is_directory(path))
+                    recent_folders.emplace(path, Glib::DateTime::create_now_local(v.get<int64_t>()));
+            }
+            catch (...) {
+                // nop
+            }
+        }
+    }
+    if (j.count("recent_folders")) {
+        const json &o = j["recent_folders"];
+        for (const auto &[fn, v] : o.items()) {
+            auto path = path_from_string(fn);
+            try {
+                if (std::filesystem::is_directory(path))
+                    recent_folders.emplace(path, Glib::DateTime::create_now_local(v.get<int64_t>()));
             }
             catch (...) {
                 // nop
@@ -505,6 +521,9 @@ void Dune3DApplication::UserConfig::save(const std::filesystem::path &filename)
     for (const auto &[path, mod] : recent_items) {
         j["recent"][path_to_string(path)] = mod.to_unix();
     }
+    for (const auto &[path, mod] : recent_folders) {
+        j["recent_folders"][path_to_string(path)] = mod.to_unix();
+    }
     for (const auto &[k, it] : export_paths) {
         j["export_paths"][path_to_string(k.first)][k.second] = {
                 {"stl", it.stl},
@@ -518,7 +537,17 @@ void Dune3DApplication::UserConfig::save(const std::filesystem::path &filename)
 
 void Dune3DApplication::add_recent_item(const std::filesystem::path &path)
 {
+    if (std::filesystem::is_directory(path)) {
+        add_recent_folder(path);
+        return;
+    }
     m_user_config.recent_items[path] = Glib::DateTime::create_now_local();
+    m_signal_recent_items_changed.emit();
+}
+
+void Dune3DApplication::add_recent_folder(const std::filesystem::path &path)
+{
+    m_user_config.recent_folders[path] = Glib::DateTime::create_now_local();
     m_signal_recent_items_changed.emit();
 }
 

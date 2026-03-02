@@ -3579,31 +3579,7 @@ void Editor::on_open_folder()
     dialog->select_folder(m_win, [this, dialog](const Glib::RefPtr<Gio::AsyncResult> &result) {
         try {
             auto folder = dialog->select_folder_finish(result);
-            auto folder_path = path_from_string(folder->get_path());
-            std::vector<std::filesystem::path> dxf_files;
-            for (const auto &entry : std::filesystem::directory_iterator(folder_path)) {
-                if (!entry.is_regular_file())
-                    continue;
-                auto ext = entry.path().extension().string();
-                std::transform(ext.begin(), ext.end(), ext.begin(),
-                               [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-                if (ext == ".dxf")
-                    dxf_files.push_back(entry.path());
-            }
-            std::sort(dxf_files.begin(), dxf_files.end());
-
-            trigger_action(ActionID::NEW_DOCUMENT);
-            if (m_core.tool_is_active())
-                force_end_tool();
-            m_group_export_paths.clear();
-            m_sketcher_folder_path = folder_path;
-
-            m_workspace_browser->set_sketcher_folder_mode(path_to_string(folder_path.filename()));
-            m_sketcher_opening_folder_batch = true;
-            for (const auto &path : dxf_files)
-                open_file(path);
-            m_sketcher_opening_folder_batch = false;
-            m_workspace_browser->update_documents(get_current_document_views());
+            open_folder(path_from_string(folder->get_path()));
         }
         catch (const Gtk::DialogError &err) {
             std::cout << "No folder selected. " << err.what() << std::endl;
@@ -3612,6 +3588,44 @@ void Editor::on_open_folder()
             std::cout << "Unexpected exception. " << err.what() << std::endl;
         }
     });
+#endif
+}
+
+void Editor::open_folder(const std::filesystem::path &folder_path)
+{
+#ifdef DUNE_SKETCHER_ONLY
+    try {
+        std::vector<std::filesystem::path> dxf_files;
+        for (const auto &entry : std::filesystem::directory_iterator(folder_path)) {
+            if (!entry.is_regular_file())
+                continue;
+            auto ext = entry.path().extension().string();
+            std::transform(ext.begin(), ext.end(), ext.begin(),
+                           [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+            if (ext == ".dxf")
+                dxf_files.push_back(entry.path());
+        }
+        std::sort(dxf_files.begin(), dxf_files.end());
+
+        trigger_action(ActionID::NEW_DOCUMENT);
+        if (m_core.tool_is_active())
+            force_end_tool();
+        m_group_export_paths.clear();
+        m_sketcher_folder_path = folder_path;
+        m_win.get_app().add_recent_folder(folder_path);
+
+        m_workspace_browser->set_sketcher_folder_mode(path_to_string(folder_path.filename()));
+        m_sketcher_opening_folder_batch = true;
+        for (const auto &path : dxf_files)
+            open_file(path);
+        m_sketcher_opening_folder_batch = false;
+        m_workspace_browser->update_documents(get_current_document_views());
+    }
+    catch (...) {
+        m_workspace_browser->show_toast("Couldn't open folder");
+    }
+#else
+    (void)folder_path;
 #endif
 }
 

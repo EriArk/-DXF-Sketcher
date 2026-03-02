@@ -27,64 +27,81 @@ Dune3DAppWindow *Dune3DAppWindow::create(Dune3DApplication &app)
 
 Dune3DAppWindow::~Dune3DAppWindow() = default;
 
-static std::vector<std::pair<std::filesystem::path, Glib::DateTime>>
-recent_sort(const std::map<std::filesystem::path, Glib::DateTime> &recent_items)
-{
-    std::vector<std::pair<std::filesystem::path, Glib::DateTime>> recent_items_sorted;
+namespace {
+struct RecentEntry {
+    std::filesystem::path path;
+    Glib::DateTime time;
+    bool is_folder = false;
+};
 
-    recent_items_sorted.reserve(recent_items.size());
-    for (const auto &it : recent_items) {
-        recent_items_sorted.emplace_back(it.first, it.second);
+std::vector<RecentEntry> recent_sort(const Dune3DApplication::UserConfig &cfg)
+{
+    std::vector<RecentEntry> recent_items_sorted;
+
+    recent_items_sorted.reserve(cfg.recent_items.size() + cfg.recent_folders.size());
+    for (const auto &[path, time] : cfg.recent_items) {
+        recent_items_sorted.push_back({path, time, false});
+    }
+    for (const auto &[path, time] : cfg.recent_folders) {
+        recent_items_sorted.push_back({path, time, true});
     }
     std::sort(recent_items_sorted.begin(), recent_items_sorted.end(),
-              [](const auto &a, const auto &b) { return a.second.to_unix() > b.second.to_unix(); });
+              [](const auto &a, const auto &b) { return a.time.to_unix() > b.time.to_unix(); });
     return recent_items_sorted;
 }
+
+void erase_recent_item(Dune3DApplication::UserConfig &cfg, const RecentItemBox &box)
+{
+    if (box.m_is_folder)
+        cfg.recent_folders.erase(box.m_path);
+    else
+        cfg.recent_items.erase(box.m_path);
+}
+} // namespace
 
 static void update_recent_listbox(Gtk::ListBox &lb, Dune3DApplication &app)
 {
     while (auto child = lb.get_first_child())
         lb.remove(*child);
 
-    const auto recent_items_sorted = recent_sort(app.m_user_config.recent_items);
+    const auto recent_items_sorted = recent_sort(app.m_user_config);
 
-    for (const auto &[path, mtime] : recent_items_sorted) {
-        const auto name = path_to_string(path.filename());
-        auto box = Gtk::make_managed<RecentItemBox>(name, path, mtime);
+    for (const auto &it : recent_items_sorted) {
+        const auto name = path_to_string(it.path.filename());
+        auto box = Gtk::make_managed<RecentItemBox>(name, it.path, it.time, it.is_folder);
         lb.append(*box);
         box->show();
-        box->signal_remove().connect([box, &app] {
-            app.m_user_config.recent_items.erase(box->m_path);
-            // Glib::signal_idle().connect_once([this] { update_recent_items(); });
-        });
+        box->signal_remove().connect([box, &app] { erase_recent_item(app.m_user_config, *box); });
     }
 }
 
 static void update_recent_listbox_two_columns(Gtk::ListBox &lb, Dune3DApplication &app,
-                                              std::function<void(const std::filesystem::path &)> on_open)
+                                              std::function<void(const std::filesystem::path &, bool)> on_open)
 {
     while (auto child = lb.get_first_child())
         lb.remove(*child);
 
-    const auto recent_items_sorted = recent_sort(app.m_user_config.recent_items);
+    const auto recent_items_sorted = recent_sort(app.m_user_config);
 
     for (size_t i = 0; i < recent_items_sorted.size(); i += 2) {
         auto row_box = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 8);
         row_box->set_homogeneous(true);
 
         for (size_t j = 0; j < 2 && (i + j) < recent_items_sorted.size(); ++j) {
-            const auto &[path, mtime] = recent_items_sorted.at(i + j);
-            const auto name = path_to_string(path.filename());
+            const auto &it = recent_items_sorted.at(i + j);
+            const auto name = path_to_string(it.path.filename());
 
             auto button = Gtk::make_managed<Gtk::Button>();
             button->set_has_frame(false);
             button->add_css_class("flat");
             button->set_hexpand(true);
 
-            auto box = Gtk::make_managed<RecentItemBox>(name, path, mtime);
+            auto box = Gtk::make_managed<RecentItemBox>(name, it.path, it.time, it.is_folder);
             button->set_child(*box);
-            button->signal_clicked().connect([on_open, path] { on_open(path); });
-            box->signal_remove().connect([box, &app] { app.m_user_config.recent_items.erase(box->m_path); });
+            button->signal_clicked().connect([on_open, path = it.path, is_folder = it.is_folder] {
+                on_open(path, is_folder);
+            });
+            box->signal_remove().connect([box, &app] { erase_recent_item(app.m_user_config, *box); });
 
             row_box->append(*button);
         }
@@ -170,7 +187,10 @@ Dune3DAppWindow::Dune3DAppWindow(BaseObjectType *cobject, const Glib::RefPtr<Gtk
     m_open_recent_listbox->signal_row_activated().connect([this](Gtk::ListBoxRow *row) {
         auto &ch = dynamic_cast<RecentItemBox &>(*row->get_child());
         m_open_popover->popdown();
-        m_editor.open_file(ch.m_path);
+        if (ch.m_is_folder)
+            m_editor.open_folder(ch.m_path);
+        else
+            m_editor.open_file(ch.m_path);
     });
     m_open_popover->signal_show().connect([this] {
 #ifdef DUNE_SKETCHER_ONLY
@@ -314,7 +334,12 @@ Dune3DAppWindow::Dune3DAppWindow(BaseObjectType *cobject, const Glib::RefPtr<Gtk
     set_view_hints_label({});
 
     update_recent_listbox_two_columns(*m_welcome_recent_listbox, m_app,
-                                      [this](const std::filesystem::path &path) { m_editor.open_file(path); });
+                                      [this](const std::filesystem::path &path, bool is_folder) {
+                                          if (is_folder)
+                                              m_editor.open_folder(path);
+                                          else
+                                              m_editor.open_file(path);
+                                      });
     m_welcome_recent_search_entry->signal_changed().connect(
             [this] { update_recent_search(*m_welcome_recent_search_entry, *m_welcome_recent_listbox); });
 
@@ -445,7 +470,12 @@ void Dune3DAppWindow::set_welcome_box_visible(bool v)
     if (v) {
         m_welcome_recent_search_entry->set_text("");
         update_recent_listbox_two_columns(*m_welcome_recent_listbox, m_app,
-                                          [this](const std::filesystem::path &path) { m_editor.open_file(path); });
+                                          [this](const std::filesystem::path &path, bool is_folder) {
+                                              if (is_folder)
+                                                  m_editor.open_folder(path);
+                                              else
+                                                  m_editor.open_file(path);
+                                          });
     }
 
 #ifdef DUNE_SKETCHER_ONLY

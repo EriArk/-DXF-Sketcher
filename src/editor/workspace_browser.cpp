@@ -1157,7 +1157,7 @@ void WorkspaceBrowser::set_sketcher_open_controls(Gtk::Button &open_button, Gtk:
     open_menu_button.set_always_show_arrow(true);
     open_menu_button.set_has_frame(false);
     open_menu_button.add_css_class("flat");
-    open_menu_button.set_tooltip_text("Recent files");
+    open_menu_button.set_tooltip_text("Recent files and folders");
     open_menu_button.set_hexpand(true);
     auto open_icon = Gtk::make_managed<Gtk::Image>();
     open_icon->set_from_icon_name("document-open-symbolic");

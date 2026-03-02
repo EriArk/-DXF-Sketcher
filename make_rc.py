@@ -14,10 +14,10 @@ BEGIN
   BEGIN
     BLOCK "040904E4"
     BEGIN
-      VALUE "FileDescription", "Dune 3D"
-      VALUE "InternalName", "dune3d"
-      VALUE "OriginalFilename", "dune3d.exe"
-      VALUE "ProductName", "Dune 3D"
+      VALUE "FileDescription", "DXF Sketcher"
+      VALUE "InternalName", "dxfsketcher"
+      VALUE "OriginalFilename", "dxfsketcher.exe"
+      VALUE "ProductName", "DXF Sketcher"
       VALUE "ProductVersion", "$major.$minor.$micro"
     END
   END

@@ -468,14 +468,14 @@ else
 endif
 
 datadir = get_option('datadir')
-install_data('org.dune3d.dune3d.desktop', install_dir:datadir / 'applications')
-install_data('org.dune3d.dune3d.metainfo.xml', install_dir:datadir / 'metainfo')
+install_data('io.github.eriark.dxfsketcher.desktop', install_dir:datadir / 'applications')
+install_data('io.github.eriark.dxfsketcher.metainfo.xml', install_dir:datadir / 'metainfo')
 icondir = datadir / 'icons/hicolor'
 
-install_data('src/icons/scalable/apps/dune3d.svg', install_dir: icondir /  'scalable/apps', rename: 'org.dune3d.dune3d.svg')
+install_data('src/icons/scalable/apps/dxfsketcher.png', install_dir: icondir /  'scalable/apps')
 
 
-dune3d = executable('dune3d',
+dune3d = executable('dxfsketcher',
     [src_common, src_gui, resources,icon_texture, color_presets, rc_compiled],
     dependencies: [build_dependencies],
     link_with: [solvespace_nopic, clipper_nopic, dxflib_nopic] + extra_libraries,

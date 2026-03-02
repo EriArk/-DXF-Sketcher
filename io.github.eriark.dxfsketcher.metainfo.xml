@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.eriark.dxfsketcher</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-3.0+</project_license>
+  <name>DXF Sketcher</name>
+  <summary>Practical 2D DXF sketch editor</summary>
+  <developer_name>DXF Sketcher contributors</developer_name>
+
+  <description>
+    <p>DXF Sketcher is a practical 2D DXF editor focused on fast everyday sketch workflows.</p>
+    <p>It keeps parametric constraints and dimensions while also supporting direct object-style editing for quick operations.</p>
+  </description>
+
+  <launchable type="desktop-id">io.github.eriark.dxfsketcher.desktop</launchable>
+
+  <url type="homepage">https://github.com/EriArk/-DXF-Sketcher</url>
+  <url type="bugtracker">https://github.com/EriArk/-DXF-Sketcher/issues</url>
+  <url type="vcs-browser">https://github.com/EriArk/-DXF-Sketcher</url>
+
+  <supports>
+    <control>touch</control>
+  </supports>
+
+  <requires>
+    <control>pointing</control>
+    <control>keyboard</control>
+  </requires>
+
+  <provides>
+    <binary>dxfsketcher</binary>
+  </provides>
+
+  <content_rating type="oars-1.0"/>
+</component>

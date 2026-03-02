@@ -2,17 +2,17 @@
 
 shopt -s extglob
 
-app_dir="./dist/Dune 3D.app"
+app_dir="./dist/DXF Sketcher.app"
 bin_dir="$app_dir/Contents/MacOS"
 res_dir="$app_dir/Contents/Resources"
 lib_dir="$res_dir/lib"
 brew_prefix="$(brew --prefix)"
 
 mkdir -p "$bin_dir" "$lib_dir" "$res_dir/share/icons" "$res_dir/share/glib-2.0"
-cp build/dune3d "$bin_dir/dune3d-bin"
+cp build/dxfsketcher "$bin_dir/dxfsketcher-bin"
 cp Info.plist "$app_dir/Contents"
-cp macos-launcher.sh "$bin_dir/dune3d"
-chmod +x "$bin_dir/dune3d"
+cp macos-launcher.sh "$bin_dir/dxfsketcher"
+chmod +x "$bin_dir/dxfsketcher"
 cp src/icons/dune3d.icns "$res_dir"
 
 echo "APPL????" > "$app_dir/Contents/PkgInfo"
@@ -37,5 +37,5 @@ do
     echo "$item" >> "$loaders_dir.cache"
   fi
 done
-dylibbundler -of -b -x  "$bin_dir/dune3d-bin" -d "$lib_dir" -p @executable_path/../Resources/lib/
+dylibbundler -of -b -x  "$bin_dir/dxfsketcher-bin" -d "$lib_dir" -p @executable_path/../Resources/lib/
 codesign --force --deep --preserve-metadata=entitlements,requirements,flags,runtime --sign - "$app_dir"

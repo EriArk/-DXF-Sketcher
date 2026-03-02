@@ -225,7 +225,7 @@ void Editor::save_workspace_view(const UUID &doc_uu)
 std::filesystem::path Editor::get_workspace_filename_from_document_filename(const std::filesystem::path &path)
 {
 #ifdef DUNE_SKETCHER_ONLY
-    const auto cache_dir = std::filesystem::path(Glib::get_user_cache_dir()) / "dune3d-sketcher" / "workspaces";
+    const auto cache_dir = std::filesystem::path(Glib::get_user_cache_dir()) / "dxfsketcher" / "workspaces";
     const auto normalized_path = path.lexically_normal();
     const auto hash = std::hash<std::string>{}(path_to_string(normalized_path));
     const auto filename = std::format("{:016x}_{}.wrk", hash, path_to_string(path.filename()));

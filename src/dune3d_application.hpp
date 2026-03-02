@@ -23,6 +23,7 @@ public:
     }
 
     void add_recent_item(const std::filesystem::path &path);
+    void add_recent_folder(const std::filesystem::path &path);
     class UserConfig {
     private:
         friend Dune3DApplication;
@@ -32,6 +33,7 @@ public:
 
     public:
         std::map<std::filesystem::path, Glib::DateTime> recent_items;
+        std::map<std::filesystem::path, Glib::DateTime> recent_folders;
         bool sidebar_visible = true;
         struct ExportPaths {
             std::string step;

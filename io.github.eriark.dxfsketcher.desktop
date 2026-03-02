@@ -1,0 +1,9 @@
+[Desktop Entry]
+Name=DXF Sketcher
+Comment=Practical 2D DXF sketch editor
+Categories=Graphics;2DGraphics;Engineering;
+Type=Application
+Terminal=false
+Icon=dxfsketcher
+Exec=dxfsketcher %U
+StartupNotify=true

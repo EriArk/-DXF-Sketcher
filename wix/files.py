@@ -44,9 +44,9 @@ def directory(root, breadcrumb, level, exclude=[]):
 		file_ids[file_key] = 'component' + _id
 		wxs.write(indent(level)+ "<Component Id='component" + _id + "' Guid='" + str(uuid.uuid4()) + "' DiskId='1' Win64='$(var.Win64)'>\n")
 		wxs.write(indent(level + 1)+ "<File Id='file" + _id + "' Name='" + file + "' DiskId='1' Source='" + file_key + "' KeyPath='yes' />\n")
-		if file == 'dune3d.exe' :
+		if file == 'dxfsketcher.exe' :
 			wxs.write(f"""
-		   <ProgId Id='dune3d.d3ddoc' Description='Dune 3D Document'>
+		   <ProgId Id='dxfsketcher.d3ddoc' Description='DXF Sketcher Document'>
 			<Extension Id='d3ddoc'>
 			<Verb Id='open' Command='Open' TargetFile='file{_id}' Argument='"%1"' />
 		  </Extension>
@@ -98,7 +98,7 @@ def ComponentGroup(name, conditions, level):
 		del file_ids[key]
 
 # get directory containing the distribution files
-horizon_dist_dir = "../dist/dune3d"
+horizon_dist_dir = "../dist/dxfsketcher"
 
 
 with open('files.wxs', 'w', encoding='utf-8') as wxs:
@@ -109,9 +109,9 @@ with open('files.wxs', 'w', encoding='utf-8') as wxs:
 	wxs.write(indent(2) + "<!-- Step 1: Define the directory structure -->\n")
 	wxs.write(indent(2) + "<Directory Id='TARGETDIR' Name='SourceDir'>\n")
 	wxs.write(indent(3) + "<Directory Id='$(var.ProgramFilesFolder)' Name='PFiles'>\n")
-	wxs.write(indent(4) + "<Directory Id='INSTALLDIR' Name='Dune 3D'>\n")
+	wxs.write(indent(4) + "<Directory Id='INSTALLDIR' Name='DXF Sketcher'>\n")
 	print("start parsing files from " + horizon_dist_dir)
-	directory(horizon_dist_dir, 'dune3d', 5)
+	directory(horizon_dist_dir, 'dxfsketcher', 5)
 	print("found %d files" % len(file_ids.keys()))
 	wxs.write(indent(4) + "</Directory>\n")
 	wxs.write(indent(3) + "</Directory>\n")

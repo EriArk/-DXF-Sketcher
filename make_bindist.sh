@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-DISTDIR=dist/dune3d
+DISTDIR=dist/dxfsketcher
 rm -rf dist
 mkdir -p $DISTDIR
-cp build/dune3d.exe $DISTDIR
-strip $DISTDIR/dune3d.exe
+cp build/dxfsketcher.exe $DISTDIR
+strip $DISTDIR/dxfsketcher.exe
 LIBS=(
 	libwinpthread-1.dll\
 	libstdc++-6.dll\
@@ -127,5 +127,5 @@ cp /mingw64/share/glib-2.0/schemas/gschemas.compiled $DISTDIR/share/glib-2.0/sch
 git log -10 | unix2dos > dist/log.txt
 if [ "$1" != "-n" ]; then
 	cd dist
-	zip -r dune3d-$(date +%Y-%m-%d-%H%M).zip dune3d log.txt
+	zip -r dxfsketcher-$(date +%Y-%m-%d-%H%M).zip dxfsketcher log.txt
 fi

@@ -3,17 +3,23 @@
 #include "util/fs_util.hpp"
 
 namespace dune3d {
-RecentItemBox::RecentItemBox(const std::string &aname, const std::filesystem::path &pa, const Glib::DateTime &ti)
-    : Gtk::Box(Gtk::Orientation::VERTICAL, 6), m_path(pa), m_time(ti), m_name(aname)
+RecentItemBox::RecentItemBox(const std::string &aname, const std::filesystem::path &pa, const Glib::DateTime &ti,
+                             bool is_folder)
+    : Gtk::Box(Gtk::Orientation::VERTICAL, 6), m_path(pa), m_is_folder(is_folder), m_time(ti), m_name(aname)
 {
     set_margin(12);
     auto tbox = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 12);
     {
+        auto title_box = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 6);
+        auto icon = Gtk::make_managed<Gtk::Image>();
+        icon->set_from_icon_name(m_is_folder ? "folder-symbolic" : "text-x-generic-symbolic");
+        title_box->append(*icon);
         auto la = Gtk::make_managed<Gtk::Label>();
         la->set_markup("<b>" + Glib::Markup::escape_text(m_name) + "</b>");
         la->set_xalign(0);
-        la->set_hexpand(true);
-        tbox->append(*la);
+        title_box->append(*la);
+        title_box->set_hexpand(true);
+        tbox->append(*title_box);
     }
     {
         m_time_label = Gtk::make_managed<Gtk::Label>();
@@ -23,10 +29,11 @@ RecentItemBox::RecentItemBox(const std::string &aname, const std::filesystem::pa
     }
     append(*tbox);
     {
-        auto la = Gtk::make_managed<Gtk::Label>(path_to_string(m_path.parent_path()));
+        auto subtitle = m_is_folder ? path_to_string(m_path) : path_to_string(m_path.parent_path());
+        auto la = Gtk::make_managed<Gtk::Label>(subtitle);
         la->set_xalign(0);
         la->set_ellipsize(Pango::EllipsizeMode::START);
-        la->set_tooltip_text(path_to_string(m_path.parent_path()));
+        la->set_tooltip_text(subtitle);
         la->add_css_class("dim-label");
         append(*la);
     }
@@ -53,6 +60,8 @@ RecentItemBox::RecentItemBox(const std::string &aname, const std::filesystem::pa
 
 std::string RecentItemBox::get_name_without_suffix() const
 {
+    if (m_is_folder)
+        return m_name;
     const auto last_dot_pos = m_name.find_last_of('.');
     return m_name.substr(0, last_dot_pos);
 }

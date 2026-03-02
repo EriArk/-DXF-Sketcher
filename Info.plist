@@ -3,15 +3,15 @@
 <plist version="1.0">
 <dict>
     <key>CFBundleName</key>
-    <string>Dune 3D</string>
+    <string>DXF Sketcher</string>
     <key>CFBundleDevelopmentRegion</key>
     <string>English</string>
     <key>CFBundleExecutable</key>
-    <string>dune3d</string>
+    <string>dxfsketcher</string>
     <key>CFBundleGetInfoString</key>
-    <string>Parametric 3D CAD</string>
+    <string>Practical 2D DXF sketch editor</string>
     <key>CFBundleIdentifier</key>
-    <string>org.dune3d.dune3d</string>
+    <string>io.github.eriark.dxfsketcher</string>
     <key>CFBundleInfoDictionaryVersion</key>
     <string>6.0</string>
     <key>CFBundlePackageType</key>
@@ -38,7 +38,7 @@
             <string>d3ddoc</string>
         </array>
         <key>CFBundleTypeName</key>
-        <string>Dune 3D Document</string>
+        <string>DXF Sketcher Document</string>
         <key>CFBundleTypeRole</key>
         <string>Editor</string>
         <key>LSHandlerRank</key>

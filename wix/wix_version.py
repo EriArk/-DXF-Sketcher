@@ -22,7 +22,7 @@ with open('version.wxi', 'w') as wxi:
 	wxi.write("<!-- do not edit, this file is created by version.py tool any changes will be lost -->\n")
 	wxi.write("<Include>\n")
 	wxi.write("<?define ProductVersion='" + version + "' ?>\n")
-	wxi.write("<?define FullProductName='Dune 3D' ?>\n")
+	wxi.write("<?define FullProductName='DXF Sketcher' ?>\n")
 
 	wxi.write("<?define ProgramFilesFolder='ProgramFiles64Folder' ?>\n")
 	wxi.write("<?define Win64='yes' ?>\n")

@@ -76,6 +76,7 @@ public:
 
 
     void open_file(const std::filesystem::path &path);
+    void open_folder(const std::filesystem::path &folder_path);
     bool has_file(const std::filesystem::path &path);
 
     ~Editor();
