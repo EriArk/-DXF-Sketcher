@@ -8,9 +8,39 @@
 #include "widgets/capture_dialog.hpp"
 #include "action_editor.hpp"
 #include "in_tool_action/in_tool_action_catalog.hpp"
+#include "action/action_id.hpp"
 
 #include <iostream>
 namespace dune3d {
+
+#ifdef DUNE_SKETCHER_ONLY
+static bool in_tool_group_visible_in_sketcher(ToolID tool_id)
+{
+    if (tool_id == ToolID::NONE)
+        return true;
+    if (!action_catalog.contains(tool_id))
+        return false;
+    const auto &cat = action_catalog.at(tool_id);
+    if (cat.group == ActionGroup::GROUP)
+        return false;
+    if (cat.flags & ActionCatalogItem::FLAGS_HIDDEN)
+        return false;
+    return true;
+}
+
+static bool in_tool_action_visible_in_sketcher(InToolActionID action)
+{
+    switch (action) {
+    case InToolActionID::ROTATE_X:
+    case InToolActionID::ROTATE_Y:
+    case InToolActionID::ROTATE_Z:
+    case InToolActionID::TOGGLE_AUTO_NORMAL:
+        return false;
+    default:
+        return true;
+    }
+}
+#endif
 
 class InToolKeySequencesPreferencesEditor::ActionItemKeys : public ActionItem {
 public:
@@ -59,6 +89,10 @@ InToolKeySequencesPreferencesEditor::InToolKeySequencesPreferencesEditor(BaseObj
     }
 
     for (const auto tool_id : tools) {
+#ifdef DUNE_SKETCHER_ONLY
+        if (!in_tool_group_visible_in_sketcher(tool_id))
+            continue;
+#endif
         auto mi = ActionItemKeys::create();
         if (tool_id == ToolID::NONE)
             mi->m_name = "Common";
@@ -66,17 +100,24 @@ InToolKeySequencesPreferencesEditor::InToolKeySequencesPreferencesEditor(BaseObj
             mi->m_name = action_catalog.at(tool_id).name.full;
         mi->m_id = InToolActionID::NONE;
         mi->m_tool_id = tool_id;
+        bool has_items = false;
 
         for (const auto &[aid, item] : in_tool_action_catalog) {
             if (item.tool == tool_id && !(item.flags & InToolActionCatalogItem::FLAGS_NO_PREFERENCES)) {
+#ifdef DUNE_SKETCHER_ONLY
+                if (!in_tool_action_visible_in_sketcher(aid))
+                    continue;
+#endif
                 auto ai = ActionItemKeys::create();
                 ai->m_name = item.name;
                 ai->m_id = aid;
                 ai->m_tool_id = tool_id;
                 mi->m_store->append(ai);
+                has_items = true;
             }
         }
-        m_store->append(mi);
+        if (has_items)
+            m_store->append(mi);
     }
 
     update_keys();
@@ -140,6 +181,10 @@ void InToolKeySequencesPreferencesEditor::update_action_editors(const ActionItem
     else {
         for (const auto &[action_id, item] : in_tool_action_catalog) {
             if (item.tool == col.m_tool_id && !(item.flags & InToolActionCatalogItem::FLAGS_NO_PREFERENCES)) {
+#ifdef DUNE_SKETCHER_ONLY
+                if (!in_tool_action_visible_in_sketcher(action_id))
+                    continue;
+#endif
                 const auto &cat = in_tool_action_catalog.at(action_id);
                 auto ed = Gtk::make_managed<ActionEditorInToolKeys>(cat.name, m_preferences, action_id);
                 m_action_editors->append(*ed);

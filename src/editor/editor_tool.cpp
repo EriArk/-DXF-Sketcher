@@ -7,6 +7,26 @@
 
 namespace dune3d {
 
+ToolResponse Editor::tool_update_with_symmetry(ToolArgs &args)
+{
+#ifdef DUNE_SKETCHER_ONLY
+    const auto tool_before_update = m_core.get_tool_id();
+    if (m_core.tool_is_active())
+        clear_symmetry_live_preview_entities();
+#endif
+    auto response = m_core.tool_update(args);
+#ifdef DUNE_SKETCHER_ONLY
+    if (tool_before_update == ToolID::IMPORT_PICTURE && response.result == ToolResponse::Result::COMMIT
+        && !m_core.tool_is_active()) {
+        m_sticky_draw_tool = ToolID::NONE;
+        m_sticky_tool_restart_connection.disconnect();
+        m_restarting_sticky_tool = false;
+        m_activate_selection_after_import_picture = true;
+    }
+#endif
+    return response;
+}
+
 bool Editor::force_end_tool()
 {
     if (!m_core.tool_is_active())
@@ -16,7 +36,7 @@ bool Editor::force_end_tool()
         ToolArgs args;
         args.type = ToolEventType::ACTION;
         args.action = InToolActionID::CANCEL;
-        ToolResponse r = m_core.tool_update(args);
+        ToolResponse r = tool_update_with_symmetry(args);
         tool_process(r);
         if (!m_core.tool_is_active())
             return true;
@@ -42,6 +62,7 @@ void Editor::tool_begin(ToolID id /*bool override_selection, const std::set<Sele
     //        args.selection = sel;
     //   else
     args.selection = get_canvas().get_selection();
+    capture_symmetry_entities_before_tool(id);
     m_last_selection_mode = get_canvas().get_selection_mode();
     get_canvas().set_selection_mode(SelectionMode::NONE);
     ToolResponse r = m_core.tool_begin(id, args);
@@ -55,7 +76,7 @@ void Editor::tool_update_data(std::unique_ptr<ToolData> data)
         ToolArgs args;
         args.type = ToolEventType::DATA;
         args.data = std::move(data);
-        ToolResponse r = m_core.tool_update(args);
+        ToolResponse r = tool_update_with_symmetry(args);
         tool_process(r);
     }
 }
@@ -63,12 +84,26 @@ void Editor::tool_update_data(std::unique_ptr<ToolData> data)
 
 void Editor::tool_process(ToolResponse &resp)
 {
+    sync_symmetry_for_move_selection();
+    update_symmetry_live_preview_entities();
     tool_process_one();
+    if (resp.result == ToolResponse::Result::COMMIT || resp.result == ToolResponse::Result::END)
+        apply_symmetry_to_new_entities_after_commit();
     while (auto args = m_core.get_pending_tool_args()) {
-        m_core.tool_update(*args);
+        auto r = tool_update_with_symmetry(*args);
+        sync_symmetry_for_move_selection();
+        update_symmetry_live_preview_entities();
+        if (r.result == ToolResponse::Result::COMMIT || r.result == ToolResponse::Result::END)
+            apply_symmetry_to_new_entities_after_commit();
 
         tool_process_one();
     }
+#ifdef DUNE_SKETCHER_ONLY
+    if (m_activate_selection_after_import_picture && !m_core.tool_is_active()) {
+        m_activate_selection_after_import_picture = false;
+        activate_selection_mode();
+    }
+#endif
 }
 
 void Editor::canvas_update_from_tool()
@@ -101,6 +136,32 @@ void Editor::tool_process_one()
     if (!m_core.tool_is_active())
         get_canvas().set_selection_mode(m_last_selection_mode);
 
+#ifdef DUNE_SKETCHER_ONLY
+    if (!m_core.tool_is_active() && m_sticky_draw_tool != ToolID::NONE && !m_restarting_sticky_tool
+        && m_core.has_documents()) {
+        const auto sticky_tool = m_sticky_draw_tool;
+        if (m_core.tool_can_begin(sticky_tool, {}).get_can_begin()) {
+            m_restarting_sticky_tool = true;
+            m_sticky_tool_restart_connection.disconnect();
+            m_sticky_tool_restart_connection = Glib::signal_idle().connect([this, sticky_tool] {
+                m_sticky_tool_restart_connection.disconnect();
+                m_restarting_sticky_tool = false;
+                if (!m_core.has_documents())
+                    return false;
+                if (m_core.tool_is_active())
+                    return false;
+                if (m_sticky_draw_tool != sticky_tool)
+                    return false;
+                if (!m_core.tool_can_begin(sticky_tool, {}).get_can_begin())
+                    return false;
+                tool_begin(sticky_tool);
+                return false;
+            });
+        }
+    }
+    update_sketcher_toolbar_button_states();
+#endif
+
     /*  if (m_core.tool_is_active()) {
           canvas->set_selection(m_core.get_tool_selection());
       }
@@ -123,6 +184,9 @@ void Editor::handle_tool_change()
     m_win.tool_bar_set_visible(tool_id != ToolID::NONE);
     tool_bar_clear_actions();
     update_action_bar_visibility();
+#ifdef DUNE_SKETCHER_ONLY
+    update_sketcher_toolbar_button_states();
+#endif
 }
 
 } // namespace dune3d

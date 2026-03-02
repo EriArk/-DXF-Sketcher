@@ -10,6 +10,13 @@ class ToolDrawRectangle : public virtual ToolCommon, public ToolHelperConstrain 
 public:
     using ToolCommon::ToolCommon;
 
+    static void set_default_square(bool square);
+    static bool get_default_square();
+    static void set_default_rounded(bool rounded);
+    static bool get_default_rounded();
+    static void set_default_round_radius(double radius);
+    static double get_default_round_radius();
+
     ToolResponse begin(const ToolArgs &args) override;
     ToolResponse update(const ToolArgs &args) override;
     std::set<InToolActionID> get_actions() const override
@@ -22,6 +29,10 @@ public:
                 I::TOGGLE_CONSTRUCTION,
                 I::TOGGLE_COINCIDENT_CONSTRAINT,
                 I::TOGGLE_RECTANGLE_MODE,
+                I::TOGGLE_RECTANGLE_SQUARE,
+                I::TOGGLE_RECTANGLE_ROUNDED,
+                I::RECTANGLE_CORNER_RADIUS_INC,
+                I::RECTANGLE_CORNER_RADIUS_DEC,
         };
     }
 
@@ -30,6 +41,7 @@ public:
 
 private:
     std::array<class EntityLine2D *, 4> m_lines;
+    std::array<class EntityArc2D *, 4> m_arcs;
     const class EntityWorkplane *m_wrkpl = nullptr;
 
     glm::dvec2 m_first_point;
@@ -37,6 +49,10 @@ private:
     Mode m_mode = Mode::CORNER;
     std::optional<ConstraintType> m_first_constraint;
     EntityAndPoint m_first_enp;
+    bool m_square = false;
+    bool m_rounded = false;
+    double m_round_radius = 1.0;
+    void update_preview();
 
     void update_tip();
 

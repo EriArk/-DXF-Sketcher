@@ -1,5 +1,6 @@
 #pragma once
 #include <gtkmm.h>
+#include <vector>
 #include "editor/editor.hpp"
 
 namespace dune3d {
@@ -253,6 +254,9 @@ private:
     Gtk::Button *m_welcome_new_button = nullptr;
     Gtk::Button *m_welcome_open_button = nullptr;
     Gtk::Button *m_welcome_open_folder_button = nullptr;
+
+    std::vector<std::pair<Gtk::Widget *, bool>> m_header_widgets_visibility_before_welcome;
+    bool m_header_compact_for_welcome = false;
 
     Gtk::Box *m_action_bar_box = nullptr;
     Gtk::Revealer *m_action_bar_revealer = nullptr;

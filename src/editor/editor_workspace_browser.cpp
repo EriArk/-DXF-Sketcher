@@ -20,6 +20,10 @@
 namespace dune3d {
 using json = nlohmann::json;
 
+namespace {
+constexpr int sketch_sidebar_width = 252;
+}
+
 void Editor::init_workspace_browser()
 {
     m_workspace_browser = Gtk::make_managed<WorkspaceBrowser>(m_core);
@@ -29,7 +33,8 @@ void Editor::init_workspace_browser()
     m_sidebar_popover->set_autohide(true);
     m_sidebar_popover->set_has_arrow(true);
     m_sidebar_popover->set_position(Gtk::PositionType::TOP);
-    m_sidebar_popover->set_size_request(280, 560);
+    m_sidebar_popover->set_size_request(sketch_sidebar_width, 560);
+    m_workspace_browser->set_size_request(sketch_sidebar_width, -1);
     m_sidebar_popover->set_child(*m_workspace_browser);
     m_sidebar_popover->signal_hide().connect([this] { m_win.get_app().m_user_config.sidebar_visible = false; });
     m_sidebar_popover->signal_show().connect([this] { m_win.get_app().m_user_config.sidebar_visible = true; });
@@ -126,7 +131,7 @@ void Editor::set_sidebar_visible(bool visible)
         return;
     if (visible) {
         const auto max_height = std::max(220, static_cast<int>((m_win.get_height() - 120) * 0.8));
-        m_sidebar_popover->set_size_request(270, max_height);
+        m_sidebar_popover->set_size_request(sketch_sidebar_width, max_height);
         m_sidebar_popover->popup();
     }
     else {

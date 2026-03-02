@@ -136,6 +136,9 @@ private:
     Gtk::Image *m_info_bar_icon = nullptr;
     Gtk::Label *m_info_bar_label = nullptr;
     Gtk::Box *m_sketcher_open_box = nullptr;
+    Gtk::Button *m_sketcher_add_button = nullptr;
+    Gtk::Box *m_sketcher_add_flyout = nullptr;
+    Gtk::Button *m_sketcher_open_folder_button = nullptr;
     Gtk::Box *m_sketcher_actions_box = nullptr;
     std::optional<std::string> m_sketcher_folder_name;
 

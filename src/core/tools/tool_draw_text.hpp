@@ -12,6 +12,11 @@ class ToolDrawText : public virtual ToolCommon, private ToolHelperConstrain {
 public:
     using ToolCommon::ToolCommon;
 
+    static void set_default_font(const std::string &font);
+    static const std::string &get_default_font();
+    static void set_default_font_features(const std::string &features);
+    static const std::string &get_default_font_features();
+
     ToolResponse begin(const ToolArgs &args) override;
     ToolResponse update(const ToolArgs &args) override;
     std::set<InToolActionID> get_actions() const override
@@ -22,6 +27,8 @@ public:
                 I::CANCEL,
                 I::RMB,
                 I::TOGGLE_COINCIDENT_CONSTRAINT,
+                I::TOGGLE_TEXT_BOLD,
+                I::TOGGLE_TEXT_ITALIC,
         };
     }
 

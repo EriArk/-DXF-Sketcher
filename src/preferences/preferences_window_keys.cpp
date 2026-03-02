@@ -7,9 +7,63 @@
 #include "core/tool_id.hpp"
 #include "widgets/capture_dialog.hpp"
 #include "action_editor.hpp"
+#include "action/action_id.hpp"
 
 #include <iostream>
 namespace dune3d {
+
+#ifdef DUNE_SKETCHER_ONLY
+static bool key_item_visible_in_sketcher(const ActionToolID &id)
+{
+    if (!action_catalog.contains(id))
+        return false;
+    const auto &cat = action_catalog.at(id);
+    if (cat.group == ActionGroup::GROUP)
+        return false;
+    if (cat.flags & ActionCatalogItem::FLAGS_HIDDEN)
+        return false;
+
+    if (const auto action = std::get_if<ActionID>(&id)) {
+        switch (*action) {
+        case ActionID::VIEW_ROTATE_UP:
+        case ActionID::VIEW_ROTATE_DOWN:
+        case ActionID::VIEW_ROTATE_LEFT:
+        case ActionID::VIEW_ROTATE_RIGHT:
+        case ActionID::VIEW_TILT_LEFT:
+        case ActionID::VIEW_TILT_RIGHT:
+        case ActionID::VIEW_TOGGLE_PERSP_ORTHO:
+        case ActionID::VIEW_PERSP:
+        case ActionID::VIEW_ORTHO:
+        case ActionID::VIEW_RESET_TILT:
+        case ActionID::VIEW_FRONT:
+        case ActionID::VIEW_BACK:
+        case ActionID::VIEW_BOTTOM:
+        case ActionID::VIEW_LEFT:
+        case ActionID::VIEW_RIGHT:
+        case ActionID::TOGGLE_WORKPLANE:
+        case ActionID::PREVIOUS_GROUP:
+        case ActionID::NEXT_GROUP:
+            return false;
+        default:
+            return true;
+        }
+    }
+    if (const auto tool = std::get_if<ToolID>(&id)) {
+        switch (*tool) {
+        case ToolID::SET_WORKPLANE:
+        case ToolID::UNSET_WORKPLANE:
+        case ToolID::DRAW_WORKPLANE:
+        case ToolID::DRAW_LINE_3D:
+        case ToolID::IMPORT_STEP:
+        case ToolID::SELECT_EDGES:
+            return false;
+        default:
+            return true;
+        }
+    }
+    return true;
+}
+#endif
 
 class KeySequencesPreferencesEditor::ActionItemKeys : public ActionItem {
 public:
@@ -54,17 +108,24 @@ KeySequencesPreferencesEditor::KeySequencesPreferencesEditor(BaseObjectType *cob
         mi->m_name = name;
         mi->m_group = group;
         mi->m_id = ToolID::NONE;
+        bool has_items = false;
         for (const auto &[id, it] : action_catalog) {
             if (it.group != group)
                 continue;
             if (it.flags & ActionCatalogItem::FLAGS_NO_PREFERENCES)
                 continue;
+#ifdef DUNE_SKETCHER_ONLY
+            if (!key_item_visible_in_sketcher(id))
+                continue;
+#endif
             auto ai = ActionItemKeys::create();
             ai->m_id = id;
             ai->m_name = it.name.full;
             mi->m_store->append(ai);
+            has_items = true;
         }
-        m_store->append(mi);
+        if (has_items)
+            m_store->append(mi);
     }
     update_keys();
 }
@@ -125,6 +186,10 @@ void KeySequencesPreferencesEditor::update_action_editors(const ActionItem &it_b
                 continue;
             if (it.flags & ActionCatalogItem::FLAGS_NO_PREFERENCES)
                 continue;
+#ifdef DUNE_SKETCHER_ONLY
+            if (!key_item_visible_in_sketcher(id))
+                continue;
+#endif
             {
                 auto ed = Gtk::make_managed<ActionEditorKeys>(it.name.full, m_preferences, id);
                 m_action_editors->append(*ed);

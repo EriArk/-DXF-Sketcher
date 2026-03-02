@@ -18,5 +18,13 @@ private:
     GLuint m_color_top_loc;
     GLuint m_color_bottom_loc;
     GLuint m_alpha_loc;
+    GLuint m_grid_enabled_loc;
+    GLuint m_grid_spacing_loc;
+    GLuint m_grid_minor_color_loc;
+    GLuint m_grid_major_color_loc;
+    GLuint m_grid_axis_x_color_loc;
+    GLuint m_grid_axis_y_color_loc;
+    GLuint m_viewport_size_loc;
+    GLuint m_projmat_viewmat_inv_loc;
 };
 } // namespace dune3d

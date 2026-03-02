@@ -8,6 +8,7 @@
 #include "util/fs_util.hpp"
 #include "util/gtk_util.hpp"
 #include <format>
+#include <functional>
 
 namespace dune3d {
 
@@ -59,6 +60,44 @@ static void update_recent_listbox(Gtk::ListBox &lb, Dune3DApplication &app)
     }
 }
 
+static void update_recent_listbox_two_columns(Gtk::ListBox &lb, Dune3DApplication &app,
+                                              std::function<void(const std::filesystem::path &)> on_open)
+{
+    while (auto child = lb.get_first_child())
+        lb.remove(*child);
+
+    const auto recent_items_sorted = recent_sort(app.m_user_config.recent_items);
+
+    for (size_t i = 0; i < recent_items_sorted.size(); i += 2) {
+        auto row_box = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 8);
+        row_box->set_homogeneous(true);
+
+        for (size_t j = 0; j < 2 && (i + j) < recent_items_sorted.size(); ++j) {
+            const auto &[path, mtime] = recent_items_sorted.at(i + j);
+            const auto name = path_to_string(path.filename());
+
+            auto button = Gtk::make_managed<Gtk::Button>();
+            button->set_has_frame(false);
+            button->add_css_class("flat");
+            button->set_hexpand(true);
+
+            auto box = Gtk::make_managed<RecentItemBox>(name, path, mtime);
+            button->set_child(*box);
+            button->signal_clicked().connect([on_open, path] { on_open(path); });
+            box->signal_remove().connect([box, &app] { app.m_user_config.recent_items.erase(box->m_path); });
+
+            row_box->append(*button);
+        }
+        lb.append(*row_box);
+    }
+}
+
+static bool recent_item_matches(const RecentItemBox &box, const Glib::ustring &uneedle)
+{
+    return (uneedle.size() == 0)
+           || (Glib::ustring(box.get_name_without_suffix()).casefold().find(uneedle) != Glib::ustring::npos);
+}
+
 static void update_recent_search(Gtk::SearchEntry &entry, Gtk::ListBox &lb)
 {
     std::string needle = entry.get_text();
@@ -67,10 +106,23 @@ static void update_recent_search(Gtk::SearchEntry &entry, Gtk::ListBox &lb)
     int i = 0;
     while (auto row = lb.get_row_at_index(i++)) {
         if (auto box = dynamic_cast<RecentItemBox *>(row->get_child())) {
-            const bool visible =
-                    (uneedle.size() == 0)
-                    || (Glib::ustring(box->get_name_without_suffix()).casefold().find(needle) != Glib::ustring::npos);
+            const bool visible = recent_item_matches(*box, uneedle);
             row->set_visible(visible);
+            continue;
+        }
+
+        if (auto container = dynamic_cast<Gtk::Box *>(row->get_child())) {
+            bool any_visible = false;
+            for (auto child = container->get_first_child(); child; child = child->get_next_sibling()) {
+                if (auto button = dynamic_cast<Gtk::Button *>(child)) {
+                    if (auto child_box = dynamic_cast<RecentItemBox *>(button->get_child())) {
+                        const bool visible = recent_item_matches(*child_box, uneedle);
+                        button->set_visible(visible);
+                        any_visible = any_visible || visible;
+                    }
+                }
+            }
+            row->set_visible(any_visible);
         }
     }
 }
@@ -123,7 +175,7 @@ Dune3DAppWindow::Dune3DAppWindow(BaseObjectType *cobject, const Glib::RefPtr<Gtk
     m_open_popover->signal_show().connect([this] {
 #ifdef DUNE_SKETCHER_ONLY
         const int max_width = std::max(220, get_width() - 80);
-        m_open_popover->set_size_request(std::min(280, max_width), -1);
+        m_open_popover->set_size_request(std::min(210, max_width), -1);
 #endif
         m_open_recent_search_entry->set_text("");
         update_recent_listbox(*m_open_recent_listbox, m_app);
@@ -198,10 +250,6 @@ Dune3DAppWindow::Dune3DAppWindow(BaseObjectType *cobject, const Glib::RefPtr<Gtk
     m_welcome_box = refBuilder->get_widget<Gtk::Box>("welcome_box");
     m_welcome_recent_listbox = refBuilder->get_widget<Gtk::ListBox>("welcome_recent_listbox");
     m_welcome_recent_listbox->set_header_func(sigc::ptr_fun(header_func_separator));
-    m_welcome_recent_listbox->signal_row_activated().connect([this](Gtk::ListBoxRow *row) {
-        auto &ch = dynamic_cast<RecentItemBox &>(*row->get_child());
-        m_editor.open_file(ch.m_path);
-    });
     m_welcome_recent_search_entry = refBuilder->get_widget<Gtk::SearchEntry>("welcome_recent_search_entry");
     m_welcome_new_button = refBuilder->get_widget<Gtk::Button>("welcome_new_button");
     m_welcome_open_button = refBuilder->get_widget<Gtk::Button>("welcome_open_button");
@@ -265,11 +313,12 @@ Dune3DAppWindow::Dune3DAppWindow(BaseObjectType *cobject, const Glib::RefPtr<Gtk
 
     set_view_hints_label({});
 
-    update_recent_listbox(*m_welcome_recent_listbox, m_app);
+    update_recent_listbox_two_columns(*m_welcome_recent_listbox, m_app,
+                                      [this](const std::filesystem::path &path) { m_editor.open_file(path); });
     m_welcome_recent_search_entry->signal_changed().connect(
             [this] { update_recent_search(*m_welcome_recent_search_entry, *m_welcome_recent_listbox); });
 
-    set_icon_name("dune3d");
+    set_icon_name("dxfsketcher");
 
     m_editor.init();
 }
@@ -395,8 +444,52 @@ void Dune3DAppWindow::set_welcome_box_visible(bool v)
     m_welcome_box->set_visible(v);
     if (v) {
         m_welcome_recent_search_entry->set_text("");
-        update_recent_listbox(*m_welcome_recent_listbox, m_app);
+        update_recent_listbox_two_columns(*m_welcome_recent_listbox, m_app,
+                                          [this](const std::filesystem::path &path) { m_editor.open_file(path); });
     }
+
+#ifdef DUNE_SKETCHER_ONLY
+    if (v && !m_header_compact_for_welcome) {
+        m_header_widgets_visibility_before_welcome.clear();
+        auto is_inside_window_controls = [](Gtk::Widget *w) {
+            for (auto cur = w; cur; cur = dynamic_cast<Gtk::Widget *>(cur->get_parent())) {
+                if (dynamic_cast<Gtk::WindowControls *>(cur) != nullptr)
+                    return true;
+            }
+            return false;
+        };
+        auto should_hide = [&](Gtk::Widget *w) {
+            if (w == m_hamburger_menu_button)
+                return false;
+            if (is_inside_window_controls(w))
+                return false;
+            return dynamic_cast<Gtk::Button *>(w) != nullptr || dynamic_cast<Gtk::MenuButton *>(w) != nullptr
+                   || dynamic_cast<Gtk::Separator *>(w) != nullptr;
+        };
+        std::function<void(Gtk::Widget *)> walk = [&](Gtk::Widget *parent) {
+            for (auto child = parent->get_first_child(); child; child = child->get_next_sibling()) {
+                if (child == m_hamburger_menu_button || is_inside_window_controls(child))
+                    continue;
+                if (should_hide(child)) {
+                    m_header_widgets_visibility_before_welcome.emplace_back(child, child->get_visible());
+                    child->set_visible(false);
+                }
+                walk(child);
+            }
+        };
+        walk(m_header_bar);
+        m_hamburger_menu_button->set_visible(true);
+        m_header_compact_for_welcome = true;
+    }
+    else if (!v && m_header_compact_for_welcome) {
+        for (const auto &[widget, was_visible] : m_header_widgets_visibility_before_welcome) {
+            if (widget)
+                widget->set_visible(was_visible);
+        }
+        m_header_widgets_visibility_before_welcome.clear();
+        m_header_compact_for_welcome = false;
+    }
+#endif
 }
 
 void Dune3DAppWindow::add_action_button(Gtk::Widget &widget)

@@ -16,6 +16,7 @@
 #include <glm/gtx/string_cast.hpp>
 #include <glm/gtx/io.hpp>
 #include <fstream>
+#include <algorithm>
 #include "iselection_menu_creator.hpp"
 #include "selectable_checkbutton.hpp"
 #include "icon_texture_id.hpp"
@@ -839,7 +840,21 @@ glm::dvec3 Canvas::get_cursor_pos_for_plane(glm::dvec3 origin, glm::dvec3 normal
     const auto mouse_normal = glm::dvec3(glm::normalize(r2 - r));
 
     auto d = glm::dot(origin - glm::dvec3(r), normal) / glm::dot(normal, mouse_normal);
-    return glm::dvec3(r) + d * mouse_normal;
+    auto p = glm::dvec3(r) + d * mouse_normal;
+
+    if (m_grid_snap_enabled) {
+        const double spacing = std::max(static_cast<double>(m_grid_spacing_mm), 1e-6);
+        auto n = glm::normalize(normal);
+        auto ref = std::abs(n.z) < 0.9 ? glm::dvec3(0, 0, 1) : glm::dvec3(0, 1, 0);
+        auto ux = glm::normalize(glm::cross(ref, n));
+        auto uy = glm::normalize(glm::cross(n, ux));
+        auto rel = p - origin;
+        const double sx = std::round(glm::dot(rel, ux) / spacing) * spacing;
+        const double sy = std::round(glm::dot(rel, uy) / spacing) * spacing;
+        p = origin + ux * sx + uy * sy;
+    }
+
+    return p;
 }
 
 glm::dvec3 Canvas::get_cursor_pos() const
@@ -860,6 +875,28 @@ glm::dvec2 Canvas::get_cursor_pos_win() const
 float Canvas::get_magic_number() const
 {
     return tan(0.5 * glm::radians(m_cam_fov)) / m_dev_height * m_cam_distance;
+}
+
+float Canvas::get_effective_grid_spacing_mm() const
+{
+    const float base_spacing = std::max(m_grid_spacing_mm, 0.01f);
+    const float world_per_px = glm::length(get_center_shift(glm::vec2(1, 0)));
+    if (!std::isfinite(world_per_px) || world_per_px <= 1e-8f)
+        return base_spacing;
+
+    float spacing = base_spacing;
+    float px = spacing / world_per_px;
+    constexpr float min_px = 28.0f;
+    constexpr float max_px = 120.0f;
+    while (px < min_px) {
+        spacing *= 2.0f;
+        px *= 2.0f;
+    }
+    while (px > max_px) {
+        spacing *= 0.5f;
+        px *= 0.5f;
+    }
+    return spacing;
 }
 
 glm::vec3 Canvas::get_center_shift(const glm::vec2 &shift) const
@@ -1111,6 +1148,7 @@ void Canvas::render_all(std::vector<pick_buf_t> &pick_buf)
         glDrawBuffers(bufs.size(), bufs.data());
     }
 
+    update_mats();
 
     glDisable(GL_DEPTH_TEST);
     m_background_renderer.render();
@@ -1127,8 +1165,6 @@ void Canvas::render_all(std::vector<pick_buf_t> &pick_buf)
         m_picture_renderer.push();
     }
     m_push_flags = PF_NONE;
-
-    update_mats();
 
     m_face_renderer.render();
     GL_CHECK_ERROR
@@ -1488,6 +1524,10 @@ void Canvas::apply_flags(VertexFlags &flags)
 {
     if (m_state.vertex_inactive)
         flags |= VertexFlags::INACTIVE;
+    if (m_state.vertex_hover)
+        flags |= VertexFlags::HOVER;
+    if (m_state.vertex_icon_no_flip)
+        flags |= VertexFlags::ICON_NO_FLIP;
     if (m_state.vertex_constraint)
         flags |= VertexFlags::CONSTRAINT;
     if (m_state.vertex_construction)
@@ -1873,6 +1913,32 @@ void Canvas::update_bbox()
 void Canvas::set_show_error_overlay(bool show)
 {
     m_show_error_overlay = show;
+    queue_draw();
+}
+
+void Canvas::set_grid_enabled(bool show)
+{
+    if (m_grid_enabled == show)
+        return;
+    m_grid_enabled = show;
+    queue_draw();
+}
+
+void Canvas::set_grid_spacing_mm(float spacing_mm)
+{
+    const float clamped = std::clamp(spacing_mm, 0.01f, 100000.0f);
+    if (std::abs(m_grid_spacing_mm - clamped) < 1e-6f)
+        return;
+    m_grid_spacing_mm = clamped;
+    if (m_grid_enabled)
+        queue_draw();
+}
+
+void Canvas::set_grid_snap_enabled(bool enabled)
+{
+    if (m_grid_snap_enabled == enabled)
+        return;
+    m_grid_snap_enabled = enabled;
     queue_draw();
 }
 

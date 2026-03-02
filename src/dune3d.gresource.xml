@@ -48,6 +48,8 @@
     <file preprocess="xml-stripblanks">icons/scalable/actions/action-draw-text-symbolic.svg</file>
     <file preprocess="xml-stripblanks">icons/scalable/actions/action-constrain-in-workplane-symbolic.svg</file>
     <file preprocess="xml-stripblanks">icons/scalable/apps/dune3d.svg</file>
+    <file>icons/scalable/apps/dxfsketcher.png</file>
+    <file>icons/scalable/apps/logo.png</file>
     <file>icon_texture_atlas.png</file>
   </gresource>
 </gresources>

@@ -10,12 +10,13 @@
 #include "document/group/group.hpp"
 #include "selection_menu_creator.hpp"
 #include "idocument_view_provider.hpp"
+#include "core/tool_id.hpp"
+#include <array>
 
 namespace dune3d {
 
 class Dune3DApplication;
 class Preferences;
-enum class ToolID;
 class ActionLabelInfo;
 class ToolPopover;
 class ConstraintsBox;
@@ -27,6 +28,7 @@ class Canvas;
 class ClippingPlaneWindow;
 class SelectionFilterWindow;
 class Buffer;
+class Entity;
 enum class SelectionMode;
 enum class CommitMode;
 enum class WorkspaceBrowserAddGroupMode;
@@ -85,6 +87,34 @@ private:
     void init_workspace_browser();
     void init_properties_notebook();
     void init_header_bar();
+    void init_symmetry_popover();
+    void sync_symmetry_popover_context();
+    void apply_symmetry_from_popover();
+    void apply_symmetry_live_from_popover(bool show_toast_on_fail);
+    void activate_selection_mode();
+    void sync_selection_mode_popover();
+    std::optional<UUID> get_single_selected_text_entity();
+    void sync_draw_text_popover_from_font_desc();
+    void sync_draw_text_popover_from_selection(bool show_popover);
+    void apply_draw_text_popover_change(bool apply_to_selected_text);
+    void draw_selection_transform_overlay(const std::set<SelectableRef> &selection);
+    bool begin_selection_transform_drag(const SelectableRef &handle);
+    void update_selection_transform_drag();
+    void end_selection_transform_drag();
+    void update_sketcher_toolbar_button_states();
+    bool is_sticky_draw_tool(ToolID id) const;
+    bool configure_symmetry_from_current_context(bool show_toast_on_fail);
+    void set_symmetry_enabled(bool enabled, bool reconfigure);
+    bool should_apply_symmetry_for_tool(ToolID id) const;
+    void capture_symmetry_entities_before_tool(ToolID id);
+    void apply_symmetry_to_new_entities_after_commit();
+    void clear_symmetry_live_preview_entities();
+    void update_symmetry_live_preview_entities();
+    void sync_symmetry_for_move_selection();
+    ToolResponse tool_update_with_symmetry(ToolArgs &args);
+    std::vector<std::pair<glm::dvec3, glm::dvec3>> get_symmetry_overlay_lines_world();
+    void init_settings_popover();
+    void sync_settings_popover_from_preferences();
     void init_actions();
     void init_tool_popover();
     void init_canvas();
@@ -131,6 +161,45 @@ private:
     const Canvas &get_canvas() const;
 
     Gtk::PopoverMenu *m_context_menu = nullptr;
+    Gtk::Popover *m_settings_popover = nullptr;
+    Gtk::ToggleButton *m_theme_light_button = nullptr;
+    Gtk::ToggleButton *m_theme_dark_button = nullptr;
+    Gtk::Scale *m_line_width_scale = nullptr;
+    Gtk::Label *m_line_width_value_label = nullptr;
+    Gtk::Switch *m_right_click_popovers_switch = nullptr;
+    bool m_right_click_popovers_only = false;
+    Gtk::Button *m_grid_menu_button = nullptr;
+    Gtk::SpinButton *m_grid_spacing_spin = nullptr;
+    Gtk::Switch *m_grid_snap_button = nullptr;
+    Gtk::Button *m_symmetry_menu_button = nullptr;
+    Gtk::Popover *m_symmetry_popover = nullptr;
+    Gtk::Box *m_symmetry_mode_row = nullptr;
+    Gtk::Button *m_symmetry_mode_prev_button = nullptr;
+    Gtk::Label *m_symmetry_mode_value_label = nullptr;
+    Gtk::Button *m_symmetry_mode_next_button = nullptr;
+    unsigned int m_symmetry_mode_selected = 0;
+    Gtk::Switch *m_symmetry_radial_switch = nullptr;
+    Gtk::Box *m_symmetry_axes_row = nullptr;
+    Gtk::SpinButton *m_symmetry_axes_spin = nullptr;
+    Gtk::Box *m_symmetry_rotation_row = nullptr;
+    Gtk::SpinButton *m_symmetry_rotation_spin = nullptr;
+    Gtk::Button *m_symmetry_apply_button = nullptr;
+    Gtk::Label *m_symmetry_context_label = nullptr;
+    bool m_updating_symmetry_popover = false;
+    bool m_symmetry_enabled = false;
+    enum class SymmetryMode { HORIZONTAL, VERTICAL, RADIAL };
+    SymmetryMode m_symmetry_mode = SymmetryMode::HORIZONTAL;
+    UUID m_symmetry_group;
+    UUID m_symmetry_workplane;
+    unsigned int m_symmetry_radial_axes = 4;
+    double m_symmetry_radial_rotation_deg = 0;
+    std::vector<std::pair<glm::dvec2, glm::dvec2>> m_symmetry_axes;
+    ToolID m_symmetry_capture_tool_id = ToolID::NONE;
+    std::set<UUID> m_symmetry_pre_tool_entities;
+    bool m_symmetry_pre_tool_entities_captured = false;
+    std::map<UUID, std::unique_ptr<Entity>> m_symmetry_move_roots_before;
+    std::set<UUID> m_symmetry_live_preview_entities;
+    bool m_updating_settings_popover = false;
     double m_rmb_last_x = NAN;
     double m_rmb_last_y = NAN;
     std::set<SelectableRef> m_context_menu_selection;
@@ -172,6 +241,51 @@ private:
 
     Gtk::Button &create_action_bar_button(ActionToolID action);
     std::map<ActionToolID, Gtk::Button *> m_action_bar_buttons;
+    Gtk::Button *m_selection_mode_button = nullptr;
+    Gtk::Popover *m_selection_mode_popover = nullptr;
+    Gtk::Switch *m_selection_transform_switch = nullptr;
+    Gtk::Popover *m_draw_text_popover = nullptr;
+    Gtk::Button *m_draw_text_font_button = nullptr;
+    Gtk::Switch *m_draw_text_bold_switch = nullptr;
+    Gtk::Switch *m_draw_text_italic_switch = nullptr;
+    Glib::RefPtr<Gtk::FontDialog> m_draw_text_font_dialog;
+    Pango::FontDescription m_draw_text_font_desc;
+    Glib::ustring m_draw_text_font_features;
+    bool m_updating_draw_text_popover = false;
+    bool m_updating_selection_mode_popover = false;
+    bool m_selection_transform_enabled = false;
+    enum class SelectionTransformDragMode { NONE, ROTATE, SCALE };
+    SelectionTransformDragMode m_selection_transform_drag_mode = SelectionTransformDragMode::NONE;
+    bool m_selection_transform_drag_active = false;
+    bool m_selection_transform_drag_dirty = false;
+    bool m_selection_transform_constraints_removed = false;
+    UUID m_selection_transform_group;
+    UUID m_selection_transform_workplane;
+    std::vector<UUID> m_selection_transform_entities;
+    std::map<UUID, std::unique_ptr<Entity>> m_selection_transform_entities_before;
+    std::set<SelectableRef> m_selection_transform_selection_before;
+    std::set<SelectableRef> m_selection_transform_overlay_selection_cache;
+    glm::dvec2 m_selection_transform_bbox_min = {0, 0};
+    glm::dvec2 m_selection_transform_bbox_max = {0, 0};
+    glm::dvec2 m_selection_transform_center = {0, 0};
+    glm::dvec2 m_selection_transform_rotate_handle = {0, 0};
+    std::array<glm::dvec2, 4> m_selection_transform_scale_handles = {};
+    glm::dvec2 m_selection_transform_base_bbox_min = {0, 0};
+    glm::dvec2 m_selection_transform_base_bbox_max = {0, 0};
+    glm::dvec2 m_selection_transform_base_rotate_handle = {0, 0};
+    std::array<glm::dvec2, 4> m_selection_transform_base_scale_handles = {};
+    double m_selection_transform_start_angle = 0;
+    double m_selection_transform_drag_angle = 0;
+    double m_selection_transform_drag_scale = 1;
+    glm::dvec2 m_selection_transform_scale_base_vector = {1, 0};
+    double m_selection_transform_scale_start_factor = 1;
+    unsigned int m_selection_transform_scale_handle_index = 0;
+    double m_selection_transform_frame_angle = 0;
+    bool m_selection_transform_overlay_valid = false;
+    bool m_primary_button_pressed = false;
+    ToolID m_sticky_draw_tool = ToolID::NONE;
+    bool m_restarting_sticky_tool = false;
+    sigc::connection m_sticky_tool_restart_connection;
     void update_action_bar_buttons_sensitivity();
     void update_action_bar_visibility();
     bool force_end_tool();
@@ -321,5 +435,6 @@ private:
     std::map<UUID, std::filesystem::path> m_group_export_paths;
     bool m_sketcher_opening_folder_batch = false;
     std::optional<std::filesystem::path> m_sketcher_folder_path;
+    bool m_activate_selection_after_import_picture = false;
 };
 } // namespace dune3d

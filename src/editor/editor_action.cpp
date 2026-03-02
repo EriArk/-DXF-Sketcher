@@ -132,8 +132,7 @@ void Editor::init_actions()
         update_workspace_view_names();
 #ifdef DUNE_SKETCHER_ONLY
         m_workspace_browser->set_sketcher_folder_mode({});
-        if (!m_core.tool_is_active() && m_core.tool_can_begin(ToolID::DRAW_CONTOUR, {}).get_can_begin())
-            trigger_action(ToolID::DRAW_CONTOUR);
+        activate_selection_mode();
 #endif
     });
     connect_action(ActionID::OPEN_DOCUMENT, sigc::mem_fun(*this, &Editor::on_open_document));
@@ -641,6 +640,11 @@ void Editor::update_action_sensitivity(const std::set<SelectableRef> &sel)
     m_action_sensitivity[ActionID::EXPORT_PROJECTION] = has_solid_model;
     m_action_sensitivity[ActionID::EXPORT_ALL_SOLID_MODELS_STEP] = m_core.has_documents();
 
+#ifdef DUNE_SKETCHER_ONLY
+    if (m_symmetry_menu_button)
+        m_symmetry_menu_button->set_sensitive(m_core.has_documents());
+    sync_symmetry_popover_context();
+#endif
 
     m_signal_action_sensitive.emit();
 }
@@ -658,8 +662,14 @@ bool Editor::trigger_action(ActionToolID action, ActionSource source)
 {
     if (m_core.tool_is_active() && !(action_catalog.at(action).flags & ActionCatalogItem::FLAGS_IN_TOOL)) {
 #ifdef DUNE_SKETCHER_ONLY
-        if (std::holds_alternative<ActionID>(action) && std::get<ActionID>(action) == ActionID::OPEN_DOCUMENT) {
-            // Keep Open available while a drawing tool is active in sketcher-only mode.
+        const auto action_id = std::get_if<ActionID>(&action);
+        const auto tool_id = std::get_if<ToolID>(&action);
+        const bool allowed_while_tool = (action_id && (*action_id == ActionID::OPEN_DOCUMENT || *action_id == ActionID::SAVE
+                                                        || *action_id == ActionID::SAVE_AS))
+                                        || (tool_id && *tool_id == ToolID::IMPORT_PICTURE);
+        if (allowed_while_tool) {
+            if (!force_end_tool())
+                return false;
         }
         else
 #endif
@@ -684,7 +694,7 @@ bool Editor::get_action_sensitive(ActionID action) const
 
     if (m_core.tool_is_active()) { // actions available int tools are always sensitive
 #ifdef DUNE_SKETCHER_ONLY
-        if (action == ActionID::OPEN_DOCUMENT)
+        if (action == ActionID::OPEN_DOCUMENT || action == ActionID::SAVE || action == ActionID::SAVE_AS)
             return true;
 #endif
         return action_catalog.at(action).flags & ActionCatalogItem::FLAGS_IN_TOOL;
@@ -812,7 +822,7 @@ bool Editor::handle_action_key(Glib::RefPtr<Gtk::EventControllerKey> controller,
             ToolArgs args;
             args.type = ToolEventType::ACTION;
             args.action = InToolActionID::CANCEL;
-            ToolResponse r = m_core.tool_update(args);
+            ToolResponse r = tool_update_with_symmetry(args);
             tool_process(r);
             return true;
         }
@@ -875,7 +885,7 @@ bool Editor::handle_action_key(Glib::RefPtr<Gtk::EventControllerKey> controller,
             ToolArgs args;
             args.type = ToolEventType::ACTION;
             args.action = in_tool_actions_matched.begin()->first;
-            ToolResponse r = m_core.tool_update(args);
+            ToolResponse r = tool_update_with_symmetry(args);
             tool_process(r);
 
             return true;

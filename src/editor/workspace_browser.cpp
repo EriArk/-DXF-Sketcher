@@ -10,6 +10,69 @@
 
 namespace dune3d {
 
+namespace {
+struct HoverFlyoutState {
+    bool pointer_on_button = false;
+    bool pointer_on_flyout = false;
+    sigc::connection close_timeout;
+};
+
+void install_hover_flyout(Gtk::Widget &button, Gtk::Widget &flyout)
+{
+    auto state = std::make_shared<HoverFlyoutState>();
+
+    auto maybe_close = [state, &flyout] {
+        if (!state->pointer_on_button && !state->pointer_on_flyout && flyout.get_visible())
+            flyout.set_visible(false);
+    };
+
+    auto schedule_close = [state, maybe_close] {
+        state->close_timeout.disconnect();
+        state->close_timeout = Glib::signal_timeout().connect(
+                [maybe_close] {
+                    maybe_close();
+                    return false;
+                },
+                120);
+    };
+
+    auto button_motion = Gtk::EventControllerMotion::create();
+    button_motion->signal_enter().connect([state, &button, &flyout](double, double) {
+        state->pointer_on_button = true;
+        state->close_timeout.disconnect();
+        const auto w = button.get_allocated_width();
+        if (w > 0)
+            flyout.set_size_request(w, -1);
+        if (!flyout.get_visible())
+            flyout.set_visible(true);
+    });
+    button_motion->signal_leave().connect([state, schedule_close] {
+        state->pointer_on_button = false;
+        schedule_close();
+    });
+    button.add_controller(button_motion);
+
+    auto flyout_motion = Gtk::EventControllerMotion::create();
+    flyout_motion->signal_enter().connect([state](double, double) {
+        state->pointer_on_flyout = true;
+        state->close_timeout.disconnect();
+    });
+    flyout_motion->signal_leave().connect([state, schedule_close] {
+        state->pointer_on_flyout = false;
+        schedule_close();
+    });
+    flyout.add_controller(flyout_motion);
+
+    flyout.property_visible().signal_changed().connect([state, &flyout] {
+        if (flyout.get_visible())
+            return;
+        state->pointer_on_button = false;
+        state->pointer_on_flyout = false;
+        state->close_timeout.disconnect();
+    });
+}
+} // namespace
+
 class WorkspaceBrowser::GroupItem : public Glib::Object {
 public:
     static Glib::RefPtr<GroupItem> create()
@@ -477,6 +540,9 @@ public:
 
         m_label = Gtk::make_managed<Gtk::Label>();
         m_label->set_halign(Gtk::Align::START);
+        m_label->set_hexpand(true);
+        m_label->set_ellipsize(Pango::EllipsizeMode::END);
+        m_label->set_single_line_mode(true);
         m_label->set_has_tooltip();
 
         m_source_group_image = Gtk::make_managed<Gtk::Image>();
@@ -951,6 +1017,9 @@ WorkspaceBrowser::WorkspaceBrowser(Core &core) : Gtk::Box(Gtk::Orientation::VERT
             button->set_tooltip_text("Add sketch");
             button->set_hexpand(true);
             button->signal_clicked().connect([this] { emit_add_group(Group::Type::SKETCH); });
+#ifdef DUNE_SKETCHER_ONLY
+            m_sketcher_add_button = button;
+#endif
             box->append(*button);
         }
         {
@@ -989,12 +1058,14 @@ WorkspaceBrowser::WorkspaceBrowser(Core &core) : Gtk::Box(Gtk::Orientation::VERT
             box->append(*button);
         }
         {
+#ifndef DUNE_SKETCHER_ONLY
             auto button = Gtk::make_managed<Gtk::Button>();
             button->set_icon_name("folder-open-symbolic");
             button->set_tooltip_text("Open folder");
             button->set_hexpand(true);
             button->signal_clicked().connect([this] { m_signal_open_folder.emit(); });
             box->append(*button);
+#endif
         }
 #ifndef DUNE_SKETCHER_ONLY
         {
@@ -1015,7 +1086,36 @@ WorkspaceBrowser::WorkspaceBrowser(Core &core) : Gtk::Box(Gtk::Orientation::VERT
             box->append(*button);
         }
 #endif
+#ifdef DUNE_SKETCHER_ONLY
+        auto actions_overlay = Gtk::make_managed<Gtk::Overlay>();
+        actions_overlay->set_child(*box);
+        if (m_sketcher_add_button) {
+            m_sketcher_add_flyout = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 6);
+            m_sketcher_add_flyout->set_halign(Gtk::Align::START);
+            m_sketcher_add_flyout->set_valign(Gtk::Align::END);
+            m_sketcher_add_flyout->set_margin_start(6);
+            m_sketcher_add_flyout->set_margin_bottom(46);
+            m_sketcher_add_flyout->set_visible(false);
+
+            m_sketcher_open_folder_button = Gtk::make_managed<Gtk::Button>();
+            m_sketcher_open_folder_button->set_icon_name("folder-open-symbolic");
+            m_sketcher_open_folder_button->set_tooltip_text("Open folder");
+            m_sketcher_open_folder_button->set_has_frame(true);
+            m_sketcher_open_folder_button->set_hexpand(true);
+            m_sketcher_open_folder_button->set_halign(Gtk::Align::FILL);
+            m_sketcher_open_folder_button->signal_clicked().connect([this] {
+                if (m_sketcher_add_flyout)
+                    m_sketcher_add_flyout->set_visible(false);
+                m_signal_open_folder.emit();
+            });
+            m_sketcher_add_flyout->append(*m_sketcher_open_folder_button);
+            actions_overlay->add_overlay(*m_sketcher_add_flyout);
+            install_hover_flyout(*m_sketcher_add_button, *m_sketcher_add_flyout);
+        }
+        append(*actions_overlay);
+#else
         append(*box);
+#endif
     }
 
     m_body_menu = Gio::Menu::create();
@@ -1039,7 +1139,7 @@ WorkspaceBrowser::WorkspaceBrowser(Core &core) : Gtk::Box(Gtk::Orientation::VERT
 void WorkspaceBrowser::set_sketcher_open_controls(Gtk::Button &open_button, Gtk::MenuButton &open_menu_button)
 {
 #ifdef DUNE_SKETCHER_ONLY
-    if (!m_sketcher_open_box || !m_sketcher_actions_box)
+    if (!m_sketcher_open_box || !m_sketcher_add_flyout)
         return;
     if (auto parent = dynamic_cast<Gtk::Box *>(open_button.get_parent())) {
         parent->remove(open_button);
@@ -1058,19 +1158,25 @@ void WorkspaceBrowser::set_sketcher_open_controls(Gtk::Button &open_button, Gtk:
     open_menu_button.set_has_frame(false);
     open_menu_button.add_css_class("flat");
     open_menu_button.set_tooltip_text("Recent files");
+    open_menu_button.set_hexpand(true);
     auto open_icon = Gtk::make_managed<Gtk::Image>();
     open_icon->set_from_icon_name("document-open-symbolic");
     open_button.set_child(*open_icon);
     open_button.set_tooltip_text("Open file");
     open_button.set_hexpand(true);
+    open_button.set_halign(Gtk::Align::FILL);
     open_button.set_has_frame(true);
     open_button.remove_css_class("flat");
     open_button.set_visible(true);
     open_menu_button.set_visible(true);
     if (open_menu_button.get_parent() != m_sketcher_open_box)
         m_sketcher_open_box->append(open_menu_button);
-    if (open_button.get_parent() != m_sketcher_actions_box)
-        m_sketcher_actions_box->append(open_button);
+    if (open_button.get_parent() != m_sketcher_add_flyout)
+        m_sketcher_add_flyout->prepend(open_button);
+    open_button.signal_clicked().connect([this] {
+        if (m_sketcher_add_flyout)
+            m_sketcher_add_flyout->set_visible(false);
+    });
 #else
     (void)open_button;
     (void)open_menu_button;

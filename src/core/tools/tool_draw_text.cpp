@@ -11,8 +11,38 @@
 #include "tool_common_impl.hpp"
 #include "dialogs/dialogs.hpp"
 #include "dialogs/enter_text_window.hpp"
+#include <pangomm/fontdescription.h>
 
 namespace dune3d {
+namespace {
+std::string s_default_text_font = "sans 10";
+std::string s_default_text_font_features;
+
+Pango::FontDescription get_default_text_font_desc()
+{
+    return Pango::FontDescription(s_default_text_font);
+}
+}
+
+void ToolDrawText::set_default_font(const std::string &font)
+{
+    s_default_text_font = font;
+}
+
+const std::string &ToolDrawText::get_default_font()
+{
+    return s_default_text_font;
+}
+
+void ToolDrawText::set_default_font_features(const std::string &features)
+{
+    s_default_text_font_features = features;
+}
+
+const std::string &ToolDrawText::get_default_font_features()
+{
+    return s_default_text_font_features;
+}
 
 
 ToolBase::CanBegin ToolDrawText::can_begin()
@@ -35,6 +65,8 @@ ToolResponse ToolDrawText::update(const ToolArgs &args)
             if (data->event == ToolDataWindow::Event::OK) {
                 m_entity = &add_entity<EntityText>();
                 m_entity->m_text = m_win->get_text();
+                m_entity->m_font = s_default_text_font;
+                m_entity->m_font_features = s_default_text_font_features;
                 m_entity->m_wrkpl = get_workplane_uuid();
                 m_entity->m_origin = get_cursor_pos_for_workplane(*m_wrkpl);
                 m_entity->m_selection_invisible = true;
@@ -80,6 +112,31 @@ ToolResponse ToolDrawText::update(const ToolArgs &args)
             update_tip();
         } break;
 
+        case InToolActionID::TOGGLE_TEXT_BOLD: {
+            auto desc = get_default_text_font_desc();
+            const bool is_bold = desc.get_weight() >= Pango::Weight::BOLD;
+            desc.set_weight(is_bold ? Pango::Weight::NORMAL : Pango::Weight::BOLD);
+            s_default_text_font = desc.to_string();
+            if (m_entity) {
+                m_entity->m_font = s_default_text_font;
+                render_text(*m_entity, m_intf.get_pango_context(), get_doc());
+            }
+            update_tip();
+        } break;
+
+        case InToolActionID::TOGGLE_TEXT_ITALIC: {
+            auto desc = get_default_text_font_desc();
+            const auto style = desc.get_style();
+            const bool is_italic = style == Pango::Style::ITALIC || style == Pango::Style::OBLIQUE;
+            desc.set_style(is_italic ? Pango::Style::NORMAL : Pango::Style::ITALIC);
+            s_default_text_font = desc.to_string();
+            if (m_entity) {
+                m_entity->m_font = s_default_text_font;
+                render_text(*m_entity, m_intf.get_pango_context(), get_doc());
+            }
+            update_tip();
+        } break;
+
         case InToolActionID::RMB:
         case InToolActionID::CANCEL:
             return ToolResponse::revert();
@@ -105,6 +162,13 @@ void ToolDrawText::update_tip()
         actions.emplace_back(InToolActionID::TOGGLE_COINCIDENT_CONSTRAINT, "constraint off");
     else
         actions.emplace_back(InToolActionID::TOGGLE_COINCIDENT_CONSTRAINT, "constraint on");
+
+    const auto desc = get_default_text_font_desc();
+    const bool is_bold = desc.get_weight() >= Pango::Weight::BOLD;
+    const auto style = desc.get_style();
+    const bool is_italic = style == Pango::Style::ITALIC || style == Pango::Style::OBLIQUE;
+    actions.emplace_back(InToolActionID::TOGGLE_TEXT_BOLD, is_bold ? "bold off" : "bold on");
+    actions.emplace_back(InToolActionID::TOGGLE_TEXT_ITALIC, is_italic ? "italic off" : "italic on");
 
 
     std::vector<ConstraintType> constraint_icons;

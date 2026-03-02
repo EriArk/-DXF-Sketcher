@@ -20,6 +20,8 @@ uniform mat4 view;
 uniform mat4 proj;
 uniform mat3 screen;
 
+const uint VERTEX_FLAG_ICON_NO_FLIP = (1u << 8);
+
 void main() {
 	pick_to_geom = uint(gl_VertexID+int(pick_base));
 	flags_to_geom = flags;
@@ -29,7 +31,7 @@ void main() {
         vec4 v4 = proj*view*vec4(vec, 0);
         v4.y *= -1;
         vec_to_geom = normalize(v4.xy/t.xy);
-        if(vec_to_geom.x < vec_to_geom.y)
+        if(((flags_to_geom & VERTEX_FLAG_ICON_NO_FLIP) == 0u) && vec_to_geom.x < vec_to_geom.y)
             vec_to_geom *= -1;
     }
     else {
@@ -38,4 +40,3 @@ void main() {
     shift_to_geom = shift;
     icon_to_geom = ivec2(icon_x, icon_y);
 }
-

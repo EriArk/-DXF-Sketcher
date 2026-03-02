@@ -176,6 +176,16 @@ void Renderer::render(const Document &doc, const UUID &current_group, const IDoc
         draw_constraints();
     }
 
+    if (!sr && !m_overlay_construction_lines.empty()) {
+        AutoSaveRestore asr{*this};
+        m_ca.set_selection_invisible(true);
+        m_ca.set_vertex_inactive(true);
+        m_ca.set_vertex_construction(true);
+        m_ca.set_line_style(ICanvas::LineStyle::THIN);
+        for (const auto &[from, to] : m_overlay_construction_lines)
+            m_ca.draw_line(from, to);
+    }
+
     m_ca.update_bbox();
 
     m_doc = nullptr;

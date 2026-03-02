@@ -16,6 +16,13 @@
 #include "group_editor/group_editor.hpp"
 #include "render/renderer.hpp"
 #include "document/entity/entity_workplane.hpp"
+#include "document/entity/entity_line2d.hpp"
+#include "document/entity/entity_circle2d.hpp"
+#include "document/entity/entity_arc2d.hpp"
+#include "document/entity/entity_bezier2d.hpp"
+#include "document/entity/entity_point2d.hpp"
+#include "document/entity/entity_text.hpp"
+#include "document/entity/ientity_in_workplane.hpp"
 #include "logger/logger.hpp"
 #include "document/constraint/constraint.hpp"
 #include "util/fs_util.hpp"
@@ -29,15 +36,30 @@
 #include "import_dxf/dxf_importer.hpp"
 #include "widgets/clipping_plane_window.hpp"
 #include "widgets/selection_filter_window.hpp"
+#include "core/tools/tool_draw_regular_polygon.hpp"
+#include "core/tools/tool_draw_rectangle.hpp"
+#include "core/tools/tool_draw_circle_2d.hpp"
+#include "core/tools/tool_draw_text.hpp"
 #include "system/system.hpp"
 #include "logger/log_util.hpp"
+#include "util/text_render.hpp"
 #include "nlohmann/json.hpp"
 #include "buffer.hpp"
+#include "icon_texture_id.hpp"
 #include <iostream>
 #include <cctype>
 #include <algorithm>
 #include <vector>
+#include <array>
 #include <filesystem>
+#include <cmath>
+#include <iomanip>
+#include <functional>
+#include <sstream>
+#include <functional>
+#include <limits>
+#include <memory>
+#include <glm/gtx/quaternion.hpp>
 
 namespace dune3d {
 namespace {
@@ -49,6 +71,506 @@ std::filesystem::path normalize_group_path(const std::filesystem::path &path)
     catch (...) {
         return path.lexically_normal();
     }
+}
+
+std::string format_line_width_multiplier(double line_width)
+{
+    constexpr double base_line_width = 2.5;
+    const double multiplier = line_width / base_line_width;
+    std::ostringstream ss;
+    if (std::abs(multiplier - std::round(multiplier)) < 0.05) {
+        ss << static_cast<int>(std::round(multiplier));
+    }
+    else {
+        ss << std::fixed << std::setprecision(1) << multiplier;
+    }
+    ss << "x";
+    return ss.str();
+}
+
+[[maybe_unused]] bool group_has_user_entities(const Document &doc, const UUID &group_uu)
+{
+    for (const auto &[en_uu, en] : doc.m_entities) {
+        if (en->m_group != group_uu)
+            continue;
+        if (en->m_kind != ItemKind::USER)
+            continue;
+        if (en->of_type(Entity::Type::WORKPLANE))
+            continue;
+        return true;
+    }
+    return false;
+}
+
+std::optional<UUID> selected_circle_entity_in_group(const Document &doc, const std::set<SelectableRef> &sel,
+                                                    const UUID &group_uu)
+{
+    for (const auto &sr : entities_from_selection(sel)) {
+        if (sr.type != SelectableRef::Type::ENTITY)
+            continue;
+        auto en = doc.get_entity_ptr(sr.item);
+        if (!en)
+            continue;
+        if (en->m_group != group_uu)
+            continue;
+        if (!en->of_type(Entity::Type::CIRCLE_2D, Entity::Type::ARC_2D))
+            continue;
+        return sr.item;
+    }
+    return {};
+}
+
+std::vector<UUID> selected_line_entities_in_group(const Document &doc, const std::set<SelectableRef> &sel,
+                                                  const UUID &group_uu)
+{
+    std::vector<UUID> lines;
+    for (const auto &sr : entities_from_selection(sel)) {
+        if (sr.type != SelectableRef::Type::ENTITY || sr.point != 0)
+            continue;
+        auto en = doc.get_entity_ptr(sr.item);
+        if (!en)
+            continue;
+        if (en->m_group != group_uu)
+            continue;
+        if (en->get_type() != Entity::Type::LINE_2D)
+            continue;
+        if (std::find(lines.begin(), lines.end(), sr.item) == lines.end())
+            lines.push_back(sr.item);
+    }
+    return lines;
+}
+
+glm::dvec2 normalize_dir(const glm::dvec2 &v)
+{
+    const auto len = glm::length(v);
+    if (len < 1e-9)
+        return {1, 0};
+    return v / len;
+}
+
+glm::dvec2 reflect_point_2d(const glm::dvec2 &p, const glm::dvec2 &axis_point, const glm::dvec2 &axis_dir)
+{
+    const auto d = normalize_dir(axis_dir);
+    const glm::dvec2 n{-d.y, d.x};
+    const auto dist = glm::dot(p - axis_point, n);
+    return p - 2.0 * dist * n;
+}
+
+glm::dvec2 rotate_point_2d(const glm::dvec2 &p, const glm::dvec2 &center, double angle_rad)
+{
+    const auto pc = p - center;
+    const auto cs = std::cos(angle_rad);
+    const auto sn = std::sin(angle_rad);
+    return center + glm::dvec2(pc.x * cs - pc.y * sn, pc.x * sn + pc.y * cs);
+}
+
+glm::dvec2 rotate_dir_2d(const glm::dvec2 &dir, double angle_rad)
+{
+    const auto cs = std::cos(angle_rad);
+    const auto sn = std::sin(angle_rad);
+    return normalize_dir(glm::dvec2(dir.x * cs - dir.y * sn, dir.x * sn + dir.y * cs));
+}
+
+double radial_rotation_deg_to_rad(double deg)
+{
+    return deg * M_PI / 180.0;
+}
+
+constexpr int sketch_popover_content_width = 193;
+constexpr int sketch_popover_total_width = sketch_popover_content_width + 24;
+
+std::string format_text_font_label(const Pango::FontDescription &desc)
+{
+    auto family = desc.get_family();
+    if (family.empty())
+        family = desc.to_string();
+    return family;
+}
+
+const UUID &selection_transform_rotate_uuid()
+{
+    static const UUID uu{"00000000-0000-0000-0000-00000000a001"};
+    return uu;
+}
+
+const UUID &selection_transform_scale_uuid()
+{
+    static const UUID uu{"00000000-0000-0000-0000-00000000a002"};
+    return uu;
+}
+
+bool is_selection_transform_handle(const SelectableRef &sr)
+{
+    if (sr.type != SelectableRef::Type::SOLID_MODEL_EDGE)
+        return false;
+    return sr.item == selection_transform_rotate_uuid() || sr.item == selection_transform_scale_uuid();
+}
+
+struct SelectionTransformOverlayData {
+    UUID group;
+    UUID workplane;
+    std::vector<UUID> entities;
+    glm::dvec2 bbox_min;
+    glm::dvec2 bbox_max;
+    glm::dvec2 center;
+    glm::dvec2 rotate_handle;
+    std::array<glm::dvec2, 4> scale_handles;
+};
+
+void append_entity_points_for_transform_bbox(const Entity &en, std::vector<glm::dvec2> &points)
+{
+    if (const auto *line = dynamic_cast<const EntityLine2D *>(&en)) {
+        points.push_back(line->m_p1);
+        points.push_back(line->m_p2);
+    }
+    else if (const auto *circle = dynamic_cast<const EntityCircle2D *>(&en)) {
+        points.push_back(circle->m_center + glm::dvec2(circle->m_radius, 0));
+        points.push_back(circle->m_center + glm::dvec2(-circle->m_radius, 0));
+        points.push_back(circle->m_center + glm::dvec2(0, circle->m_radius));
+        points.push_back(circle->m_center + glm::dvec2(0, -circle->m_radius));
+    }
+    else if (const auto *arc = dynamic_cast<const EntityArc2D *>(&en)) {
+        points.push_back(arc->m_center);
+        points.push_back(arc->m_from);
+        points.push_back(arc->m_to);
+        const auto radius = glm::length(arc->m_from - arc->m_center);
+        if (radius > 1e-9) {
+            const auto c2pi_local = [](double x) {
+                while (x < 0)
+                    x += 2 * M_PI;
+                while (x >= 2 * M_PI)
+                    x -= 2 * M_PI;
+                return x;
+            };
+            const auto a0 = c2pi_local(std::atan2(arc->m_from.y - arc->m_center.y, arc->m_from.x - arc->m_center.x));
+            const auto a1 = c2pi_local(std::atan2(arc->m_to.y - arc->m_center.y, arc->m_to.x - arc->m_center.x));
+            auto dphi = c2pi_local(a1 - a0);
+            if (dphi < 1e-2)
+                dphi = 2 * M_PI;
+            constexpr unsigned int steps = 32;
+            for (unsigned int i = 0; i <= steps; i++) {
+                const auto a = a0 + dphi * static_cast<double>(i) / static_cast<double>(steps);
+                points.push_back(arc->m_center + glm::dvec2(std::cos(a) * radius, std::sin(a) * radius));
+            }
+        }
+    }
+    else if (const auto *bezier = dynamic_cast<const EntityBezier2D *>(&en)) {
+        constexpr unsigned int steps = 32;
+        for (unsigned int i = 0; i <= steps; i++) {
+            const auto t = static_cast<double>(i) / static_cast<double>(steps);
+            points.push_back(bezier->get_interpolated(t));
+        }
+    }
+    else if (const auto *point = dynamic_cast<const EntityPoint2D *>(&en)) {
+        points.push_back(point->m_p);
+    }
+}
+
+bool collect_selection_transform_overlay_data(const Document &doc, const std::set<SelectableRef> &selection,
+                                              double frame_angle, SelectionTransformOverlayData &out)
+{
+    std::set<UUID> selected_entities;
+    std::set<UUID> selected_constraints;
+    for (const auto &sr : selection) {
+        if (sr.type == SelectableRef::Type::ENTITY)
+            selected_entities.insert(sr.item);
+        else if (sr.type == SelectableRef::Type::CONSTRAINT)
+            selected_constraints.insert(sr.item);
+    }
+
+    if (selected_entities.empty() && !selected_constraints.empty()) {
+        for (const auto &cuu : selected_constraints) {
+            const auto *constr = doc.get_constraint_ptr(cuu);
+            if (!constr)
+                continue;
+            for (const auto &euu : constr->get_referenced_entities())
+                selected_entities.insert(euu);
+        }
+    }
+
+    if (selected_entities.empty())
+        return false;
+
+    std::vector<UUID> entities;
+    std::vector<glm::dvec2> points;
+    UUID group;
+    bool group_set = false;
+    UUID workplane;
+    bool workplane_set = false;
+    for (const auto &uu : selected_entities) {
+        const auto *en = doc.get_entity_ptr(uu);
+        if (!en)
+            continue;
+        if (!en->of_type(Entity::Type::LINE_2D, Entity::Type::ARC_2D, Entity::Type::CIRCLE_2D, Entity::Type::BEZIER_2D,
+                         Entity::Type::POINT_2D))
+            continue;
+        if (!group_set) {
+            group = en->m_group;
+            group_set = true;
+        }
+        else if (group != en->m_group) {
+            continue;
+        }
+        const auto *en_wrkpl = dynamic_cast<const IEntityInWorkplane *>(en);
+        if (!en_wrkpl)
+            continue;
+        if (!workplane_set) {
+            workplane = en_wrkpl->get_workplane();
+            workplane_set = true;
+        }
+        else if (workplane != en_wrkpl->get_workplane()) {
+            continue;
+        }
+        entities.push_back(uu);
+        append_entity_points_for_transform_bbox(*en, points);
+    }
+
+    if (entities.empty() || points.empty() || !workplane_set || !group_set)
+        return false;
+
+    std::vector<glm::dvec2> local_points;
+    local_points.reserve(points.size());
+    for (const auto &p : points)
+        local_points.push_back(rotate_point_2d(p, {0, 0}, -frame_angle));
+
+    auto bbox_min_local = local_points.front();
+    auto bbox_max_local = local_points.front();
+    for (const auto &p : local_points) {
+        bbox_min_local = glm::min(bbox_min_local, p);
+        bbox_max_local = glm::max(bbox_max_local, p);
+    }
+
+    auto size = bbox_max_local - bbox_min_local;
+    if (size.x < 1e-6) {
+        bbox_min_local.x -= 5;
+        bbox_max_local.x += 5;
+    }
+    if (size.y < 1e-6) {
+        bbox_min_local.y -= 5;
+        bbox_max_local.y += 5;
+    }
+    size = bbox_max_local - bbox_min_local;
+    const auto pad = std::max(2.0, std::max(size.x, size.y) * 0.08);
+    bbox_min_local -= glm::dvec2(pad, pad);
+    bbox_max_local += glm::dvec2(pad, pad);
+    size = bbox_max_local - bbox_min_local;
+
+    const auto center_local = (bbox_min_local + bbox_max_local) * 0.5;
+    const auto center = rotate_point_2d(center_local, {0, 0}, frame_angle);
+    const auto rotate_gap = std::max(10.0, std::max(size.x, size.y) * 0.22);
+    std::array<glm::dvec2, 4> scale_handles = {
+            glm::dvec2{bbox_min_local.x, bbox_min_local.y},
+            glm::dvec2{bbox_min_local.x, bbox_max_local.y},
+            glm::dvec2{bbox_max_local.x, bbox_max_local.y},
+            glm::dvec2{bbox_max_local.x, bbox_min_local.y},
+    };
+    for (auto &p : scale_handles)
+        p = rotate_point_2d(p, {0, 0}, frame_angle);
+
+    const auto rotate_handle = rotate_point_2d({center_local.x, bbox_max_local.y + rotate_gap}, {0, 0}, frame_angle);
+
+    auto bbox_min = scale_handles.front();
+    auto bbox_max = scale_handles.front();
+    for (const auto &p : scale_handles) {
+        bbox_min = glm::min(bbox_min, p);
+        bbox_max = glm::max(bbox_max, p);
+    }
+    bbox_min = glm::min(bbox_min, rotate_handle);
+    bbox_max = glm::max(bbox_max, rotate_handle);
+
+    out.group = group;
+    out.workplane = workplane;
+    out.entities = entities;
+    out.bbox_min = bbox_min;
+    out.bbox_max = bbox_max;
+    out.center = center;
+    out.rotate_handle = rotate_handle;
+    out.scale_handles = scale_handles;
+    return true;
+}
+
+void transform_2d_entity(Entity &dst, const Entity &src, const std::function<glm::dvec2(const glm::dvec2 &)> &transform,
+                         double uniform_scale)
+{
+    if (auto *line = dynamic_cast<EntityLine2D *>(&dst)) {
+        if (const auto *src_line = dynamic_cast<const EntityLine2D *>(&src)) {
+            line->m_p1 = transform(src_line->m_p1);
+            line->m_p2 = transform(src_line->m_p2);
+        }
+    }
+    else if (auto *arc = dynamic_cast<EntityArc2D *>(&dst)) {
+        if (const auto *src_arc = dynamic_cast<const EntityArc2D *>(&src)) {
+            arc->m_from = transform(src_arc->m_from);
+            arc->m_to = transform(src_arc->m_to);
+            arc->m_center = transform(src_arc->m_center);
+        }
+    }
+    else if (auto *circle = dynamic_cast<EntityCircle2D *>(&dst)) {
+        if (const auto *src_circle = dynamic_cast<const EntityCircle2D *>(&src)) {
+            circle->m_center = transform(src_circle->m_center);
+            circle->m_radius = std::max(1e-9, src_circle->m_radius * uniform_scale);
+        }
+    }
+    else if (auto *bezier = dynamic_cast<EntityBezier2D *>(&dst)) {
+        if (const auto *src_bezier = dynamic_cast<const EntityBezier2D *>(&src)) {
+            bezier->m_p1 = transform(src_bezier->m_p1);
+            bezier->m_p2 = transform(src_bezier->m_p2);
+            bezier->m_c1 = transform(src_bezier->m_c1);
+            bezier->m_c2 = transform(src_bezier->m_c2);
+        }
+    }
+    else if (auto *point = dynamic_cast<EntityPoint2D *>(&dst)) {
+        if (const auto *src_point = dynamic_cast<const EntityPoint2D *>(&src))
+            point->m_p = transform(src_point->m_p);
+    }
+}
+
+bool remove_direction_constraints_for_entities(Document &doc, const UUID &group_uu, const std::set<UUID> &entities)
+{
+    (void)group_uu;
+    std::vector<UUID> constraints_to_delete;
+    for (const auto &[uu, constr] : doc.m_constraints) {
+        if (!constr->of_type(ConstraintType::HORIZONTAL, ConstraintType::VERTICAL, ConstraintType::POINT_DISTANCE_HORIZONTAL,
+                             ConstraintType::POINT_DISTANCE_VERTICAL))
+            continue;
+        bool has_non_workplane_ref = false;
+        bool all_non_workplane_inside = true;
+        for (const auto &enp : constr->get_referenced_entities_and_points()) {
+            const auto *en = doc.get_entity_ptr(enp.entity);
+            if (!en)
+                continue;
+            if (en->of_type(Entity::Type::WORKPLANE))
+                continue;
+            has_non_workplane_ref = true;
+            if (!entities.contains(enp.entity)) {
+                all_non_workplane_inside = false;
+                break;
+            }
+        }
+        if (!has_non_workplane_ref || !all_non_workplane_inside)
+            continue;
+        constraints_to_delete.push_back(uu);
+    }
+    for (const auto &uu : constraints_to_delete)
+        doc.m_constraints.erase(uu);
+    return !constraints_to_delete.empty();
+}
+
+struct HoverPopoverState {
+    bool pointer_on_button = false;
+    bool pointer_on_popover = false;
+    sigc::connection close_timeout;
+};
+
+Gtk::Popover *g_active_hover_popover = nullptr;
+
+bool widget_or_descendant_has_focus(Gtk::Widget &widget)
+{
+    if (widget.has_focus())
+        return true;
+    auto *focus = widget.get_root() ? widget.get_root()->get_focus() : nullptr;
+    while (focus) {
+        if (focus == &widget)
+            return true;
+        focus = focus->get_parent();
+    }
+    return false;
+}
+
+void install_hover_popover(Gtk::Widget &button, Gtk::Popover &popover, std::function<bool()> can_open = {},
+                           std::function<bool()> right_click_only = {})
+{
+    auto state = std::make_shared<HoverPopoverState>();
+
+    auto maybe_close = [state, &button, &popover] {
+        // Keep popover while focused widget is inside opener button or inside the popover.
+        if (widget_or_descendant_has_focus(button) || widget_or_descendant_has_focus(popover))
+            return;
+        if (!state->pointer_on_button && !state->pointer_on_popover && popover.get_visible()) {
+            if (g_active_hover_popover == &popover)
+                g_active_hover_popover = nullptr;
+            popover.popdown();
+        }
+    };
+
+    auto schedule_close = [state, maybe_close] {
+        state->close_timeout.disconnect();
+        state->close_timeout = Glib::signal_timeout().connect(
+                [maybe_close] {
+                    maybe_close();
+                    return false;
+                },
+                120);
+    };
+
+    auto button_motion = Gtk::EventControllerMotion::create();
+    button_motion->signal_enter().connect([state, &popover, can_open, right_click_only](double, double) {
+        state->pointer_on_button = true;
+        state->close_timeout.disconnect();
+        if (right_click_only && right_click_only())
+            return;
+        if (can_open && !can_open()) {
+            if (g_active_hover_popover && g_active_hover_popover->get_visible()) {
+                g_active_hover_popover->popdown();
+                g_active_hover_popover = nullptr;
+            }
+            return;
+        }
+        if (g_active_hover_popover && g_active_hover_popover != &popover && g_active_hover_popover->get_visible())
+            g_active_hover_popover->popdown();
+        if (!popover.get_visible())
+            popover.popup();
+        g_active_hover_popover = &popover;
+    });
+    button_motion->signal_leave().connect([state, schedule_close] {
+        state->pointer_on_button = false;
+        schedule_close();
+    });
+    button.add_controller(button_motion);
+
+    auto button_click = Gtk::GestureClick::create();
+    button_click->set_button(3);
+    button_click->set_propagation_phase(Gtk::PropagationPhase::CAPTURE);
+    button_click->signal_pressed().connect([state, &popover, can_open, right_click_only, button_click](int, double, double) {
+        button_click->set_state(Gtk::EventSequenceState::CLAIMED);
+        if (right_click_only && !right_click_only())
+            return;
+        state->pointer_on_button = true;
+        state->close_timeout.disconnect();
+        if (can_open && !can_open())
+            return;
+        if (g_active_hover_popover && g_active_hover_popover != &popover && g_active_hover_popover->get_visible())
+            g_active_hover_popover->popdown();
+        if (popover.get_visible()) {
+            popover.popdown();
+            if (g_active_hover_popover == &popover)
+                g_active_hover_popover = nullptr;
+        }
+        else {
+            popover.popup();
+            g_active_hover_popover = &popover;
+        }
+    });
+    button.add_controller(button_click);
+
+    auto popover_motion = Gtk::EventControllerMotion::create();
+    popover_motion->signal_enter().connect([state](double, double) {
+        state->pointer_on_popover = true;
+        state->close_timeout.disconnect();
+    });
+    popover_motion->signal_leave().connect([state, schedule_close] {
+        state->pointer_on_popover = false;
+        schedule_close();
+    });
+    popover.add_controller(popover_motion);
+
+    popover.signal_hide().connect([state, &popover] {
+        if (g_active_hover_popover == &popover)
+            g_active_hover_popover = nullptr;
+        state->pointer_on_button = false;
+        state->pointer_on_popover = false;
+        state->close_timeout.disconnect();
+    });
 }
 } // namespace
 
@@ -88,7 +610,16 @@ void Editor::init()
         m_workspace_browser->update_needs_save();
         update_workspace_view_names();
     });
-    get_canvas().signal_selection_changed().connect([this] { update_action_sensitivity(); });
+    get_canvas().signal_selection_changed().connect([this] {
+        update_action_sensitivity();
+        sync_symmetry_popover_context();
+        apply_symmetry_live_from_popover(false);
+        sync_draw_text_popover_from_selection(true);
+#ifdef DUNE_SKETCHER_ONLY
+        if (m_selection_transform_enabled && !m_selection_transform_drag_active && !m_core.tool_is_active())
+            canvas_update_keep_selection();
+#endif
+    });
 
     m_win.signal_close_request().connect(
             [this] {
@@ -138,6 +669,13 @@ void Editor::init()
         update_action_bar_visibility();
         update_selection_editor();
         update_title();
+#ifdef DUNE_SKETCHER_ONLY
+        if (!m_core.has_documents()) {
+            m_sticky_draw_tool = ToolID::NONE;
+            set_symmetry_enabled(false, false);
+        }
+#endif
+        update_sketcher_toolbar_button_states();
     });
 
     attach_action_button(m_win.get_welcome_open_button(), ActionID::OPEN_DOCUMENT);
@@ -146,11 +684,75 @@ void Editor::init()
     m_win.get_welcome_open_folder_button().signal_clicked().connect(sigc::mem_fun(*this, &Editor::on_open_folder));
 #endif
 
+#ifdef DUNE_SKETCHER_ONLY
+    m_selection_mode_button = Gtk::make_managed<Gtk::Button>();
+    m_selection_mode_button->set_icon_name("edit-select-all-symbolic");
+    m_selection_mode_button->set_has_frame(true);
+    m_selection_mode_button->add_css_class("sketch-toolbar-button");
+    m_selection_mode_button->signal_clicked().connect(sigc::mem_fun(*this, &Editor::activate_selection_mode));
+    {
+        auto popover = Gtk::make_managed<Gtk::Popover>();
+        popover->set_has_arrow(true);
+        popover->set_autohide(false);
+        popover->add_css_class("sketch-grid-popover");
+        popover->set_parent(*m_selection_mode_button);
+        popover->set_size_request(sketch_popover_total_width, -1);
+        install_hover_popover(*m_selection_mode_button, *popover, [this] { return !m_primary_button_pressed; },
+                              [this] { return m_right_click_popovers_only; });
+        m_selection_mode_popover = popover;
+
+        auto box = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 10);
+        box->set_margin_start(12);
+        box->set_margin_end(12);
+        box->set_margin_top(12);
+        box->set_margin_bottom(12);
+        box->set_size_request(sketch_popover_content_width, -1);
+        popover->set_child(*box);
+
+        auto transform_row = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 8);
+        auto transform_label = Gtk::make_managed<Gtk::Label>("Transform");
+        transform_label->set_hexpand(true);
+        transform_label->set_xalign(0);
+        m_selection_transform_switch = Gtk::make_managed<Gtk::Switch>();
+        transform_row->append(*transform_label);
+        transform_row->append(*m_selection_transform_switch);
+        box->append(*transform_row);
+
+        m_selection_transform_switch->property_active().signal_changed().connect([this] {
+            if (m_updating_selection_mode_popover)
+                return;
+            m_selection_transform_enabled = m_selection_transform_switch->get_active();
+            if (!m_selection_transform_enabled) {
+                end_selection_transform_drag();
+            }
+            canvas_update_keep_selection();
+            update_sketcher_toolbar_button_states();
+        });
+    }
+    sync_selection_mode_popover();
+    m_win.add_action_button(*m_selection_mode_button);
+#endif
+
     create_action_bar_button(ToolID::DRAW_CONTOUR);
     create_action_bar_button(ToolID::DRAW_RECTANGLE);
     create_action_bar_button(ToolID::DRAW_CIRCLE_2D);
     create_action_bar_button(ToolID::DRAW_REGULAR_POLYGON);
     create_action_bar_button(ToolID::DRAW_TEXT);
+#ifdef DUNE_SKETCHER_ONLY
+    {
+        auto button = Gtk::make_managed<Gtk::Button>();
+        button->set_icon_name("image-x-generic-symbolic");
+        button->set_tooltip_text("Import Picture");
+        button->set_has_frame(true);
+        button->add_css_class("sketch-toolbar-button");
+        button->signal_clicked().connect([this] {
+            m_sticky_draw_tool = ToolID::NONE;
+            trigger_action(ToolID::IMPORT_PICTURE);
+            update_sketcher_toolbar_button_states();
+        });
+        m_win.add_action_button(*button);
+    }
+#endif
 
     init_view_options();
 
@@ -226,6 +828,10 @@ void Editor::init()
 #endif
 
     apply_preferences();
+#ifdef DUNE_SKETCHER_ONLY
+    update_sketcher_toolbar_button_states();
+    m_win.set_welcome_box_visible(!m_core.has_documents());
+#endif
 }
 
 void Editor::add_tool_action(ActionToolID id, const std::string &action)
@@ -326,19 +932,547 @@ Gtk::Button &Editor::create_action_bar_button(ActionToolID action)
         img->set_from_icon_name("face-worried-symbolic");
     img->set_icon_size(Gtk::IconSize::NORMAL);
     bu->set_child(*img);
+    Gtk::Popover *tool_popover = nullptr;
 #ifdef DUNE_SKETCHER_ONLY
     bu->set_has_frame(true);
+    bu->add_css_class("sketch-toolbar-button");
+    if (std::holds_alternative<ToolID>(action) && std::get<ToolID>(action) == ToolID::DRAW_REGULAR_POLYGON) {
+        tool_popover = Gtk::make_managed<Gtk::Popover>();
+        tool_popover->set_has_arrow(true);
+        tool_popover->set_autohide(false);
+        tool_popover->add_css_class("sketch-grid-popover");
+        tool_popover->set_parent(*bu);
+        tool_popover->set_size_request(sketch_popover_total_width, -1);
+
+        auto box = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 10);
+        box->set_margin_start(12);
+        box->set_margin_end(12);
+        box->set_margin_top(12);
+        box->set_margin_bottom(12);
+        box->set_size_request(sketch_popover_content_width, -1);
+        tool_popover->set_child(*box);
+
+        auto sides_row = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 8);
+        auto sides_label = Gtk::make_managed<Gtk::Label>("Sides");
+        sides_label->set_hexpand(true);
+        sides_label->set_xalign(0);
+        auto sides_spin = Gtk::make_managed<Gtk::SpinButton>();
+        sides_spin->set_range(3, 64);
+        sides_spin->set_increments(1, 1);
+        sides_spin->set_digits(0);
+        sides_spin->set_numeric(true);
+        sides_spin->set_width_chars(2);
+        sides_spin->set_value(ToolDrawRegularPolygon::get_default_sides());
+        sides_row->append(*sides_label);
+        sides_row->append(*sides_spin);
+        box->append(*sides_row);
+
+        auto rounded_row = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 8);
+        auto rounded_label = Gtk::make_managed<Gtk::Label>("Rounded");
+        rounded_label->set_hexpand(true);
+        rounded_label->set_xalign(0);
+        auto rounded_switch = Gtk::make_managed<Gtk::Switch>();
+        rounded_switch->set_active(ToolDrawRegularPolygon::get_default_rounded());
+        rounded_row->append(*rounded_label);
+        rounded_row->append(*rounded_switch);
+        box->append(*rounded_row);
+
+        auto radius_revealer = Gtk::make_managed<Gtk::Revealer>();
+        radius_revealer->set_transition_type(Gtk::RevealerTransitionType::SLIDE_DOWN);
+        radius_revealer->set_transition_duration(120);
+        auto radius_row = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 8);
+        auto radius_label = Gtk::make_managed<Gtk::Label>("Radius");
+        radius_label->set_hexpand(true);
+        radius_label->set_xalign(0);
+        auto radius_spin = Gtk::make_managed<Gtk::SpinButton>();
+        radius_spin->set_range(0.0, 9999.99);
+        radius_spin->set_increments(0.1, 1.0);
+        radius_spin->set_digits(2);
+        radius_spin->set_numeric(true);
+        radius_spin->set_width_chars(5);
+        radius_spin->set_value(ToolDrawRegularPolygon::get_default_round_radius());
+        auto mm_label = Gtk::make_managed<Gtk::Label>("mm");
+        mm_label->add_css_class("dim-label");
+        radius_row->append(*radius_label);
+        radius_row->append(*radius_spin);
+        radius_row->append(*mm_label);
+        radius_revealer->set_child(*radius_row);
+        radius_revealer->set_reveal_child(rounded_switch->get_active());
+        box->append(*radius_revealer);
+
+        sides_spin->signal_value_changed().connect([sides_spin] {
+            ToolDrawRegularPolygon::set_default_sides(static_cast<unsigned int>(sides_spin->get_value()));
+        });
+        rounded_switch->property_active().signal_changed().connect([rounded_switch, radius_revealer] {
+            const bool active = rounded_switch->get_active();
+            ToolDrawRegularPolygon::set_default_rounded(active);
+            radius_revealer->set_reveal_child(active);
+        });
+        radius_spin->signal_value_changed().connect(
+                [radius_spin] { ToolDrawRegularPolygon::set_default_round_radius(radius_spin->get_value()); });
+    }
+    else if (std::holds_alternative<ToolID>(action) && std::get<ToolID>(action) == ToolID::DRAW_CIRCLE_2D) {
+        tool_popover = Gtk::make_managed<Gtk::Popover>();
+        tool_popover->set_has_arrow(true);
+        tool_popover->set_autohide(false);
+        tool_popover->add_css_class("sketch-grid-popover");
+        tool_popover->set_parent(*bu);
+        tool_popover->set_size_request(sketch_popover_total_width, -1);
+
+        auto box = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 10);
+        box->set_margin_start(12);
+        box->set_margin_end(12);
+        box->set_margin_top(12);
+        box->set_margin_bottom(12);
+        box->set_size_request(sketch_popover_content_width, -1);
+        tool_popover->set_child(*box);
+
+        auto oval_row = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 8);
+        auto oval_label = Gtk::make_managed<Gtk::Label>("Oval");
+        oval_label->set_hexpand(true);
+        oval_label->set_xalign(0);
+        auto oval_switch = Gtk::make_managed<Gtk::Switch>();
+        oval_switch->set_active(ToolDrawCircle2D::get_default_oval_mode());
+        oval_row->append(*oval_label);
+        oval_row->append(*oval_switch);
+        box->append(*oval_row);
+
+        oval_switch->property_active().signal_changed().connect(
+                [oval_switch] { ToolDrawCircle2D::set_default_oval_mode(oval_switch->get_active()); });
+
+        auto slice_row = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 8);
+        auto slice_label = Gtk::make_managed<Gtk::Label>("Slice");
+        slice_label->set_hexpand(true);
+        slice_label->set_xalign(0);
+        auto slice_switch = Gtk::make_managed<Gtk::Switch>();
+        const auto default_span = ToolDrawCircle2D::get_default_span_degrees();
+        slice_switch->set_active(default_span < 359.999);
+        slice_row->append(*slice_label);
+        slice_row->append(*slice_switch);
+        box->append(*slice_row);
+
+        auto angle_revealer = Gtk::make_managed<Gtk::Revealer>();
+        angle_revealer->set_transition_type(Gtk::RevealerTransitionType::SLIDE_DOWN);
+        angle_revealer->set_transition_duration(120);
+
+        auto angle_row = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 8);
+        auto angle_label = Gtk::make_managed<Gtk::Label>("Angle");
+        angle_label->set_hexpand(true);
+        angle_label->set_xalign(0);
+        auto angle_spin = Gtk::make_managed<Gtk::SpinButton>();
+        angle_spin->set_range(1.0, 359.0);
+        angle_spin->set_increments(1.0, 15.0);
+        angle_spin->set_digits(0);
+        angle_spin->set_numeric(true);
+        angle_spin->set_width_chars(3);
+        angle_spin->set_value(std::clamp(default_span, 1.0, 359.0));
+        auto deg_label = Gtk::make_managed<Gtk::Label>("deg");
+        deg_label->add_css_class("dim-label");
+        angle_row->append(*angle_label);
+        angle_row->append(*angle_spin);
+        angle_row->append(*deg_label);
+        angle_revealer->set_child(*angle_row);
+        angle_revealer->set_reveal_child(slice_switch->get_active());
+        box->append(*angle_revealer);
+
+        slice_switch->property_active().signal_changed().connect([slice_switch, angle_spin, angle_revealer] {
+            if (slice_switch->get_active()) {
+                auto span = ToolDrawCircle2D::get_default_span_degrees();
+                if (span >= 359.999)
+                    span = 180.0;
+                ToolDrawCircle2D::set_default_span_degrees(span);
+                angle_spin->set_value(std::clamp(span, 1.0, 359.0));
+                angle_revealer->set_reveal_child(true);
+            }
+            else {
+                ToolDrawCircle2D::set_default_span_degrees(360.0);
+                angle_revealer->set_reveal_child(false);
+            }
+        });
+        angle_spin->signal_value_changed().connect([angle_spin, slice_switch] {
+            if (!slice_switch->get_active())
+                return;
+            ToolDrawCircle2D::set_default_span_degrees(angle_spin->get_value());
+        });
+    }
+    else if (std::holds_alternative<ToolID>(action) && std::get<ToolID>(action) == ToolID::DRAW_TEXT) {
+        tool_popover = Gtk::make_managed<Gtk::Popover>();
+        tool_popover->set_has_arrow(true);
+        tool_popover->set_autohide(false);
+        tool_popover->add_css_class("sketch-grid-popover");
+        tool_popover->set_parent(*bu);
+        tool_popover->set_size_request(sketch_popover_total_width, -1);
+
+        auto box = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 10);
+        box->set_margin_start(12);
+        box->set_margin_end(12);
+        box->set_margin_top(12);
+        box->set_margin_bottom(12);
+        box->set_size_request(sketch_popover_content_width, -1);
+        tool_popover->set_child(*box);
+        m_draw_text_popover = tool_popover;
+
+        m_draw_text_font_dialog = Gtk::FontDialog::create();
+        m_draw_text_font_dialog->set_modal(true);
+        m_draw_text_font_desc = Pango::FontDescription(ToolDrawText::get_default_font());
+        m_draw_text_font_features = ToolDrawText::get_default_font_features();
+
+        auto font_row = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 8);
+        auto font_label = Gtk::make_managed<Gtk::Label>("Font");
+        font_label->set_hexpand(true);
+        font_label->set_xalign(0);
+        m_draw_text_font_button = Gtk::make_managed<Gtk::Button>();
+        m_draw_text_font_button->set_has_frame(true);
+        m_draw_text_font_button->set_hexpand(true);
+        m_draw_text_font_button->set_halign(Gtk::Align::END);
+        font_row->append(*font_label);
+        font_row->append(*m_draw_text_font_button);
+        box->append(*font_row);
+
+        auto bold_row = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 8);
+        auto bold_label = Gtk::make_managed<Gtk::Label>("Bold");
+        bold_label->set_hexpand(true);
+        bold_label->set_xalign(0);
+        m_draw_text_bold_switch = Gtk::make_managed<Gtk::Switch>();
+        bold_row->append(*bold_label);
+        bold_row->append(*m_draw_text_bold_switch);
+        box->append(*bold_row);
+
+        auto italic_row = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 8);
+        auto italic_label = Gtk::make_managed<Gtk::Label>("Italic");
+        italic_label->set_hexpand(true);
+        italic_label->set_xalign(0);
+        m_draw_text_italic_switch = Gtk::make_managed<Gtk::Switch>();
+        italic_row->append(*italic_label);
+        italic_row->append(*m_draw_text_italic_switch);
+        box->append(*italic_row);
+
+        sync_draw_text_popover_from_font_desc();
+        apply_draw_text_popover_change(false);
+
+        m_draw_text_font_button->signal_clicked().connect([this] {
+            if (!m_draw_text_font_dialog || !m_draw_text_popover)
+                return;
+            m_draw_text_popover->popdown();
+            m_draw_text_font_dialog->choose_font_and_features(
+                    m_win,
+                    [this](const Glib::RefPtr<Gio::AsyncResult> &result) {
+                        try {
+                            auto [desc, features, language] = m_draw_text_font_dialog->choose_font_and_features_finish(result);
+                            (void)language;
+                            m_draw_text_font_desc = desc;
+                            m_draw_text_font_features = features;
+                            sync_draw_text_popover_from_font_desc();
+                            apply_draw_text_popover_change(true);
+                        }
+                        catch (const Glib::Error &) {
+                        }
+                        if (m_draw_text_popover) {
+                            if (g_active_hover_popover && g_active_hover_popover != m_draw_text_popover
+                                && g_active_hover_popover->get_visible()) {
+                                g_active_hover_popover->popdown();
+                            }
+                            m_draw_text_popover->popup();
+                            g_active_hover_popover = m_draw_text_popover;
+                        }
+                    },
+                    m_draw_text_font_desc);
+        });
+
+        m_draw_text_bold_switch->property_active().signal_changed().connect([this] {
+            if (m_updating_draw_text_popover)
+                return;
+            auto desc = m_draw_text_font_desc;
+            desc.set_weight(m_draw_text_bold_switch->get_active() ? Pango::Weight::BOLD : Pango::Weight::NORMAL);
+            m_draw_text_font_desc = desc;
+            sync_draw_text_popover_from_font_desc();
+            apply_draw_text_popover_change(true);
+        });
+        m_draw_text_italic_switch->property_active().signal_changed().connect([this] {
+            if (m_updating_draw_text_popover)
+                return;
+            auto desc = m_draw_text_font_desc;
+            desc.set_style(m_draw_text_italic_switch->get_active() ? Pango::Style::ITALIC : Pango::Style::NORMAL);
+            m_draw_text_font_desc = desc;
+            sync_draw_text_popover_from_font_desc();
+            apply_draw_text_popover_change(true);
+        });
+    }
+    else if (std::holds_alternative<ToolID>(action) && std::get<ToolID>(action) == ToolID::DRAW_RECTANGLE) {
+        tool_popover = Gtk::make_managed<Gtk::Popover>();
+        tool_popover->set_has_arrow(true);
+        tool_popover->set_autohide(false);
+        tool_popover->add_css_class("sketch-grid-popover");
+        tool_popover->set_parent(*bu);
+        tool_popover->set_size_request(sketch_popover_total_width, -1);
+
+        auto box = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 10);
+        box->set_margin_start(12);
+        box->set_margin_end(12);
+        box->set_margin_top(12);
+        box->set_margin_bottom(12);
+        box->set_size_request(sketch_popover_content_width, -1);
+        tool_popover->set_child(*box);
+
+        auto square_row = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 8);
+        auto square_label = Gtk::make_managed<Gtk::Label>("Square");
+        square_label->set_hexpand(true);
+        square_label->set_xalign(0);
+        auto square_switch = Gtk::make_managed<Gtk::Switch>();
+        square_switch->set_active(ToolDrawRectangle::get_default_square());
+        square_row->append(*square_label);
+        square_row->append(*square_switch);
+        box->append(*square_row);
+
+        auto rounded_row = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 8);
+        auto rounded_label = Gtk::make_managed<Gtk::Label>("Rounded");
+        rounded_label->set_hexpand(true);
+        rounded_label->set_xalign(0);
+        auto rounded_switch = Gtk::make_managed<Gtk::Switch>();
+        rounded_switch->set_active(ToolDrawRectangle::get_default_rounded());
+        rounded_row->append(*rounded_label);
+        rounded_row->append(*rounded_switch);
+        box->append(*rounded_row);
+
+        auto radius_revealer = Gtk::make_managed<Gtk::Revealer>();
+        radius_revealer->set_transition_type(Gtk::RevealerTransitionType::SLIDE_DOWN);
+        radius_revealer->set_transition_duration(120);
+        auto radius_row = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 8);
+        auto radius_label = Gtk::make_managed<Gtk::Label>("Radius");
+        radius_label->set_hexpand(true);
+        radius_label->set_xalign(0);
+        auto radius_spin = Gtk::make_managed<Gtk::SpinButton>();
+        radius_spin->set_range(0.0, 9999.99);
+        radius_spin->set_increments(0.1, 1.0);
+        radius_spin->set_digits(2);
+        radius_spin->set_numeric(true);
+        radius_spin->set_width_chars(5);
+        radius_spin->set_value(ToolDrawRectangle::get_default_round_radius());
+        auto mm_label = Gtk::make_managed<Gtk::Label>("mm");
+        mm_label->add_css_class("dim-label");
+        radius_row->append(*radius_label);
+        radius_row->append(*radius_spin);
+        radius_row->append(*mm_label);
+        radius_revealer->set_child(*radius_row);
+        radius_revealer->set_reveal_child(rounded_switch->get_active());
+        box->append(*radius_revealer);
+
+        square_switch->property_active().signal_changed().connect(
+                [square_switch] { ToolDrawRectangle::set_default_square(square_switch->get_active()); });
+        rounded_switch->property_active().signal_changed().connect([rounded_switch, radius_revealer] {
+            const bool active = rounded_switch->get_active();
+            ToolDrawRectangle::set_default_rounded(active);
+            radius_revealer->set_reveal_child(active);
+        });
+        radius_spin->signal_value_changed().connect(
+                [radius_spin] { ToolDrawRectangle::set_default_round_radius(radius_spin->get_value()); });
+    }
+    if (tool_popover) {
+        install_hover_popover(*bu, *tool_popover, [this] { return !m_primary_button_pressed; },
+                              [this] { return m_right_click_popovers_only; });
+    }
 #else
     bu->add_css_class("osd");
     bu->add_css_class("action-button");
 #endif
-    bu->signal_clicked().connect([this, action] {
+    bu->signal_clicked().connect([this, action, tool_popover] {
+#ifdef DUNE_SKETCHER_ONLY
+        const auto as_tool = std::get_if<ToolID>(&action);
+        const bool should_keep_sticky = as_tool && is_sticky_draw_tool(*as_tool);
+        if (!force_end_tool())
+            return;
+        if (!trigger_action(action))
+            return;
+        if (should_keep_sticky) {
+            m_sticky_draw_tool = *as_tool;
+        }
+        else if (as_tool) {
+            m_sticky_draw_tool = ToolID::NONE;
+        }
+        if (tool_popover && !m_right_click_popovers_only)
+            tool_popover->popup();
+        update_sketcher_toolbar_button_states();
+#else
         if (force_end_tool())
             trigger_action(action);
+        if (tool_popover)
+            tool_popover->popup();
+#endif
     });
     m_win.add_action_button(*bu);
     m_action_bar_buttons.emplace(action, bu);
     return *bu;
+}
+
+bool Editor::is_sticky_draw_tool(ToolID id) const
+{
+#ifdef DUNE_SKETCHER_ONLY
+    return id == ToolID::DRAW_CONTOUR || id == ToolID::DRAW_CIRCLE_2D || id == ToolID::DRAW_RECTANGLE
+           || id == ToolID::DRAW_REGULAR_POLYGON;
+#else
+    (void)id;
+    return false;
+#endif
+}
+
+std::optional<UUID> Editor::get_single_selected_text_entity()
+{
+#ifdef DUNE_SKETCHER_ONLY
+    if (!m_core.has_documents())
+        return {};
+    std::optional<UUID> text_uu;
+    const auto &doc = m_core.get_current_document();
+    for (const auto &sr : get_canvas().get_selection()) {
+        if (sr.type != SelectableRef::Type::ENTITY)
+            return {};
+        const auto *en = doc.get_entity_ptr(sr.item);
+        if (!en || !en->of_type(Entity::Type::TEXT))
+            return {};
+        if (text_uu && *text_uu != sr.item)
+            return {};
+        text_uu = sr.item;
+    }
+    return text_uu;
+#else
+    return {};
+#endif
+}
+
+void Editor::sync_draw_text_popover_from_font_desc()
+{
+#ifdef DUNE_SKETCHER_ONLY
+    if (!m_draw_text_font_button || !m_draw_text_bold_switch || !m_draw_text_italic_switch)
+        return;
+    m_updating_draw_text_popover = true;
+    m_draw_text_font_button->set_label(format_text_font_label(m_draw_text_font_desc));
+    m_draw_text_font_button->set_tooltip_text(m_draw_text_font_desc.to_string());
+    m_draw_text_bold_switch->set_active(m_draw_text_font_desc.get_weight() >= Pango::Weight::BOLD);
+    const auto style = m_draw_text_font_desc.get_style();
+    m_draw_text_italic_switch->set_active(style == Pango::Style::ITALIC || style == Pango::Style::OBLIQUE);
+    m_updating_draw_text_popover = false;
+#endif
+}
+
+void Editor::sync_draw_text_popover_from_selection(bool show_popover)
+{
+#ifdef DUNE_SKETCHER_ONLY
+    if (!m_draw_text_popover || !m_draw_text_font_button)
+        return;
+    auto text_uu = get_single_selected_text_entity();
+    if (!text_uu)
+        return;
+    auto *en = m_core.get_current_document().get_entity_ptr(*text_uu);
+    if (!en || !en->of_type(Entity::Type::TEXT))
+        return;
+    auto &text = static_cast<EntityText &>(*en);
+    m_draw_text_font_desc = Pango::FontDescription(text.m_font);
+    m_draw_text_font_features = text.m_font_features;
+    sync_draw_text_popover_from_font_desc();
+    apply_draw_text_popover_change(false);
+    if (!show_popover || m_primary_button_pressed)
+        return;
+    if (g_active_hover_popover && g_active_hover_popover != m_draw_text_popover && g_active_hover_popover->get_visible())
+        g_active_hover_popover->popdown();
+    m_draw_text_popover->popup();
+    g_active_hover_popover = m_draw_text_popover;
+#else
+    (void)show_popover;
+#endif
+}
+
+void Editor::apply_draw_text_popover_change(bool apply_to_selected_text)
+{
+#ifdef DUNE_SKETCHER_ONLY
+    ToolDrawText::set_default_font(m_draw_text_font_desc.to_string());
+    ToolDrawText::set_default_font_features(m_draw_text_font_features);
+    if (!apply_to_selected_text || !m_core.has_documents())
+        return;
+    auto text_uu = get_single_selected_text_entity();
+    if (!text_uu)
+        return;
+    auto *en = m_core.get_current_document().get_entity_ptr(*text_uu);
+    if (!en || !en->of_type(Entity::Type::TEXT))
+        return;
+    auto &text = static_cast<EntityText &>(*en);
+    text.m_font = m_draw_text_font_desc.to_string();
+    text.m_font_features = m_draw_text_font_features;
+    render_text(text, get_pango_context(), m_core.get_current_document());
+    m_core.set_needs_save();
+    m_core.rebuild("text style updated");
+    canvas_update_keep_selection();
+#else
+    (void)apply_to_selected_text;
+#endif
+}
+
+void Editor::sync_selection_mode_popover()
+{
+#ifdef DUNE_SKETCHER_ONLY
+    if (!m_selection_mode_button)
+        return;
+    m_selection_mode_button->set_tooltip_text("Selection tool (Middle mouse)");
+    if (!m_selection_transform_switch)
+        return;
+    m_updating_selection_mode_popover = true;
+    m_selection_transform_switch->set_active(m_selection_transform_enabled);
+    m_updating_selection_mode_popover = false;
+#endif
+}
+
+void Editor::activate_selection_mode()
+{
+#ifdef DUNE_SKETCHER_ONLY
+    m_sticky_draw_tool = ToolID::NONE;
+    m_sticky_tool_restart_connection.disconnect();
+    m_restarting_sticky_tool = false;
+    if (m_core.tool_is_active())
+        force_end_tool();
+    get_canvas().set_selection_mode(SelectionMode::NORMAL);
+    update_sketcher_toolbar_button_states();
+#endif
+}
+
+void Editor::update_sketcher_toolbar_button_states()
+{
+#ifdef DUNE_SKETCHER_ONLY
+    const auto active_tool = m_core.get_tool_id();
+    for (const auto &[act, button] : m_action_bar_buttons) {
+        bool active = false;
+        if (const auto tool = std::get_if<ToolID>(&act)) {
+            if (m_core.tool_is_active()) {
+                active = (*tool == active_tool);
+            }
+            else {
+                active = (*tool == m_sticky_draw_tool) && is_sticky_draw_tool(*tool);
+            }
+        }
+        if (active)
+            button->add_css_class("sketch-toolbar-active");
+        else
+            button->remove_css_class("sketch-toolbar-active");
+    }
+
+    if (m_selection_mode_button) {
+        if (m_core.has_documents() && m_sticky_draw_tool == ToolID::NONE && !m_core.tool_is_active())
+            m_selection_mode_button->add_css_class("sketch-toolbar-active");
+        else
+            m_selection_mode_button->remove_css_class("sketch-toolbar-active");
+    }
+
+    if (m_grid_menu_button) {
+        if (get_canvas().get_grid_enabled())
+            m_grid_menu_button->add_css_class("sketch-toolbar-active");
+        else
+            m_grid_menu_button->remove_css_class("sketch-toolbar-active");
+    }
+
+    if (m_symmetry_menu_button) {
+        if (m_symmetry_enabled)
+            m_symmetry_menu_button->add_css_class("sketch-toolbar-active");
+        else
+            m_symmetry_menu_button->remove_css_class("sketch-toolbar-active");
+    }
+#endif
 }
 
 void Editor::update_action_bar_buttons_sensitivity()
@@ -358,6 +1492,15 @@ void Editor::update_action_bar_buttons_sensitivity()
         }
         bu->set_sensitive(sensitive);
     }
+#ifdef DUNE_SKETCHER_ONLY
+    if (m_selection_mode_button)
+        m_selection_mode_button->set_sensitive(has_docs);
+    if (m_grid_menu_button)
+        m_grid_menu_button->set_sensitive(has_docs);
+    if (m_symmetry_menu_button)
+        m_symmetry_menu_button->set_sensitive(has_docs);
+    update_sketcher_toolbar_button_states();
+#endif
 }
 
 void Editor::update_action_bar_visibility()
@@ -399,10 +1542,19 @@ void Editor::init_canvas()
         controller->set_button(0);
         controller->signal_pressed().connect([this, controller](int n_press, double x, double y) {
             auto button = controller->get_current_button();
+            if (button == 1)
+                m_primary_button_pressed = true;
+#ifdef DUNE_SKETCHER_ONLY
+            if (button == 2 && n_press == 1) {
+                activate_selection_mode();
+                return;
+            }
+#else
             if (n_press == 2 && button == 2) {
                 trigger_action(ActionID::VIEW_RESET_TILT);
                 return;
             }
+#endif
             if (button == 3) {
                 m_rmb_last_x = x;
                 m_rmb_last_y = y;
@@ -425,12 +1577,20 @@ void Editor::init_canvas()
         controller->signal_released().connect([this, controller](int n_press, double x, double y) {
             m_drag_tool = ToolID::NONE;
             const auto button = controller->get_current_button();
+            if (button == 1)
+                m_primary_button_pressed = false;
+#ifdef DUNE_SKETCHER_ONLY
+            if (button == 1 && m_selection_transform_drag_active) {
+                end_selection_transform_drag();
+                return;
+            }
+#endif
             if (button == 1 && n_press == 1) {
                 if (m_core.tool_is_active()) {
                     ToolArgs args;
                     args.type = ToolEventType::ACTION;
                     args.action = InToolActionID::LMB;
-                    ToolResponse r = m_core.tool_update(args);
+                    ToolResponse r = tool_update_with_symmetry(args);
                     tool_process(r);
                 }
             }
@@ -442,7 +1602,7 @@ void Editor::init_canvas()
                     ToolArgs args;
                     args.type = ToolEventType::ACTION;
                     args.action = InToolActionID::RMB;
-                    ToolResponse r = m_core.tool_update(args);
+                    ToolResponse r = tool_update_with_symmetry(args);
                     tool_process(r);
                 }
                 else
@@ -469,7 +1629,7 @@ void Editor::init_canvas()
             ToolArgs args;
             args.type = ToolEventType::ACTION;
             args.action = InToolActionID::LMB;
-            ToolResponse r = m_core.tool_update(args);
+            ToolResponse r = tool_update_with_symmetry(args);
             tool_process(r);
         }
     });
@@ -911,18 +2071,1389 @@ void Editor::init_header_bar()
         m_win.get_header_bar().pack_start(*sep);
         if (auto header_action_box = m_win.get_header_action_box())
             m_win.get_header_bar().pack_start(*header_action_box);
+
+        m_grid_menu_button = Gtk::make_managed<Gtk::Button>();
+        m_grid_menu_button->set_icon_name("view-grid-symbolic");
+        m_grid_menu_button->set_has_frame(true);
+        m_grid_menu_button->add_css_class("sketch-toolbar-button");
+        m_grid_menu_button->set_tooltip_text("Grid settings");
+
+        auto grid_popover = Gtk::make_managed<Gtk::Popover>();
+        grid_popover->add_css_class("sketch-grid-popover");
+        grid_popover->set_has_arrow(true);
+        grid_popover->set_autohide(false);
+        grid_popover->set_parent(*m_grid_menu_button);
+        grid_popover->set_size_request(sketch_popover_total_width, -1);
+        auto grid_box = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 10);
+        grid_box->set_margin_start(12);
+        grid_box->set_margin_end(12);
+        grid_box->set_margin_top(12);
+        grid_box->set_margin_bottom(12);
+        grid_box->set_size_request(sketch_popover_content_width, -1);
+        grid_popover->set_child(*grid_box);
+        m_win.get_header_bar().pack_start(*m_grid_menu_button);
+        install_hover_popover(*m_grid_menu_button, *grid_popover, [this] { return !m_primary_button_pressed; },
+                              [this] { return m_right_click_popovers_only; });
+
+        auto make_switch_row = [grid_box](const Glib::ustring &text, Gtk::Switch *&sw) {
+            auto row = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 10);
+            auto label = Gtk::make_managed<Gtk::Label>(text);
+            label->set_hexpand(true);
+            label->set_xalign(0);
+            sw = Gtk::make_managed<Gtk::Switch>();
+            sw->set_halign(Gtk::Align::END);
+            row->append(*label);
+            row->append(*sw);
+            grid_box->append(*row);
+        };
+        make_switch_row("Snap to grid", m_grid_snap_button);
+
+        auto spacing_box = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 6);
+        auto spacing_title = Gtk::make_managed<Gtk::Label>("Size");
+        spacing_title->set_hexpand(true);
+        spacing_title->set_xalign(0);
+        m_grid_spacing_spin = Gtk::make_managed<Gtk::SpinButton>();
+        m_grid_spacing_spin->set_range(0.1, 100000.0);
+        m_grid_spacing_spin->set_increments(0.1, 1.0);
+        m_grid_spacing_spin->set_digits(2);
+        m_grid_spacing_spin->set_numeric(true);
+        m_grid_spacing_spin->set_width_chars(6);
+        m_grid_spacing_spin->set_halign(Gtk::Align::END);
+        auto spacing_label = Gtk::make_managed<Gtk::Label>("mm");
+        spacing_label->add_css_class("dim-label");
+        spacing_box->append(*spacing_title);
+        spacing_box->append(*m_grid_spacing_spin);
+        spacing_box->append(*spacing_label);
+        grid_box->append(*spacing_box);
+
+        m_grid_menu_button->signal_clicked().connect([this] {
+            get_canvas().set_grid_enabled(!get_canvas().get_grid_enabled());
+            update_sketcher_toolbar_button_states();
+            sync_symmetry_popover_context();
+        });
+        m_grid_spacing_spin->signal_value_changed().connect([this] {
+            if (m_grid_spacing_spin)
+                get_canvas().set_grid_spacing_mm(m_grid_spacing_spin->get_value());
+        });
+        m_grid_snap_button->property_active().signal_changed().connect([this] {
+            if (m_grid_snap_button)
+                get_canvas().set_grid_snap_enabled(m_grid_snap_button->get_active());
+        });
+
+        m_grid_spacing_spin->set_value(get_canvas().get_grid_spacing_mm());
+        m_grid_snap_button->set_active(get_canvas().get_grid_snap_enabled());
+
+        init_symmetry_popover();
 #endif
     }
 
-    {
-        auto top = Gio::Menu::create();
+    init_settings_popover();
+}
 
-        top->append_item(Gio::MenuItem::create("Preferences", "app.preferences"));
-        top->append_item(Gio::MenuItem::create("Logger", "app.logger"));
-        top->append_item(Gio::MenuItem::create("About", "app.about"));
+void Editor::init_symmetry_popover()
+{
+#ifndef DUNE_SKETCHER_ONLY
+    return;
+#else
+    m_symmetry_menu_button = Gtk::make_managed<Gtk::Button>();
+    m_symmetry_menu_button->set_icon_name("object-flip-horizontal-symbolic");
+    m_symmetry_menu_button->set_has_frame(true);
+    m_symmetry_menu_button->add_css_class("sketch-toolbar-button");
+    m_symmetry_menu_button->set_tooltip_text("Symmetry");
+    m_win.get_header_bar().pack_start(*m_symmetry_menu_button);
 
-        m_win.get_hamburger_menu_button().set_menu_model(top);
+    auto popover = Gtk::make_managed<Gtk::Popover>();
+    popover->add_css_class("sketch-grid-popover");
+    popover->set_has_arrow(true);
+    popover->set_autohide(false);
+    popover->set_parent(*m_symmetry_menu_button);
+    popover->set_size_request(sketch_popover_total_width, -1);
+    install_hover_popover(*m_symmetry_menu_button, *popover, [this] { return !m_primary_button_pressed; },
+                          [this] { return m_right_click_popovers_only; });
+    m_symmetry_popover = popover;
+
+    auto root = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 10);
+    root->set_margin_start(12);
+    root->set_margin_end(12);
+    root->set_margin_top(12);
+    root->set_margin_bottom(12);
+    root->set_size_request(sketch_popover_content_width, -1);
+    popover->set_child(*root);
+
+    m_symmetry_context_label = Gtk::make_managed<Gtk::Label>();
+    m_symmetry_context_label->set_wrap(true);
+    m_symmetry_context_label->set_wrap_mode(Pango::WrapMode::WORD_CHAR);
+    m_symmetry_context_label->set_max_width_chars(16);
+    m_symmetry_context_label->set_xalign(0);
+    m_symmetry_context_label->add_css_class("dim-label");
+
+    auto radial_row = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 8);
+    auto radial_label = Gtk::make_managed<Gtk::Label>("Radial");
+    radial_label->set_xalign(0);
+    radial_label->set_hexpand(true);
+    m_symmetry_radial_switch = Gtk::make_managed<Gtk::Switch>();
+    radial_row->append(*radial_label);
+    radial_row->append(*m_symmetry_radial_switch);
+    root->append(*radial_row);
+
+    m_symmetry_mode_row = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 8);
+    m_symmetry_mode_prev_button = Gtk::make_managed<Gtk::Button>();
+    m_symmetry_mode_prev_button->set_icon_name("go-previous-symbolic");
+    m_symmetry_mode_prev_button->set_has_frame(true);
+    m_symmetry_mode_prev_button->set_tooltip_text("Previous mode");
+
+    m_symmetry_mode_value_label = Gtk::make_managed<Gtk::Label>("Horizontal");
+    m_symmetry_mode_value_label->set_hexpand(true);
+    m_symmetry_mode_value_label->set_halign(Gtk::Align::CENTER);
+    m_symmetry_mode_value_label->set_xalign(.5f);
+    m_symmetry_mode_value_label->set_ellipsize(Pango::EllipsizeMode::END);
+    m_symmetry_mode_value_label->set_max_width_chars(12);
+
+    m_symmetry_mode_next_button = Gtk::make_managed<Gtk::Button>();
+    m_symmetry_mode_next_button->set_icon_name("go-next-symbolic");
+    m_symmetry_mode_next_button->set_has_frame(true);
+    m_symmetry_mode_next_button->set_tooltip_text("Next mode");
+
+    m_symmetry_mode_row->append(*m_symmetry_mode_prev_button);
+    m_symmetry_mode_row->append(*m_symmetry_mode_value_label);
+    m_symmetry_mode_row->append(*m_symmetry_mode_next_button);
+    root->append(*m_symmetry_mode_row);
+
+    m_symmetry_axes_row = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 8);
+    auto count_label = Gtk::make_managed<Gtk::Label>("Segments");
+    count_label->set_xalign(0);
+    count_label->set_hexpand(true);
+    m_symmetry_axes_spin = Gtk::make_managed<Gtk::SpinButton>();
+    m_symmetry_axes_spin->set_range(3, 32);
+    m_symmetry_axes_spin->set_increments(1, 1);
+    m_symmetry_axes_spin->set_digits(0);
+    m_symmetry_axes_spin->set_numeric(true);
+    m_symmetry_axes_spin->set_width_chars(4);
+    m_symmetry_axes_spin->set_value(4);
+    m_symmetry_axes_row->append(*count_label);
+    m_symmetry_axes_row->append(*m_symmetry_axes_spin);
+    root->append(*m_symmetry_axes_row);
+
+    m_symmetry_rotation_row = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 8);
+    auto rotation_label = Gtk::make_managed<Gtk::Label>("Rotation");
+    rotation_label->set_xalign(0);
+    rotation_label->set_hexpand(true);
+    m_symmetry_rotation_spin = Gtk::make_managed<Gtk::SpinButton>();
+    m_symmetry_rotation_spin->set_range(-180, 180);
+    m_symmetry_rotation_spin->set_increments(1, 10);
+    m_symmetry_rotation_spin->set_digits(1);
+    m_symmetry_rotation_spin->set_numeric(true);
+    m_symmetry_rotation_spin->set_width_chars(5);
+    m_symmetry_rotation_spin->set_value(0);
+    auto rotation_unit_label = Gtk::make_managed<Gtk::Label>("deg");
+    m_symmetry_rotation_row->append(*rotation_label);
+    m_symmetry_rotation_row->append(*m_symmetry_rotation_spin);
+    m_symmetry_rotation_row->append(*rotation_unit_label);
+    root->append(*m_symmetry_rotation_row);
+
+    m_symmetry_apply_button = Gtk::make_managed<Gtk::Button>("Set Axis");
+    m_symmetry_apply_button->set_hexpand(true);
+    root->append(*m_symmetry_apply_button);
+
+    // Keep context hint at the bottom of the popover.
+    root->append(*m_symmetry_context_label);
+
+    m_symmetry_menu_button->signal_clicked().connect([this] {
+        if (m_symmetry_enabled)
+            set_symmetry_enabled(false, false);
+        else
+            set_symmetry_enabled(true, true);
+    });
+    m_symmetry_radial_switch->property_active().signal_changed().connect([this] {
+        sync_symmetry_popover_context();
+        apply_symmetry_live_from_popover(false);
+    });
+    m_symmetry_mode_prev_button->signal_clicked().connect([this] {
+        m_symmetry_mode_selected = (m_symmetry_mode_selected + 1u) % 2u;
+        sync_symmetry_popover_context();
+        apply_symmetry_live_from_popover(false);
+    });
+    m_symmetry_mode_next_button->signal_clicked().connect([this] {
+        m_symmetry_mode_selected = (m_symmetry_mode_selected + 1u) % 2u;
+        sync_symmetry_popover_context();
+        apply_symmetry_live_from_popover(false);
+    });
+    m_symmetry_apply_button->signal_clicked().connect(sigc::mem_fun(*this, &Editor::apply_symmetry_from_popover));
+    popover->signal_show().connect(sigc::mem_fun(*this, &Editor::sync_symmetry_popover_context));
+    m_symmetry_axes_spin->signal_value_changed().connect([this] {
+        sync_symmetry_popover_context();
+        apply_symmetry_live_from_popover(false);
+        if (m_symmetry_popover && !m_symmetry_popover->get_visible())
+            m_symmetry_popover->popup();
+    });
+    m_symmetry_rotation_spin->signal_value_changed().connect([this] {
+        sync_symmetry_popover_context();
+        apply_symmetry_live_from_popover(false);
+    });
+
+    sync_symmetry_popover_context();
+#endif
+}
+
+void Editor::sync_symmetry_popover_context()
+{
+#ifdef DUNE_SKETCHER_ONLY
+    if (!m_symmetry_context_label || !m_symmetry_mode_value_label || !m_symmetry_radial_switch || !m_symmetry_mode_row
+        || !m_symmetry_mode_prev_button || !m_symmetry_mode_next_button || !m_symmetry_axes_row || !m_symmetry_axes_spin
+        || !m_symmetry_rotation_row || !m_symmetry_rotation_spin || !m_symmetry_apply_button)
+        return;
+    update_sketcher_toolbar_button_states();
+
+    const bool radial_selected = m_symmetry_radial_switch->get_active();
+    m_symmetry_mode_row->set_visible(!radial_selected);
+    m_symmetry_axes_row->set_visible(radial_selected);
+    m_symmetry_rotation_row->set_visible(true);
+    m_symmetry_apply_button->set_visible(radial_selected);
+
+    if (!m_core.has_documents()) {
+        m_symmetry_context_label->set_text("Open or create a sketch first.");
+        m_symmetry_mode_value_label->set_text(m_symmetry_mode_selected == 1 ? "Vertical" : "Horizontal");
+        m_symmetry_radial_switch->set_sensitive(false);
+        m_symmetry_mode_prev_button->set_sensitive(false);
+        m_symmetry_mode_next_button->set_sensitive(false);
+        m_symmetry_axes_spin->set_sensitive(false);
+        m_symmetry_rotation_spin->set_sensitive(false);
+        m_symmetry_apply_button->set_sensitive(false);
+        return;
     }
+    m_symmetry_radial_switch->set_sensitive(true);
+    m_symmetry_mode_prev_button->set_sensitive(!radial_selected);
+    m_symmetry_mode_next_button->set_sensitive(!radial_selected);
+
+    const auto &doc = m_core.get_current_document();
+    const auto current_group_uu = m_core.get_current_group();
+    const auto &current_group = doc.get_group(current_group_uu);
+    if (!current_group.m_active_wrkpl) {
+        m_symmetry_context_label->set_text("Current sketch has no active workplane.");
+        m_symmetry_mode_value_label->set_text(m_symmetry_mode_selected == 1 ? "Vertical" : "Horizontal");
+        m_symmetry_axes_spin->set_sensitive(radial_selected);
+        m_symmetry_rotation_spin->set_sensitive(true);
+        m_symmetry_apply_button->set_sensitive(radial_selected);
+        return;
+    }
+    const auto source_wrkpl_uu = current_group.m_active_wrkpl;
+    const auto &source_wrkpl = doc.get_entity<EntityWorkplane>(source_wrkpl_uu);
+
+    const auto selection = get_canvas().get_selection();
+    const auto selected_entities = entities_from_selection(selection);
+    const auto lines = selected_line_entities_in_group(doc, selection, current_group_uu);
+    const auto circle_uu = selected_circle_entity_in_group(doc, selection, current_group_uu);
+    auto two_points = two_points_from_selection(doc, selection);
+    if (two_points) {
+        const auto &en1 = doc.get_entity(two_points->point1.entity);
+        const auto &en2 = doc.get_entity(two_points->point2.entity);
+        if (en1.m_group != current_group_uu && en2.m_group != current_group_uu)
+            two_points.reset();
+    }
+
+    std::optional<std::pair<glm::dvec2, glm::dvec2>> two_points_in_plane;
+    if (two_points) {
+        const auto p1 = source_wrkpl.project(doc.get_point(two_points->point1));
+        const auto p2 = source_wrkpl.project(doc.get_point(two_points->point2));
+        two_points_in_plane = std::make_pair(p1, p2);
+    }
+    else if (selected_entities.size() == 2) {
+        auto selectable_to_point_plane = [&](const SelectableRef &sr) -> std::optional<glm::dvec2> {
+            if (sr.type != SelectableRef::Type::ENTITY)
+                return {};
+            const auto &en = doc.get_entity(sr.item);
+            if (en.m_group != current_group_uu)
+                return {};
+            if (doc.is_valid_point(sr.get_entity_and_point()))
+                return source_wrkpl.project(doc.get_point(sr.get_entity_and_point()));
+            if (sr.point != 0)
+                return {};
+            if (const auto *line = doc.get_entity_ptr<EntityLine2D>(sr.item))
+                return (line->m_p1 + line->m_p2) * .5;
+            if (const auto *circle = doc.get_entity_ptr<EntityCircle2D>(sr.item))
+                return (circle->m_wrkpl == source_wrkpl_uu)
+                               ? circle->m_center
+                               : source_wrkpl.project(doc.get_entity<EntityWorkplane>(circle->m_wrkpl).transform(circle->m_center));
+            if (const auto *arc = doc.get_entity_ptr<EntityArc2D>(sr.item))
+                return (arc->m_wrkpl == source_wrkpl_uu)
+                               ? arc->m_center
+                               : source_wrkpl.project(doc.get_entity<EntityWorkplane>(arc->m_wrkpl).transform(arc->m_center));
+            return {};
+        };
+        auto it = selected_entities.begin();
+        const auto p1 = selectable_to_point_plane(*it++);
+        const auto p2 = selectable_to_point_plane(*it);
+        if (p1 && p2)
+            two_points_in_plane = std::make_pair(*p1, *p2);
+    }
+
+    if (radial_selected) {
+        m_symmetry_mode_value_label->set_text("Radial");
+        m_symmetry_axes_spin->set_sensitive(true);
+        m_symmetry_rotation_spin->set_sensitive(true);
+        m_symmetry_apply_button->set_sensitive(true);
+        if (circle_uu && selected_entities.size() == 1) {
+            m_symmetry_context_label->set_text("Circle selected: radial center uses the circle center.");
+        }
+        else if (two_points_in_plane) {
+            m_symmetry_context_label->set_text("Two items selected: radial center is their midpoint.");
+        }
+        else if (selected_entities.empty()) {
+            m_symmetry_context_label->set_text("No selection: radial center is at coordinate origin (X/Y).");
+        }
+        else {
+            m_symmetry_context_label->set_text("Radial mode: select one circle or two items.");
+        }
+    }
+    else {
+        m_symmetry_axes_spin->set_sensitive(false);
+        m_symmetry_rotation_spin->set_sensitive(true);
+        m_symmetry_apply_button->set_sensitive(false);
+        const bool dual_axes_selection = selected_entities.size() >= 3 && !lines.empty();
+        if (dual_axes_selection) {
+            m_symmetry_mode_prev_button->set_sensitive(false);
+            m_symmetry_mode_next_button->set_sensitive(false);
+            m_symmetry_mode_value_label->set_text("H + V");
+            m_symmetry_context_label->set_text("Multi-selection: horizontal and vertical axes use selection center.");
+        }
+        else if (two_points_in_plane) {
+            const auto d = two_points_in_plane->second - two_points_in_plane->first;
+            // Left-right spread means vertical symmetry axis, top-bottom means horizontal.
+            if (std::abs(d.x) >= std::abs(d.y))
+                m_symmetry_mode_selected = 1;
+            else
+                m_symmetry_mode_selected = 0;
+            m_symmetry_context_label->set_text("Two items selected: axis orientation is picked automatically.");
+        }
+        else if (selected_entities.empty()) {
+            m_symmetry_context_label->set_text("No selection: choose Horizontal/Vertical mode for origin symmetry.");
+        }
+        else {
+            m_symmetry_context_label->set_text("Selection detected: axis goes through selection center.");
+        }
+        if (!dual_axes_selection)
+            m_symmetry_mode_value_label->set_text(m_symmetry_mode_selected == 1 ? "Vertical" : "Horizontal");
+    }
+#endif
+}
+
+bool Editor::configure_symmetry_from_current_context(bool show_toast_on_fail)
+{
+#ifdef DUNE_SKETCHER_ONLY
+    if (!m_core.has_documents())
+        return false;
+
+    const auto &doc = m_core.get_current_document();
+    const auto source_group_uu = m_core.get_current_group();
+    const auto &source_group = doc.get_group(source_group_uu);
+    if (!source_group.m_active_wrkpl) {
+        if (show_toast_on_fail)
+            m_workspace_browser->show_toast("Current group needs an active workplane");
+        return false;
+    }
+    const auto source_wrkpl_uu = source_group.m_active_wrkpl;
+    const auto &source_wrkpl = doc.get_entity<EntityWorkplane>(source_wrkpl_uu);
+
+    const auto selection = get_canvas().get_selection();
+    const auto selected_entities = entities_from_selection(selection);
+    const auto selected_circle_uu = selected_circle_entity_in_group(doc, selection, source_group_uu);
+    auto two_points = two_points_from_selection(doc, selection);
+    std::optional<glm::dvec3> midpoint_from_entities;
+    std::optional<std::pair<glm::dvec2, glm::dvec2>> two_points_in_plane;
+    std::optional<glm::dvec2> selection_center_in_plane;
+
+    if (two_points) {
+        const auto &en1 = doc.get_entity(two_points->point1.entity);
+        const auto &en2 = doc.get_entity(two_points->point2.entity);
+        if (en1.m_group != source_group_uu && en2.m_group != source_group_uu)
+            two_points.reset();
+    }
+
+    auto selectable_to_point = [&](const SelectableRef &sr) -> std::optional<glm::dvec3> {
+        if (sr.type != SelectableRef::Type::ENTITY)
+            return {};
+        const auto &en = doc.get_entity(sr.item);
+        if (en.m_group != source_group_uu)
+            return {};
+        if (doc.is_valid_point(sr.get_entity_and_point()))
+            return doc.get_point(sr.get_entity_and_point());
+        if (sr.point != 0)
+            return {};
+        if (const auto *line = doc.get_entity_ptr<EntityLine2D>(sr.item))
+            return source_wrkpl.transform((line->m_p1 + line->m_p2) * .5);
+        if (const auto *circle = doc.get_entity_ptr<EntityCircle2D>(sr.item))
+            return doc.get_entity<EntityWorkplane>(circle->m_wrkpl).transform(circle->m_center);
+        if (const auto *arc = doc.get_entity_ptr<EntityArc2D>(sr.item))
+            return doc.get_entity<EntityWorkplane>(arc->m_wrkpl).transform(arc->m_center);
+        if (const auto *point = doc.get_entity_ptr<EntityPoint2D>(sr.item))
+            return doc.get_entity<EntityWorkplane>(point->m_wrkpl).transform(point->m_p);
+        return {};
+    };
+
+    if (!two_points && selected_entities.size() == 2) {
+
+        auto it = selected_entities.begin();
+        const auto p1 = selectable_to_point(*it++);
+        const auto p2 = selectable_to_point(*it);
+        if (p1 && p2) {
+            midpoint_from_entities = (*p1 + *p2) * .5;
+            two_points_in_plane = std::make_pair(source_wrkpl.project(*p1), source_wrkpl.project(*p2));
+        }
+    }
+    else if (two_points) {
+        const auto p1 = source_wrkpl.project(doc.get_point(two_points->point1));
+        const auto p2 = source_wrkpl.project(doc.get_point(two_points->point2));
+        two_points_in_plane = std::make_pair(p1, p2);
+    }
+
+    {
+        glm::dvec2 sum(0, 0);
+        size_t count = 0;
+        for (const auto &sr : selected_entities) {
+            const auto p = selectable_to_point(sr);
+            if (!p)
+                continue;
+            sum += source_wrkpl.project(*p);
+            count++;
+        }
+        if (count > 0)
+            selection_center_in_plane = sum / static_cast<double>(count);
+    }
+
+    SymmetryMode mode = SymmetryMode::HORIZONTAL;
+    std::vector<std::pair<glm::dvec2, glm::dvec2>> axes;
+    unsigned int radial_axes =
+            std::max(3u, static_cast<unsigned int>(m_symmetry_axes_spin ? m_symmetry_axes_spin->get_value_as_int() : 4));
+    double radial_rotation_deg = m_symmetry_radial_rotation_deg;
+    if (m_symmetry_rotation_spin)
+        radial_rotation_deg = m_symmetry_rotation_spin->get_value();
+    const bool radial_selected = m_symmetry_radial_switch && m_symmetry_radial_switch->get_active();
+
+    if (radial_selected) {
+        mode = SymmetryMode::RADIAL;
+        std::optional<glm::dvec2> center;
+        if (selected_circle_uu && selected_entities.size() == 1) {
+            if (const auto *circle = doc.get_entity_ptr<EntityCircle2D>(*selected_circle_uu)) {
+                center = (circle->m_wrkpl == source_wrkpl_uu)
+                                 ? circle->m_center
+                                 : source_wrkpl.project(doc.get_entity<EntityWorkplane>(circle->m_wrkpl).transform(circle->m_center));
+            }
+            else if (const auto *arc = doc.get_entity_ptr<EntityArc2D>(*selected_circle_uu)) {
+                center = (arc->m_wrkpl == source_wrkpl_uu)
+                                 ? arc->m_center
+                                 : source_wrkpl.project(doc.get_entity<EntityWorkplane>(arc->m_wrkpl).transform(arc->m_center));
+            }
+        }
+        else if (two_points || midpoint_from_entities) {
+            const auto midpoint_world = two_points
+                                                ? (doc.get_point(two_points->point1) + doc.get_point(two_points->point2)) * .5
+                                                : *midpoint_from_entities;
+            center = source_wrkpl.project(midpoint_world);
+        }
+        else if (selected_entities.empty()) {
+            center = glm::dvec2(0, 0);
+        }
+        else if (selection_center_in_plane) {
+            center = *selection_center_in_plane;
+        }
+
+        if (!center) {
+            if (show_toast_on_fail)
+                m_workspace_browser->show_toast("Radial mode needs a center: circle, two items, or any selection");
+            return false;
+        }
+        const auto phase = radial_rotation_deg_to_rad(radial_rotation_deg);
+        for (unsigned int i = 0; i < radial_axes; i++) {
+            const auto angle = phase + 2.0 * M_PI * static_cast<double>(i) / static_cast<double>(radial_axes);
+            axes.emplace_back(*center, glm::dvec2(std::cos(angle), std::sin(angle)));
+        }
+    }
+    else if (selection_center_in_plane && selected_entities.size() >= 3) {
+        const auto phase = radial_rotation_deg_to_rad(radial_rotation_deg);
+        const auto horizontal_dir = rotate_dir_2d(glm::dvec2(1, 0), phase);
+        const auto vertical_dir = rotate_dir_2d(glm::dvec2(0, 1), phase);
+        mode = SymmetryMode::HORIZONTAL;
+        axes.emplace_back(*selection_center_in_plane, horizontal_dir);
+        axes.emplace_back(*selection_center_in_plane, vertical_dir);
+    }
+    else if (two_points || midpoint_from_entities) {
+        const auto midpoint_world = two_points
+                                            ? (doc.get_point(two_points->point1) + doc.get_point(two_points->point2)) * .5
+                                            : *midpoint_from_entities;
+        const auto center = source_wrkpl.project(midpoint_world);
+        const auto phase = radial_rotation_deg_to_rad(radial_rotation_deg);
+        const auto horizontal_dir = rotate_dir_2d(glm::dvec2(1, 0), phase);
+        const auto vertical_dir = rotate_dir_2d(glm::dvec2(0, 1), phase);
+        if (two_points_in_plane) {
+            const auto d = two_points_in_plane->second - two_points_in_plane->first;
+            if (std::abs(d.x) >= std::abs(d.y)) {
+                mode = SymmetryMode::VERTICAL;
+                axes.emplace_back(center, vertical_dir);
+            }
+            else {
+                mode = SymmetryMode::HORIZONTAL;
+                axes.emplace_back(center, horizontal_dir);
+            }
+        }
+        else {
+            mode = SymmetryMode::HORIZONTAL;
+            axes.emplace_back(center, horizontal_dir);
+        }
+    }
+    else if (selection_center_in_plane) {
+        const auto phase = radial_rotation_deg_to_rad(radial_rotation_deg);
+        const auto horizontal_dir = rotate_dir_2d(glm::dvec2(1, 0), phase);
+        const auto vertical_dir = rotate_dir_2d(glm::dvec2(0, 1), phase);
+        if (m_symmetry_mode_selected == 1) {
+            mode = SymmetryMode::VERTICAL;
+            axes.emplace_back(*selection_center_in_plane, vertical_dir);
+        }
+        else {
+            mode = SymmetryMode::HORIZONTAL;
+            axes.emplace_back(*selection_center_in_plane, horizontal_dir);
+        }
+    }
+    else if (selected_entities.empty()) {
+        const auto phase = radial_rotation_deg_to_rad(radial_rotation_deg);
+        const auto horizontal_dir = rotate_dir_2d(glm::dvec2(1, 0), phase);
+        const auto vertical_dir = rotate_dir_2d(glm::dvec2(0, 1), phase);
+        if (m_symmetry_mode_selected == 1) {
+            mode = SymmetryMode::VERTICAL;
+            axes.emplace_back(glm::dvec2(0, 0), vertical_dir);
+        }
+        else {
+            mode = SymmetryMode::HORIZONTAL;
+            axes.emplace_back(glm::dvec2(0, 0), horizontal_dir);
+        }
+    }
+    else {
+        if (show_toast_on_fail)
+            m_workspace_browser->show_toast("Select entities to define center, or switch to radial");
+        return false;
+    }
+
+    m_symmetry_group = source_group_uu;
+    m_symmetry_workplane = source_wrkpl_uu;
+    m_symmetry_mode = mode;
+    m_symmetry_radial_axes = radial_axes;
+    m_symmetry_radial_rotation_deg = radial_rotation_deg;
+    m_symmetry_axes = std::move(axes);
+    return true;
+#else
+    (void)show_toast_on_fail;
+    return false;
+#endif
+}
+
+void Editor::set_symmetry_enabled(bool enabled, bool reconfigure)
+{
+#ifdef DUNE_SKETCHER_ONLY
+    if (!enabled) {
+        m_symmetry_enabled = false;
+        m_symmetry_axes.clear();
+        m_symmetry_capture_tool_id = ToolID::NONE;
+        m_symmetry_pre_tool_entities.clear();
+        m_symmetry_pre_tool_entities_captured = false;
+        m_symmetry_move_roots_before.clear();
+        clear_symmetry_live_preview_entities();
+        if (m_core.has_documents())
+            canvas_update_keep_selection();
+        sync_symmetry_popover_context();
+        return;
+    }
+
+    if (reconfigure || m_symmetry_axes.empty()) {
+        if (!configure_symmetry_from_current_context(true)) {
+            m_symmetry_enabled = false;
+            sync_symmetry_popover_context();
+            return;
+        }
+    }
+
+    m_symmetry_enabled = true;
+    if (m_core.tool_is_active())
+        capture_symmetry_entities_before_tool(m_core.get_tool_id());
+    update_symmetry_live_preview_entities();
+    if (m_core.has_documents())
+        canvas_update_keep_selection();
+    sync_symmetry_popover_context();
+#endif
+}
+
+void Editor::apply_symmetry_from_popover()
+{
+#ifdef DUNE_SKETCHER_ONLY
+    if (!m_symmetry_enabled) {
+        set_symmetry_enabled(true, true);
+        return;
+    }
+    apply_symmetry_live_from_popover(true);
+    sync_symmetry_popover_context();
+#endif
+}
+
+void Editor::apply_symmetry_live_from_popover(bool show_toast_on_fail)
+{
+#ifdef DUNE_SKETCHER_ONLY
+    if (!m_symmetry_enabled)
+        return;
+    if (configure_symmetry_from_current_context(show_toast_on_fail) && m_core.has_documents()) {
+        if (m_core.tool_is_active())
+            capture_symmetry_entities_before_tool(m_core.get_tool_id());
+        update_symmetry_live_preview_entities();
+        canvas_update_keep_selection();
+    }
+#else
+    (void)show_toast_on_fail;
+#endif
+}
+
+bool Editor::should_apply_symmetry_for_tool(ToolID id) const
+{
+#ifdef DUNE_SKETCHER_ONLY
+    switch (id) {
+    case ToolID::DRAW_CONTOUR:
+    case ToolID::DRAW_CONTOUR_FROM_POINT:
+    case ToolID::DRAW_LINE_2D:
+    case ToolID::DRAW_ARC_2D:
+    case ToolID::DRAW_BEZIER_2D:
+    case ToolID::DRAW_POINT_2D:
+    case ToolID::DRAW_CIRCLE_2D:
+    case ToolID::DRAW_REGULAR_POLYGON:
+    case ToolID::DRAW_RECTANGLE:
+    case ToolID::DRAW_TEXT:
+        return true;
+    default:
+        return false;
+    }
+#else
+    (void)id;
+    return false;
+#endif
+}
+
+void Editor::capture_symmetry_entities_before_tool(ToolID id)
+{
+#ifdef DUNE_SKETCHER_ONLY
+    clear_symmetry_live_preview_entities();
+    m_symmetry_capture_tool_id = id;
+    m_symmetry_pre_tool_entities.clear();
+    m_symmetry_pre_tool_entities_captured = false;
+    m_symmetry_move_roots_before.clear();
+    if (!m_symmetry_enabled || !should_apply_symmetry_for_tool(id) || !m_core.has_documents())
+        return;
+    if (m_core.get_current_group() != m_symmetry_group)
+        return;
+
+    const auto &doc = m_core.get_current_document();
+    for (const auto &[uu, en] : doc.m_entities) {
+        if (en->m_group == m_symmetry_group)
+            m_symmetry_pre_tool_entities.insert(uu);
+    }
+    m_symmetry_pre_tool_entities_captured = true;
+
+    if (id == ToolID::MOVE) {
+        const auto selection = get_canvas().get_selection();
+        for (const auto &sr : entities_from_selection(selection)) {
+            if (sr.type != SelectableRef::Type::ENTITY)
+                continue;
+            const auto *en = doc.get_entity_ptr(sr.item);
+            if (!en)
+                continue;
+            if (en->m_group != m_symmetry_group)
+                continue;
+            if (en->m_generated_from)
+                continue;
+            const auto en_wrkpl = dynamic_cast<const IEntityInWorkplane *>(en);
+            if (!en_wrkpl || en_wrkpl->get_workplane() != m_symmetry_workplane)
+                continue;
+            if (!en->of_type(Entity::Type::LINE_2D, Entity::Type::ARC_2D, Entity::Type::CIRCLE_2D, Entity::Type::BEZIER_2D,
+                             Entity::Type::POINT_2D))
+                continue;
+            m_symmetry_move_roots_before.emplace(sr.item, en->clone());
+        }
+    }
+#else
+    (void)id;
+#endif
+}
+
+void Editor::clear_symmetry_live_preview_entities()
+{
+#ifdef DUNE_SKETCHER_ONLY
+    if (m_symmetry_live_preview_entities.empty() || !m_core.has_documents())
+        return;
+    auto &doc = m_core.get_current_document();
+    for (const auto &uu : m_symmetry_live_preview_entities)
+        doc.m_entities.erase(uu);
+    m_symmetry_live_preview_entities.clear();
+#endif
+}
+
+void Editor::update_symmetry_live_preview_entities()
+{
+#ifdef DUNE_SKETCHER_ONLY
+    clear_symmetry_live_preview_entities();
+    if (!m_symmetry_enabled || !m_core.tool_is_active() || !m_core.has_documents())
+        return;
+    if (!should_apply_symmetry_for_tool(m_core.get_tool_id()))
+        return;
+    if (m_core.get_current_group() != m_symmetry_group)
+        return;
+    if (m_symmetry_axes.empty())
+        return;
+
+    auto &doc = m_core.get_current_document();
+    std::vector<UUID> source_entities;
+    for (const auto &[uu, en] : doc.m_entities) {
+        if (en->m_group != m_symmetry_group)
+            continue;
+        if (m_symmetry_pre_tool_entities.contains(uu))
+            continue;
+        if (en->m_kind != ItemKind::USER)
+            continue;
+        const auto en_wrkpl = dynamic_cast<const IEntityInWorkplane *>(en.get());
+        if (!en_wrkpl || en_wrkpl->get_workplane() != m_symmetry_workplane)
+            continue;
+        if (!en->of_type(Entity::Type::LINE_2D, Entity::Type::ARC_2D, Entity::Type::CIRCLE_2D, Entity::Type::BEZIER_2D,
+                         Entity::Type::POINT_2D))
+            continue;
+        source_entities.push_back(uu);
+    }
+    if (source_entities.empty())
+        return;
+
+    auto transform_entity = [&](Entity &dst, const Entity &src,
+                                const std::function<glm::dvec2(const glm::dvec2 &)> &transform, bool mirrored) {
+        (void)src;
+        if (auto *line = dynamic_cast<EntityLine2D *>(&dst)) {
+            line->m_p1 = transform(line->m_p1);
+            line->m_p2 = transform(line->m_p2);
+        }
+        else if (auto *arc = dynamic_cast<EntityArc2D *>(&dst)) {
+            const auto from = transform(arc->m_from);
+            const auto to = transform(arc->m_to);
+            arc->m_center = transform(arc->m_center);
+            if (mirrored) {
+                arc->m_from = to;
+                arc->m_to = from;
+            }
+            else {
+                arc->m_from = from;
+                arc->m_to = to;
+            }
+        }
+        else if (auto *circle = dynamic_cast<EntityCircle2D *>(&dst)) {
+            circle->m_center = transform(circle->m_center);
+        }
+        else if (auto *bez = dynamic_cast<EntityBezier2D *>(&dst)) {
+            bez->m_p1 = transform(bez->m_p1);
+            bez->m_p2 = transform(bez->m_p2);
+            bez->m_c1 = transform(bez->m_c1);
+            bez->m_c2 = transform(bez->m_c2);
+        }
+        else if (auto *point = dynamic_cast<EntityPoint2D *>(&dst)) {
+            point->m_p = transform(point->m_p);
+        }
+    };
+
+    std::vector<std::unique_ptr<Entity>> clones;
+    if (m_symmetry_mode == SymmetryMode::RADIAL) {
+        const auto center = m_symmetry_axes.front().first;
+        const auto count = std::max(3u, m_symmetry_radial_axes);
+        const auto phase = radial_rotation_deg_to_rad(m_symmetry_radial_rotation_deg);
+        for (const auto &uu : source_entities) {
+            const auto &src = doc.get_entity(uu);
+            for (unsigned int i = 1; i < count; i++) {
+                const auto angle = phase + 2.0 * M_PI * static_cast<double>(i) / static_cast<double>(count);
+                auto clone = src.clone();
+                transform_entity(*clone, src, [&](const glm::dvec2 &p) { return rotate_point_2d(p, center, angle); }, false);
+                clone->m_uuid = UUID::random();
+                clone->m_group = m_symmetry_group;
+                clone->m_kind = ItemKind::USER;
+                clone->m_generated_from = uu;
+                clone->m_selection_invisible = false;
+                clone->m_move_instead.clear();
+                clones.push_back(std::move(clone));
+            }
+        }
+    }
+    else {
+        for (const auto &uu : source_entities) {
+            const auto &src = doc.get_entity(uu);
+            for (const auto &[axis_point, axis_dir] : m_symmetry_axes) {
+                auto clone = src.clone();
+                transform_entity(*clone, src,
+                                 [&](const glm::dvec2 &p) { return reflect_point_2d(p, axis_point, axis_dir); }, true);
+                clone->m_uuid = UUID::random();
+                clone->m_group = m_symmetry_group;
+                clone->m_kind = ItemKind::USER;
+                clone->m_generated_from = uu;
+                clone->m_selection_invisible = false;
+                clone->m_move_instead.clear();
+                clones.push_back(std::move(clone));
+            }
+        }
+    }
+
+    for (auto &clone : clones) {
+        m_symmetry_live_preview_entities.insert(clone->m_uuid);
+        doc.m_entities.emplace(clone->m_uuid, std::move(clone));
+    }
+#endif
+}
+
+void Editor::sync_symmetry_for_move_selection()
+{
+#ifdef DUNE_SKETCHER_ONLY
+    if (!m_symmetry_enabled || !m_core.tool_is_active() || !m_core.has_documents())
+        return;
+    if (m_core.get_tool_id() != ToolID::MOVE)
+        return;
+    if (m_core.get_current_group() != m_symmetry_group)
+        return;
+    if (m_symmetry_axes.empty())
+        return;
+
+    auto &doc = m_core.get_current_document();
+    std::vector<UUID> roots;
+    for (const auto &sr : entities_from_selection(m_core.get_tool_selection())) {
+        if (sr.type != SelectableRef::Type::ENTITY)
+            continue;
+        const auto *en = doc.get_entity_ptr(sr.item);
+        if (!en)
+            continue;
+        if (en->m_group != m_symmetry_group)
+            continue;
+        if (en->m_generated_from)
+            continue;
+        const auto en_wrkpl = dynamic_cast<const IEntityInWorkplane *>(en);
+        if (!en_wrkpl || en_wrkpl->get_workplane() != m_symmetry_workplane)
+            continue;
+        if (!en->of_type(Entity::Type::LINE_2D, Entity::Type::ARC_2D, Entity::Type::CIRCLE_2D, Entity::Type::BEZIER_2D,
+                         Entity::Type::POINT_2D))
+            continue;
+        if (std::find(roots.begin(), roots.end(), sr.item) == roots.end())
+            roots.push_back(sr.item);
+    }
+    if (roots.empty())
+        return;
+
+    auto transform_entity = [&](Entity &dst, const Entity &src,
+                                const std::function<glm::dvec2(const glm::dvec2 &)> &transform, bool mirrored) {
+        (void)src;
+        if (auto *line = dynamic_cast<EntityLine2D *>(&dst)) {
+            line->m_p1 = transform(line->m_p1);
+            line->m_p2 = transform(line->m_p2);
+        }
+        else if (auto *arc = dynamic_cast<EntityArc2D *>(&dst)) {
+            const auto from = transform(arc->m_from);
+            const auto to = transform(arc->m_to);
+            arc->m_center = transform(arc->m_center);
+            if (mirrored) {
+                arc->m_from = to;
+                arc->m_to = from;
+            }
+            else {
+                arc->m_from = from;
+                arc->m_to = to;
+            }
+        }
+        else if (auto *circle = dynamic_cast<EntityCircle2D *>(&dst)) {
+            circle->m_center = transform(circle->m_center);
+        }
+        else if (auto *bez = dynamic_cast<EntityBezier2D *>(&dst)) {
+            bez->m_p1 = transform(bez->m_p1);
+            bez->m_p2 = transform(bez->m_p2);
+            bez->m_c1 = transform(bez->m_c1);
+            bez->m_c2 = transform(bez->m_c2);
+        }
+        else if (auto *point = dynamic_cast<EntityPoint2D *>(&dst)) {
+            point->m_p = transform(point->m_p);
+        }
+    };
+
+    auto entity_match_score = [&](const Entity &a, const Entity &b) -> double {
+        if (a.get_type() != b.get_type())
+            return std::numeric_limits<double>::infinity();
+
+        if (const auto *ca = dynamic_cast<const EntityCircle2D *>(&a)) {
+            const auto *cb = dynamic_cast<const EntityCircle2D *>(&b);
+            if (!cb)
+                return std::numeric_limits<double>::infinity();
+            return glm::length(ca->m_center - cb->m_center) + std::abs(ca->m_radius - cb->m_radius);
+        }
+        if (const auto *pa = dynamic_cast<const EntityPoint2D *>(&a)) {
+            const auto *pb = dynamic_cast<const EntityPoint2D *>(&b);
+            if (!pb)
+                return std::numeric_limits<double>::infinity();
+            return glm::length(pa->m_p - pb->m_p);
+        }
+        if (const auto *la = dynamic_cast<const EntityLine2D *>(&a)) {
+            const auto *lb = dynamic_cast<const EntityLine2D *>(&b);
+            if (!lb)
+                return std::numeric_limits<double>::infinity();
+            const auto d1 = glm::length(la->m_p1 - lb->m_p1) + glm::length(la->m_p2 - lb->m_p2);
+            const auto d2 = glm::length(la->m_p1 - lb->m_p2) + glm::length(la->m_p2 - lb->m_p1);
+            return std::min(d1, d2);
+        }
+        if (const auto *aa = dynamic_cast<const EntityArc2D *>(&a)) {
+            const auto *ab = dynamic_cast<const EntityArc2D *>(&b);
+            if (!ab)
+                return std::numeric_limits<double>::infinity();
+            const auto d1 = glm::length(aa->m_center - ab->m_center) + glm::length(aa->m_from - ab->m_from)
+                    + glm::length(aa->m_to - ab->m_to);
+            const auto d2 = glm::length(aa->m_center - ab->m_center) + glm::length(aa->m_from - ab->m_to)
+                    + glm::length(aa->m_to - ab->m_from);
+            return std::min(d1, d2);
+        }
+        if (const auto *ba = dynamic_cast<const EntityBezier2D *>(&a)) {
+            const auto *bb = dynamic_cast<const EntityBezier2D *>(&b);
+            if (!bb)
+                return std::numeric_limits<double>::infinity();
+            const auto d1 = glm::length(ba->m_p1 - bb->m_p1) + glm::length(ba->m_p2 - bb->m_p2)
+                    + glm::length(ba->m_c1 - bb->m_c1) + glm::length(ba->m_c2 - bb->m_c2);
+            const auto d2 = glm::length(ba->m_p1 - bb->m_p2) + glm::length(ba->m_p2 - bb->m_p1)
+                    + glm::length(ba->m_c1 - bb->m_c2) + glm::length(ba->m_c2 - bb->m_c1);
+            return std::min(d1, d2);
+        }
+        return std::numeric_limits<double>::infinity();
+    };
+
+    bool changed = false;
+    std::set<UUID> protected_roots(roots.begin(), roots.end());
+    for (const auto &root_uu : roots) {
+        const auto *root = doc.get_entity_ptr(root_uu);
+        if (!root)
+            continue;
+        if (!m_symmetry_move_roots_before.contains(root_uu)) {
+            if (const auto *root_before = m_core.get_current_last_document().get_entity_ptr(root_uu))
+                m_symmetry_move_roots_before.emplace(root_uu, root_before->clone());
+            else
+                m_symmetry_move_roots_before.emplace(root_uu, root->clone());
+        }
+
+        std::vector<UUID> to_erase;
+        for (const auto &[uu, en] : doc.m_entities) {
+            if (en->m_group == m_symmetry_group && en->m_generated_from == root_uu)
+                to_erase.push_back(uu);
+        }
+
+        if (to_erase.empty() && m_symmetry_move_roots_before.contains(root_uu)) {
+            const auto &root_before = *m_symmetry_move_roots_before.at(root_uu);
+            std::vector<std::unique_ptr<Entity>> expected_legacy;
+            if (m_symmetry_mode == SymmetryMode::RADIAL) {
+                const auto center = m_symmetry_axes.front().first;
+                const auto count = std::max(3u, m_symmetry_radial_axes);
+                const auto phase = radial_rotation_deg_to_rad(m_symmetry_radial_rotation_deg);
+                for (unsigned int i = 1; i < count; i++) {
+                    const auto angle = phase + 2.0 * M_PI * static_cast<double>(i) / static_cast<double>(count);
+                    auto expected = root_before.clone();
+                    transform_entity(*expected, root_before,
+                                     [&](const glm::dvec2 &p) { return rotate_point_2d(p, center, angle); }, false);
+                    expected_legacy.push_back(std::move(expected));
+                }
+            }
+            else {
+                for (const auto &[axis_point, axis_dir] : m_symmetry_axes) {
+                    auto expected = root_before.clone();
+                    transform_entity(*expected, root_before,
+                                     [&](const glm::dvec2 &p) { return reflect_point_2d(p, axis_point, axis_dir); }, true);
+                    expected_legacy.push_back(std::move(expected));
+                }
+            }
+
+            std::set<UUID> matched;
+            for (const auto &expected : expected_legacy) {
+                UUID best_uu;
+                double best_score = std::numeric_limits<double>::infinity();
+                for (const auto &[uu, en] : doc.m_entities) {
+                    if (en->m_group != m_symmetry_group)
+                        continue;
+                    if (uu == root_uu || protected_roots.contains(uu) || matched.contains(uu))
+                        continue;
+                    if (en->m_generated_from)
+                        continue;
+                    const auto en_wrkpl = dynamic_cast<const IEntityInWorkplane *>(en.get());
+                    if (!en_wrkpl || en_wrkpl->get_workplane() != m_symmetry_workplane)
+                        continue;
+                    const auto score = entity_match_score(*expected, *en);
+                    if (score < best_score) {
+                        best_score = score;
+                        best_uu = uu;
+                    }
+                }
+                if (best_uu && std::isfinite(best_score) && best_score < 1e-2) {
+                    matched.insert(best_uu);
+                    to_erase.push_back(best_uu);
+                }
+            }
+        }
+
+        for (const auto &uu : to_erase)
+            doc.m_entities.erase(uu);
+
+        std::vector<std::unique_ptr<Entity>> clones;
+        if (m_symmetry_mode == SymmetryMode::RADIAL) {
+            const auto center = m_symmetry_axes.front().first;
+            const auto count = std::max(3u, m_symmetry_radial_axes);
+            const auto phase = radial_rotation_deg_to_rad(m_symmetry_radial_rotation_deg);
+            for (unsigned int i = 1; i < count; i++) {
+                const auto angle = phase + 2.0 * M_PI * static_cast<double>(i) / static_cast<double>(count);
+                auto clone = root->clone();
+                transform_entity(*clone, *root, [&](const glm::dvec2 &p) { return rotate_point_2d(p, center, angle); }, false);
+                clone->m_uuid = UUID::random();
+                clone->m_group = m_symmetry_group;
+                clone->m_kind = ItemKind::USER;
+                clone->m_generated_from = root_uu;
+                clone->m_selection_invisible = false;
+                clone->m_move_instead.clear();
+                clones.push_back(std::move(clone));
+            }
+        }
+        else {
+            for (const auto &[axis_point, axis_dir] : m_symmetry_axes) {
+                auto clone = root->clone();
+                transform_entity(*clone, *root,
+                                 [&](const glm::dvec2 &p) { return reflect_point_2d(p, axis_point, axis_dir); }, true);
+                clone->m_uuid = UUID::random();
+                clone->m_group = m_symmetry_group;
+                clone->m_kind = ItemKind::USER;
+                clone->m_generated_from = root_uu;
+                clone->m_selection_invisible = false;
+                clone->m_move_instead.clear();
+                clones.push_back(std::move(clone));
+            }
+        }
+
+        for (auto &clone : clones)
+            doc.m_entities.emplace(clone->m_uuid, std::move(clone));
+        changed = true;
+    }
+
+    if (changed)
+        m_core.set_needs_save();
+#endif
+}
+
+void Editor::apply_symmetry_to_new_entities_after_commit()
+{
+#ifdef DUNE_SKETCHER_ONLY
+    clear_symmetry_live_preview_entities();
+    if (!m_symmetry_enabled || !m_core.has_documents())
+        return;
+    if (!should_apply_symmetry_for_tool(m_symmetry_capture_tool_id))
+        return;
+    if (m_core.get_current_group() != m_symmetry_group)
+        return;
+    if (m_symmetry_axes.empty())
+        return;
+
+    auto &doc = m_core.get_current_document();
+    if (!m_symmetry_pre_tool_entities_captured) {
+        for (const auto &[uu, en] : doc.m_entities) {
+            if (en->m_group == m_symmetry_group)
+                m_symmetry_pre_tool_entities.insert(uu);
+        }
+        m_symmetry_pre_tool_entities_captured = true;
+        return;
+    }
+
+    std::vector<UUID> new_entities;
+    for (const auto &[uu, en] : doc.m_entities) {
+        if (en->m_group != m_symmetry_group)
+            continue;
+        if (m_symmetry_pre_tool_entities.contains(uu))
+            continue;
+        if (en->m_kind != ItemKind::USER)
+            continue;
+        if (en->m_selection_invisible)
+            continue;
+        const auto en_wrkpl = dynamic_cast<const IEntityInWorkplane *>(en.get());
+        if (!en_wrkpl || en_wrkpl->get_workplane() != m_symmetry_workplane)
+            continue;
+        if (!en->of_type(Entity::Type::LINE_2D, Entity::Type::ARC_2D, Entity::Type::CIRCLE_2D, Entity::Type::BEZIER_2D,
+                         Entity::Type::POINT_2D))
+            continue;
+        new_entities.push_back(uu);
+    }
+
+    if (new_entities.empty()) {
+        return;
+    }
+
+    auto transform_entity = [&](Entity &dst, const Entity &src,
+                                const std::function<glm::dvec2(const glm::dvec2 &)> &transform, bool mirrored) {
+        (void)src;
+        if (auto *line = dynamic_cast<EntityLine2D *>(&dst)) {
+            line->m_p1 = transform(line->m_p1);
+            line->m_p2 = transform(line->m_p2);
+        }
+        else if (auto *arc = dynamic_cast<EntityArc2D *>(&dst)) {
+            const auto from = transform(arc->m_from);
+            const auto to = transform(arc->m_to);
+            arc->m_center = transform(arc->m_center);
+            if (mirrored) {
+                arc->m_from = to;
+                arc->m_to = from;
+            }
+            else {
+                arc->m_from = from;
+                arc->m_to = to;
+            }
+        }
+        else if (auto *circle = dynamic_cast<EntityCircle2D *>(&dst)) {
+            circle->m_center = transform(circle->m_center);
+        }
+        else if (auto *bez = dynamic_cast<EntityBezier2D *>(&dst)) {
+            bez->m_p1 = transform(bez->m_p1);
+            bez->m_p2 = transform(bez->m_p2);
+            bez->m_c1 = transform(bez->m_c1);
+            bez->m_c2 = transform(bez->m_c2);
+        }
+        else if (auto *point = dynamic_cast<EntityPoint2D *>(&dst)) {
+            point->m_p = transform(point->m_p);
+        }
+    };
+
+    std::vector<std::unique_ptr<Entity>> clones;
+    if (m_symmetry_mode == SymmetryMode::RADIAL) {
+        const auto center = m_symmetry_axes.front().first;
+        const auto count = std::max(3u, m_symmetry_radial_axes);
+        const auto phase = radial_rotation_deg_to_rad(m_symmetry_radial_rotation_deg);
+        for (const auto &uu : new_entities) {
+            const auto &src = doc.get_entity(uu);
+            for (unsigned int i = 1; i < count; i++) {
+                const auto angle = phase + 2.0 * M_PI * static_cast<double>(i) / static_cast<double>(count);
+                auto clone = src.clone();
+                transform_entity(*clone, src,
+                                 [&](const glm::dvec2 &p) { return rotate_point_2d(p, center, angle); }, false);
+                clone->m_uuid = UUID::random();
+                clone->m_group = m_symmetry_group;
+                clone->m_kind = ItemKind::USER;
+                clone->m_generated_from = UUID();
+                clone->m_selection_invisible = false;
+                clone->m_move_instead.clear();
+                clones.push_back(std::move(clone));
+            }
+        }
+    }
+    else {
+        for (const auto &uu : new_entities) {
+            const auto &src = doc.get_entity(uu);
+            for (const auto &[axis_point, axis_dir] : m_symmetry_axes) {
+                auto clone = src.clone();
+                transform_entity(*clone, src,
+                                 [&](const glm::dvec2 &p) { return reflect_point_2d(p, axis_point, axis_dir); }, true);
+                clone->m_uuid = UUID::random();
+                clone->m_group = m_symmetry_group;
+                clone->m_kind = ItemKind::USER;
+                clone->m_generated_from = UUID();
+                clone->m_selection_invisible = false;
+                clone->m_move_instead.clear();
+                clones.push_back(std::move(clone));
+            }
+        }
+    }
+
+    if (clones.empty()) {
+        for (const auto &uu : new_entities)
+            m_symmetry_pre_tool_entities.insert(uu);
+        return;
+    }
+
+    for (auto &clone : clones) {
+        m_symmetry_pre_tool_entities.insert(clone->m_uuid);
+        doc.m_entities.emplace(clone->m_uuid, std::move(clone));
+    }
+    for (const auto &uu : new_entities)
+        m_symmetry_pre_tool_entities.insert(uu);
+
+    m_core.set_needs_save();
+    m_core.rebuild("symmetry clone");
+    canvas_update_keep_selection();
+    m_workspace_browser->update_documents(get_current_document_views());
+    update_action_sensitivity();
+#endif
+}
+
+std::vector<std::pair<glm::dvec3, glm::dvec3>> Editor::get_symmetry_overlay_lines_world()
+{
+    std::vector<std::pair<glm::dvec3, glm::dvec3>> lines;
+#ifdef DUNE_SKETCHER_ONLY
+    if (!m_symmetry_enabled || !m_core.has_documents())
+        return lines;
+    if (m_core.get_current_group() != m_symmetry_group)
+        return lines;
+    if (m_symmetry_axes.empty())
+        return lines;
+
+    const auto &doc = m_core.get_current_document();
+    const auto *wrkpl = doc.get_entity_ptr<EntityWorkplane>(m_symmetry_workplane);
+    if (!wrkpl)
+        return lines;
+
+    const auto len = std::max(1000.0, std::max(wrkpl->m_size.x, wrkpl->m_size.y) * 20.0);
+    for (const auto &[axis_point, axis_dir] : m_symmetry_axes) {
+        const auto dir = normalize_dir(axis_dir);
+        const auto p1 = wrkpl->transform(axis_point);
+        const auto p2 = wrkpl->transform(axis_point + dir * len);
+        // Radial mode shows N rays (segments), not full infinite lines that look like 2N rays.
+        if (m_symmetry_mode != SymmetryMode::RADIAL) {
+            const auto p1_full = wrkpl->transform(axis_point - dir * len);
+            lines.emplace_back(p1_full, p2);
+            continue;
+        }
+        lines.emplace_back(p1, p2);
+    }
+#endif
+    return lines;
+}
+
+void Editor::init_settings_popover()
+{
+    auto popover = Gtk::make_managed<Gtk::Popover>();
+    popover->add_css_class("sketch-settings-popover");
+    popover->add_css_class("menu");
+    popover->set_has_arrow(true);
+    popover->set_autohide(true);
+    popover->set_size_request(sketch_popover_total_width, -1);
+
+    auto root = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 10);
+    root->set_margin_start(12);
+    root->set_margin_end(12);
+    root->set_margin_top(12);
+    root->set_margin_bottom(12);
+    root->set_size_request(sketch_popover_content_width, -1);
+    popover->set_child(*root);
+
+    auto theme_title = Gtk::make_managed<Gtk::Label>("Theme");
+    theme_title->set_halign(Gtk::Align::CENTER);
+    theme_title->add_css_class("dim-label");
+    root->append(*theme_title);
+
+    auto theme_row = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 0);
+    theme_row->add_css_class("linked");
+    root->append(*theme_row);
+
+    m_theme_light_button = Gtk::make_managed<Gtk::ToggleButton>("Light");
+    m_theme_dark_button = Gtk::make_managed<Gtk::ToggleButton>("Dark");
+    m_theme_dark_button->set_group(*m_theme_light_button);
+    m_theme_light_button->set_hexpand(true);
+    m_theme_dark_button->set_hexpand(true);
+    theme_row->append(*m_theme_light_button);
+    theme_row->append(*m_theme_dark_button);
+
+    m_theme_light_button->signal_toggled().connect([this] {
+        if (m_updating_settings_popover || !m_theme_light_button->get_active())
+            return;
+        m_preferences.canvas.theme_variant = CanvasPreferences::ThemeVariant::LIGHT;
+        m_preferences.canvas.dark_theme = false;
+        m_preferences.signal_changed().emit();
+    });
+    m_theme_dark_button->signal_toggled().connect([this] {
+        if (m_updating_settings_popover || !m_theme_dark_button->get_active())
+            return;
+        m_preferences.canvas.theme_variant = CanvasPreferences::ThemeVariant::DARK;
+        m_preferences.canvas.dark_theme = true;
+        m_preferences.signal_changed().emit();
+    });
+
+    auto width_title = Gtk::make_managed<Gtk::Label>("Line Thickness");
+    width_title->set_halign(Gtk::Align::CENTER);
+    width_title->add_css_class("dim-label");
+    root->append(*width_title);
+
+    m_line_width_scale = Gtk::make_managed<Gtk::Scale>(Gtk::Orientation::HORIZONTAL);
+    m_line_width_scale->set_range(1.0, 5.0);
+    m_line_width_scale->set_increments(0.1, 0.5);
+    m_line_width_scale->set_draw_value(false);
+    root->append(*m_line_width_scale);
+
+    m_line_width_value_label = Gtk::make_managed<Gtk::Label>();
+    m_line_width_value_label->set_halign(Gtk::Align::CENTER);
+    m_line_width_value_label->add_css_class("dim-label");
+    root->append(*m_line_width_value_label);
+
+    m_line_width_scale->signal_value_changed().connect([this] {
+        if (!m_line_width_scale)
+            return;
+        if (!m_line_width_value_label)
+            return;
+        const auto line_width = m_line_width_scale->get_value();
+        m_line_width_value_label->set_text(format_line_width_multiplier(line_width));
+        if (m_updating_settings_popover)
+            return;
+        m_preferences.canvas.appearance.line_width = line_width;
+        m_preferences.signal_changed().emit();
+    });
+
+    auto right_click_popover_row = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 8);
+    auto right_click_popover_label = Gtk::make_managed<Gtk::Label>("Options by right click");
+    right_click_popover_label->set_hexpand(true);
+    right_click_popover_label->set_xalign(0);
+    m_right_click_popovers_switch = Gtk::make_managed<Gtk::Switch>();
+    right_click_popover_row->append(*right_click_popover_label);
+    right_click_popover_row->append(*m_right_click_popovers_switch);
+    root->append(*right_click_popover_row);
+
+    m_right_click_popovers_switch->property_active().signal_changed().connect([this] {
+        if (m_updating_settings_popover || !m_right_click_popovers_switch)
+            return;
+        m_right_click_popovers_only = m_right_click_popovers_switch->get_active();
+    });
+
+    auto pref_button = Gtk::make_managed<Gtk::Button>("Preferences");
+    pref_button->set_hexpand(true);
+    root->append(*pref_button);
+
+    auto actions_row = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 8);
+    actions_row->add_css_class("linked");
+    root->append(*actions_row);
+
+    auto help_button = Gtk::make_managed<Gtk::Button>("Help");
+    auto about_button = Gtk::make_managed<Gtk::Button>("About");
+    help_button->set_hexpand(true);
+    about_button->set_hexpand(true);
+    actions_row->append(*help_button);
+    actions_row->append(*about_button);
+
+    pref_button->signal_clicked().connect([this, popover] {
+        popover->popdown();
+        if (auto app = m_win.get_application())
+            app->activate_action("preferences");
+    });
+
+    help_button->signal_clicked().connect([this, popover] {
+        popover->popdown();
+        if (auto app = m_win.get_application())
+            app->activate_action("help");
+    });
+    about_button->signal_clicked().connect([this, popover] {
+        popover->popdown();
+        if (auto app = m_win.get_application())
+            app->activate_action("about");
+    });
+
+    popover->signal_show().connect(sigc::mem_fun(*this, &Editor::sync_settings_popover_from_preferences));
+    m_win.get_hamburger_menu_button().set_popover(*popover);
+    m_settings_popover = popover;
+    sync_settings_popover_from_preferences();
+}
+
+void Editor::sync_settings_popover_from_preferences()
+{
+    if (!m_theme_light_button || !m_theme_dark_button || !m_line_width_scale || !m_line_width_value_label
+        || !m_right_click_popovers_switch)
+        return;
+    m_updating_settings_popover = true;
+    const bool dark = m_preferences.canvas.theme_variant == CanvasPreferences::ThemeVariant::DARK;
+    m_theme_dark_button->set_active(dark);
+    m_theme_light_button->set_active(!dark);
+    m_line_width_scale->set_value(m_preferences.canvas.appearance.line_width);
+    m_line_width_value_label->set_text(format_line_width_multiplier(m_preferences.canvas.appearance.line_width));
+    m_right_click_popovers_switch->set_active(m_right_click_popovers_only);
+    m_updating_settings_popover = false;
 }
 
 void Editor::update_view_hints()
@@ -1083,7 +3614,6 @@ void Editor::on_open_folder()
     });
 #endif
 }
-
 
 void Editor::on_save_as(const ActionConnection &conn)
 {
@@ -1412,6 +3942,21 @@ void Editor::apply_preferences()
     }
 
     auto dark = Gtk::Settings::get_default()->property_gtk_application_prefer_dark_theme().get_value();
+#ifdef DUNE_SKETCHER_ONLY
+    // In sketcher mode, Theme Variant drives both GTK and canvas theme.
+    switch (m_preferences.canvas.theme_variant) {
+    case CanvasPreferences::ThemeVariant::AUTO:
+        break;
+    case CanvasPreferences::ThemeVariant::DARK:
+        dark = true;
+        break;
+    case CanvasPreferences::ThemeVariant::LIGHT:
+        dark = false;
+        break;
+    }
+    if (Gtk::Settings::get_default()->property_gtk_application_prefer_dark_theme().get_value() != dark)
+        Gtk::Settings::get_default()->property_gtk_application_prefer_dark_theme().set_value(dark);
+#else
     if (dark != m_preferences.canvas.dark_theme)
         Gtk::Settings::get_default()->property_gtk_application_prefer_dark_theme().set_value(
                 m_preferences.canvas.dark_theme);
@@ -1426,6 +3971,7 @@ void Editor::apply_preferences()
         dark = false;
         break;
     }
+#endif
     if (color_themes.contains(m_preferences.canvas.theme)) {
         Appearance appearance = m_preferences.canvas.appearance;
         appearance.colors = color_themes.at(m_preferences.canvas.theme).get(dark);
@@ -1441,6 +3987,7 @@ void Editor::apply_preferences()
     m_win.tool_bar_set_vertical(m_preferences.tool_bar.vertical_layout);
     update_action_bar_visibility();
     update_error_overlay();
+    sync_settings_popover_from_preferences();
 
     /*
         key_sequence_dialog->clear();
@@ -1490,8 +4037,10 @@ void Editor::render_document(const IDocumentInfo &doc)
     renderer.m_connect_curvature_comb = m_preferences.canvas.connect_curvature_combs;
     renderer.m_first_group = m_update_groups_after;
 
-    if (doc.get_uuid() == m_core.get_current_idocument_info().get_uuid())
+    if (doc.get_uuid() == m_core.get_current_idocument_info().get_uuid()) {
         renderer.add_constraint_icons(m_constraint_tip_pos, m_constraint_tip_vec, m_constraint_tip_icons);
+        renderer.m_overlay_construction_lines = get_symmetry_overlay_lines_world();
+    }
 
     try {
         renderer.render(doc.get_document(), doc.get_current_group(), doc_view,
@@ -1501,6 +4050,150 @@ void Editor::render_document(const IDocumentInfo &doc)
         Logger::log_critical("exception rendering document " + doc.get_basename(), Logger::Domain::RENDERER, ex.what());
     }
 }
+
+void Editor::draw_selection_transform_overlay(const std::set<SelectableRef> &selection)
+{
+#ifdef DUNE_SKETCHER_ONLY
+    if (!m_selection_transform_enabled)
+        return;
+    if (!m_core.has_documents())
+        return;
+    if (m_core.tool_is_active())
+        return;
+
+    const auto &doc = m_core.get_current_document();
+    const EntityWorkplane *wrkpl = nullptr;
+    if (!m_selection_transform_drag_active) {
+        const bool had_overlay = m_selection_transform_overlay_valid;
+        m_selection_transform_overlay_valid = false;
+        const auto entities_equal = [](const std::vector<UUID> &a, const std::vector<UUID> &b) {
+            return std::set<UUID>(a.begin(), a.end()) == std::set<UUID>(b.begin(), b.end());
+        };
+        SelectionTransformOverlayData overlay;
+        if (!collect_selection_transform_overlay_data(doc, selection, m_selection_transform_frame_angle, overlay))
+            return;
+        const bool same_selection = had_overlay
+                && m_selection_transform_group == overlay.group
+                && m_selection_transform_workplane == overlay.workplane
+                && entities_equal(m_selection_transform_entities, overlay.entities);
+        if (!same_selection) {
+            m_selection_transform_frame_angle = 0;
+            if (!collect_selection_transform_overlay_data(doc, selection, m_selection_transform_frame_angle, overlay))
+                return;
+        }
+        wrkpl = doc.get_entity_ptr<EntityWorkplane>(overlay.workplane);
+        if (!wrkpl)
+            return;
+
+        m_selection_transform_group = overlay.group;
+        m_selection_transform_workplane = overlay.workplane;
+        m_selection_transform_entities = overlay.entities;
+        m_selection_transform_bbox_min = overlay.bbox_min;
+        m_selection_transform_bbox_max = overlay.bbox_max;
+        m_selection_transform_center = overlay.center;
+        m_selection_transform_rotate_handle = overlay.rotate_handle;
+        m_selection_transform_scale_handles = overlay.scale_handles;
+        m_selection_transform_base_bbox_min = overlay.bbox_min;
+        m_selection_transform_base_bbox_max = overlay.bbox_max;
+        m_selection_transform_base_rotate_handle = overlay.rotate_handle;
+        m_selection_transform_base_scale_handles = overlay.scale_handles;
+        m_selection_transform_drag_angle = 0;
+        m_selection_transform_drag_scale = 1;
+        m_selection_transform_overlay_valid = true;
+    }
+    else {
+        if (!m_selection_transform_overlay_valid)
+            return;
+        wrkpl = doc.get_entity_ptr<EntityWorkplane>(m_selection_transform_workplane);
+        if (!wrkpl)
+            return;
+    }
+
+    const auto transform_overlay_point = [this](const glm::dvec2 &p) {
+        if (!m_selection_transform_drag_active)
+            return p;
+        const auto scaled = m_selection_transform_center + (p - m_selection_transform_center) * m_selection_transform_drag_scale;
+        return rotate_point_2d(scaled, m_selection_transform_center, m_selection_transform_drag_angle);
+    };
+
+    const auto rotate_handle = m_selection_transform_drag_active ? m_selection_transform_base_rotate_handle
+                                                                 : m_selection_transform_rotate_handle;
+    const auto scale_handles =
+            m_selection_transform_drag_active ? m_selection_transform_base_scale_handles : m_selection_transform_scale_handles;
+
+    const auto b00_2d = transform_overlay_point(scale_handles.at(0));
+    const auto b01_2d = transform_overlay_point(scale_handles.at(1));
+    const auto b11_2d = transform_overlay_point(scale_handles.at(2));
+    const auto b10_2d = transform_overlay_point(scale_handles.at(3));
+    const auto top_center_2d = (b01_2d + b11_2d) * 0.5;
+    const auto rotate_handle_2d = transform_overlay_point(rotate_handle);
+
+    m_selection_transform_rotate_handle = rotate_handle_2d;
+    for (size_t i = 0; i < scale_handles.size(); i++)
+        m_selection_transform_scale_handles.at(i) = transform_overlay_point(scale_handles.at(i));
+
+    auto &canvas = get_canvas();
+    canvas.save();
+    canvas.set_chunk(Renderer::get_chunk_from_group(m_core.get_current_document().get_group(m_selection_transform_group)));
+    canvas.set_selection_invisible(false);
+    canvas.set_vertex_inactive(false);
+    canvas.set_vertex_constraint(false);
+    canvas.set_vertex_construction(false);
+    canvas.set_vertex_hover(true);
+    canvas.set_line_style(ICanvas::LineStyle::DEFAULT);
+
+    const auto b00 = wrkpl->transform(b00_2d);
+    const auto b01 = wrkpl->transform(b01_2d);
+    const auto b11 = wrkpl->transform(b11_2d);
+    const auto b10 = wrkpl->transform(b10_2d);
+    const auto draw_dashed_line = [&canvas](const glm::vec3 &from, const glm::vec3 &to) {
+        constexpr float dash_len = 6.f;
+        constexpr float gap_len = 4.f;
+        const auto delta = to - from;
+        const auto len = glm::length(delta);
+        if (len < 1e-6f)
+            return;
+        const auto dir = delta / len;
+        for (float s = 0; s < len; s += dash_len + gap_len) {
+            const auto e = std::min(s + dash_len, len);
+            canvas.draw_line(from + dir * s, from + dir * e);
+        }
+    };
+    draw_dashed_line(b00, b01);
+    draw_dashed_line(b01, b11);
+    draw_dashed_line(b11, b10);
+    draw_dashed_line(b10, b00);
+
+    const auto rotate_link_vr = canvas.draw_line(wrkpl->transform(top_center_2d), wrkpl->transform(rotate_handle_2d));
+    canvas.add_selectable(rotate_link_vr,
+                          SelectableRef{SelectableRef::Type::SOLID_MODEL_EDGE, selection_transform_rotate_uuid(), 0});
+
+    canvas.set_vertex_hover(false);
+    const auto rotate_vr = canvas.draw_point(wrkpl->transform(rotate_handle_2d), IconTexture::IconTextureID::POINT_CIRCLE);
+    canvas.add_selectable(rotate_vr, SelectableRef{SelectableRef::Type::SOLID_MODEL_EDGE, selection_transform_rotate_uuid(), 0});
+
+    canvas.set_vertex_icon_no_flip(true);
+    for (size_t i = 0; i < m_selection_transform_scale_handles.size(); i++) {
+        const auto handle_2d = m_selection_transform_scale_handles.at(i);
+        auto outward_2d = handle_2d - m_selection_transform_center;
+        const auto outward_len = glm::length(outward_2d);
+        if (outward_len > 1e-9)
+            outward_2d /= outward_len;
+        else
+            outward_2d = {0, 1};
+        // Icon rotation is based on local +X axis; rotate outward by +90deg so triangle tip points outward.
+        const auto icon_dir_2d = glm::dvec2{-outward_2d.y, outward_2d.x};
+        const auto vr = canvas.draw_icon(IconTexture::IconTextureID::POINT_TRIANGLE_DOWN,
+                                         glm::vec3(wrkpl->transform(handle_2d)), {0, 0},
+                                         glm::vec3(wrkpl->transform_relative(icon_dir_2d)));
+        canvas.add_selectable(vr, SelectableRef{SelectableRef::Type::SOLID_MODEL_EDGE, selection_transform_scale_uuid(),
+                                                static_cast<unsigned int>(i + 1)});
+    }
+    canvas.set_vertex_icon_no_flip(false);
+    canvas.restore();
+#endif
+}
+
 void Editor::canvas_update()
 {
     auto docs = m_core.get_documents();
@@ -1522,6 +4215,13 @@ void Editor::canvas_update()
     if (m_core.has_documents())
         render_document(m_core.get_current_idocument_info());
 
+#ifdef DUNE_SKETCHER_ONLY
+    const auto &overlay_selection = m_selection_transform_overlay_selection_cache.empty()
+            ? get_canvas().get_selection()
+            : m_selection_transform_overlay_selection_cache;
+    draw_selection_transform_overlay(overlay_selection);
+#endif
+
     get_canvas().set_hover_selection(hover_sel);
     update_error_overlay();
     get_canvas().request_push();
@@ -1531,8 +4231,10 @@ void Editor::canvas_update()
 void Editor::canvas_update_keep_selection()
 {
     auto sel = get_canvas().get_selection();
+    m_selection_transform_overlay_selection_cache = sel;
     canvas_update();
     get_canvas().set_selection(sel, false);
+    m_selection_transform_overlay_selection_cache.clear();
 }
 
 void Editor::enable_hover_selection(bool enable)
@@ -1570,12 +4272,204 @@ void Editor::set_canvas_selection_mode(SelectionMode mode)
     m_last_selection_mode = mode;
 }
 
+bool Editor::begin_selection_transform_drag(const SelectableRef &handle)
+{
+#ifdef DUNE_SKETCHER_ONLY
+    if (!m_selection_transform_enabled)
+        return false;
+    if (!m_selection_transform_overlay_valid)
+        return false;
+    if (!is_selection_transform_handle(handle))
+        return false;
+
+    auto &doc = m_core.get_current_document();
+    auto *wrkpl = doc.get_entity_ptr<EntityWorkplane>(m_selection_transform_workplane);
+    if (!wrkpl)
+        return false;
+
+    m_selection_transform_drag_active = true;
+    m_selection_transform_drag_dirty = false;
+    m_selection_transform_constraints_removed = false;
+    m_selection_transform_drag_mode = SelectionTransformDragMode::NONE;
+    m_selection_transform_entities_before.clear();
+    m_selection_transform_selection_before = get_canvas().get_selection();
+
+    std::set<UUID> selected_entity_set(m_selection_transform_entities.begin(), m_selection_transform_entities.end());
+    m_selection_transform_constraints_removed =
+            remove_direction_constraints_for_entities(doc, m_selection_transform_group, selected_entity_set);
+
+    for (const auto &uu : m_selection_transform_entities) {
+        if (const auto *en = doc.get_entity_ptr(uu))
+            m_selection_transform_entities_before.emplace(uu, en->clone());
+    }
+    if (m_selection_transform_entities_before.empty()) {
+        m_selection_transform_drag_active = false;
+        return false;
+    }
+
+    const auto cursor_world = get_canvas().get_cursor_pos_for_plane(wrkpl->m_origin, wrkpl->get_normal_vector());
+    const auto cursor = wrkpl->project(cursor_world);
+    m_selection_transform_start_angle = std::atan2(cursor.y - m_selection_transform_center.y,
+                                                   cursor.x - m_selection_transform_center.x);
+    m_selection_transform_drag_angle = 0;
+    m_selection_transform_drag_scale = 1;
+    m_selection_transform_scale_handle_index = 0;
+    m_selection_transform_scale_base_vector = {1, 0};
+    m_selection_transform_scale_start_factor = 1;
+    if (handle.item == selection_transform_rotate_uuid()) {
+        m_selection_transform_drag_mode = SelectionTransformDragMode::ROTATE;
+    }
+    else if (handle.item == selection_transform_scale_uuid()) {
+        m_selection_transform_drag_mode = SelectionTransformDragMode::SCALE;
+        if (handle.point >= 1 && handle.point <= m_selection_transform_base_scale_handles.size()) {
+            m_selection_transform_scale_handle_index = handle.point - 1;
+            m_selection_transform_scale_base_vector =
+                    m_selection_transform_base_scale_handles.at(m_selection_transform_scale_handle_index)
+                    - m_selection_transform_center;
+            const auto denom = glm::dot(m_selection_transform_scale_base_vector, m_selection_transform_scale_base_vector);
+            if (denom > 1e-9) {
+                m_selection_transform_scale_start_factor =
+                        glm::dot(cursor - m_selection_transform_center, m_selection_transform_scale_base_vector) / denom;
+            }
+            else {
+                m_selection_transform_scale_start_factor = 1;
+            }
+            if (std::abs(m_selection_transform_scale_start_factor) < 1e-6)
+                m_selection_transform_scale_start_factor = 1;
+        }
+    }
+    else {
+        m_selection_transform_drag_active = false;
+        m_selection_transform_entities_before.clear();
+        return false;
+    }
+    return true;
+#else
+    (void)handle;
+    return false;
+#endif
+}
+
+void Editor::update_selection_transform_drag()
+{
+#ifdef DUNE_SKETCHER_ONLY
+    if (!m_selection_transform_drag_active)
+        return;
+    if (m_selection_transform_drag_mode == SelectionTransformDragMode::NONE)
+        return;
+    if (!m_core.has_documents())
+        return;
+
+    auto &doc = m_core.get_current_document();
+    auto *wrkpl = doc.get_entity_ptr<EntityWorkplane>(m_selection_transform_workplane);
+    if (!wrkpl)
+        return;
+
+    const auto cursor_world = get_canvas().get_cursor_pos_for_plane(wrkpl->m_origin, wrkpl->get_normal_vector());
+    const auto cursor = wrkpl->project(cursor_world);
+
+    if (m_selection_transform_drag_mode == SelectionTransformDragMode::ROTATE) {
+        auto angle = std::atan2(cursor.y - m_selection_transform_center.y, cursor.x - m_selection_transform_center.x)
+                - m_selection_transform_start_angle;
+        while (angle > M_PI)
+            angle -= 2 * M_PI;
+        while (angle < -M_PI)
+            angle += 2 * M_PI;
+        m_selection_transform_drag_angle = angle;
+        m_selection_transform_drag_scale = 1;
+        if (std::abs(m_selection_transform_drag_angle) > 1e-6)
+            m_selection_transform_drag_dirty = true;
+        for (const auto &[uu, src_entity] : m_selection_transform_entities_before) {
+            auto *dst = doc.get_entity_ptr(uu);
+            if (!dst)
+                continue;
+            transform_2d_entity(*dst, *src_entity,
+                                [this](const glm::dvec2 &p) {
+                                    const auto scaled = m_selection_transform_center
+                                            + (p - m_selection_transform_center) * m_selection_transform_drag_scale;
+                                    return rotate_point_2d(scaled, m_selection_transform_center,
+                                                           m_selection_transform_drag_angle);
+                                },
+                                m_selection_transform_drag_scale);
+        }
+    }
+    else if (m_selection_transform_drag_mode == SelectionTransformDragMode::SCALE) {
+        const auto denom = glm::dot(m_selection_transform_scale_base_vector, m_selection_transform_scale_base_vector);
+        auto factor = 1.0;
+        if (denom > 1e-9) {
+            const auto current_factor =
+                    glm::dot(cursor - m_selection_transform_center, m_selection_transform_scale_base_vector) / denom;
+            factor = current_factor / m_selection_transform_scale_start_factor;
+        }
+        factor = std::clamp(factor, 0.01, 100.0);
+        m_selection_transform_drag_scale = factor;
+        m_selection_transform_drag_angle = 0;
+        if (std::abs(m_selection_transform_drag_scale - 1.0) > 1e-6)
+            m_selection_transform_drag_dirty = true;
+        for (const auto &[uu, src_entity] : m_selection_transform_entities_before) {
+            auto *dst = doc.get_entity_ptr(uu);
+            if (!dst)
+                continue;
+            transform_2d_entity(*dst, *src_entity,
+                                [this](const glm::dvec2 &p) {
+                                    const auto scaled = m_selection_transform_center
+                                            + (p - m_selection_transform_center) * m_selection_transform_drag_scale;
+                                    return rotate_point_2d(scaled, m_selection_transform_center,
+                                                           m_selection_transform_drag_angle);
+                                },
+                                m_selection_transform_drag_scale);
+        }
+    }
+
+    canvas_update_keep_selection();
+#endif
+}
+
+void Editor::end_selection_transform_drag()
+{
+#ifdef DUNE_SKETCHER_ONLY
+    if (!m_selection_transform_drag_active)
+        return;
+    if (m_selection_transform_drag_mode == SelectionTransformDragMode::ROTATE) {
+        m_selection_transform_frame_angle += m_selection_transform_drag_angle;
+        while (m_selection_transform_frame_angle > M_PI)
+            m_selection_transform_frame_angle -= 2 * M_PI;
+        while (m_selection_transform_frame_angle < -M_PI)
+            m_selection_transform_frame_angle += 2 * M_PI;
+    }
+    const bool changed = m_selection_transform_drag_dirty || m_selection_transform_constraints_removed;
+    m_selection_transform_drag_active = false;
+    m_selection_transform_drag_mode = SelectionTransformDragMode::NONE;
+    m_selection_transform_entities_before.clear();
+    m_selection_transform_drag_angle = 0;
+    m_selection_transform_drag_scale = 1;
+    m_selection_transform_scale_start_factor = 1;
+    m_selection_transform_scale_handle_index = 0;
+
+    if (changed) {
+        m_core.set_needs_save();
+        m_core.rebuild("selection transform");
+        m_workspace_browser->update_documents(get_current_document_views());
+        update_action_sensitivity();
+    }
+    if (!m_selection_transform_selection_before.empty())
+        get_canvas().set_selection(m_selection_transform_selection_before, false);
+    m_selection_transform_selection_before.clear();
+    canvas_update_keep_selection();
+#endif
+}
+
 void Editor::handle_cursor_move()
 {
+    if (m_selection_transform_drag_active) {
+        update_selection_transform_drag();
+        return;
+    }
+
     if (m_core.tool_is_active()) {
         ToolArgs args;
         args.type = ToolEventType::MOVE;
-        ToolResponse r = m_core.tool_update(args);
+        ToolResponse r = tool_update_with_symmetry(args);
         tool_process(r);
     }
     else {
@@ -1590,6 +4484,7 @@ void Editor::handle_cursor_move()
         if (glm::length(delta) > 10) {
             ToolArgs args;
             args.selection = m_selection_for_drag;
+            capture_symmetry_entities_before_tool(m_drag_tool);
             m_last_selection_mode = get_canvas().get_selection_mode();
             get_canvas().set_selection_mode(SelectionMode::NONE);
             ToolResponse r = m_core.tool_begin(m_drag_tool, args, true);
@@ -1610,7 +4505,7 @@ void Editor::handle_view_changed()
 
     ToolArgs args;
     args.type = ToolEventType::VIEW_CHANGED;
-    ToolResponse r = m_core.tool_update(args);
+    ToolResponse r = tool_update_with_symmetry(args);
     tool_process(r);
 }
 
@@ -1636,9 +4531,19 @@ void Editor::handle_click(unsigned int button, unsigned int n)
         if (!hover_sel)
             return;
 
+#ifdef DUNE_SKETCHER_ONLY
+        if (is_selection_transform_handle(*hover_sel)) {
+            if (begin_selection_transform_drag(*hover_sel)) {
+                get_canvas().inhibit_drag_selection();
+                return;
+            }
+        }
+#endif
+
         auto sel = get_canvas().get_selection();
-        if (!sel.contains(hover_sel.value()))
+        if (!sel.contains(hover_sel.value())) {
             sel = {*hover_sel};
+        }
 
         m_drag_tool = get_tool_for_drag_move(false, sel);
         if (m_drag_tool != ToolID::NONE && m_core.tool_can_begin(m_drag_tool, sel).get_can_begin()) {
@@ -1675,13 +4580,21 @@ void Editor::tool_bar_clear_actions()
 
 void Editor::tool_bar_set_actions(const std::vector<ActionLabelInfo> &labels)
 {
-    if (m_in_tool_action_label_infos != labels) {
+    std::vector<ActionLabelInfo> filtered;
+    filtered.reserve(labels.size());
+    for (const auto &it : labels) {
+        if (it.action1 == InToolActionID::LMB || it.action1 == InToolActionID::RMB)
+            continue;
+        filtered.push_back(it);
+    }
+
+    if (m_in_tool_action_label_infos != filtered) {
         tool_bar_clear_actions();
-        for (const auto &it : labels) {
+        for (const auto &it : filtered) {
             tool_bar_append_action(it.action1, it.action2, it.action3, it.label);
         }
 
-        m_in_tool_action_label_infos = labels;
+        m_in_tool_action_label_infos = filtered;
     }
 }
 

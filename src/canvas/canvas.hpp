@@ -59,6 +59,14 @@ public:
     {
         m_state.vertex_inactive = inactive;
     }
+    void set_vertex_hover(bool hover) override
+    {
+        m_state.vertex_hover = hover;
+    }
+    void set_vertex_icon_no_flip(bool no_flip) override
+    {
+        m_state.vertex_icon_no_flip = no_flip;
+    }
     void set_vertex_constraint(bool c) override
     {
         m_state.vertex_constraint = c;
@@ -216,6 +224,21 @@ public:
     }
 
     void set_show_error_overlay(bool show);
+    void set_grid_enabled(bool show);
+    bool get_grid_enabled() const
+    {
+        return m_grid_enabled;
+    }
+    void set_grid_spacing_mm(float spacing_mm);
+    float get_grid_spacing_mm() const
+    {
+        return m_grid_spacing_mm;
+    }
+    void set_grid_snap_enabled(bool enabled);
+    bool get_grid_snap_enabled() const
+    {
+        return m_grid_snap_enabled;
+    }
 
     void setup_controllers();
 
@@ -278,6 +301,7 @@ private:
     glm::vec3 m_cam_normal;
 
     void update_mats();
+    float get_effective_grid_spacing_mm() const;
 
     glm::dvec2 m_cursor_pos;
 
@@ -459,6 +483,9 @@ private:
     const ISelectionFilter *m_selection_filter = nullptr;
 
     bool m_show_error_overlay = false;
+    bool m_grid_enabled = false;
+    float m_grid_spacing_mm = 10.0f;
+    bool m_grid_snap_enabled = false;
     bool m_zoom_to_cursor = true;
     RotationScheme m_rotation_scheme = RotationScheme::DEFAULT;
 
@@ -469,6 +496,8 @@ private:
         glm::mat4 transform;
         bool selection_invisible = false;
         bool vertex_inactive = false;
+        bool vertex_hover = false;
+        bool vertex_icon_no_flip = false;
         bool vertex_constraint = false;
         bool vertex_construction = false;
         bool no_points = false;

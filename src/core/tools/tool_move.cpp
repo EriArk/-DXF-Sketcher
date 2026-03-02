@@ -75,7 +75,7 @@ ToolResponse ToolMove::begin(const ToolArgs &args)
     if (first_group_render)
         m_first_group_render = first_group_render->m_uuid;
 
-
+    m_dragged_list.clear();
     for (auto [entity, point] : m_entities) {
         m_dragged_list.emplace_back(entity->m_uuid, point);
     }

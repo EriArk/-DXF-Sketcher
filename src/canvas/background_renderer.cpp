@@ -3,6 +3,7 @@
 #include "gl_util.hpp"
 #include "color_palette.hpp"
 #include <cmath>
+#include <glm/gtc/type_ptr.hpp>
 
 namespace dune3d {
 BackgroundRenderer::BackgroundRenderer(Canvas &c) : m_ca(c)
@@ -53,6 +54,14 @@ void BackgroundRenderer::realize()
     GET_LOC(this, color_top);
     GET_LOC(this, color_bottom);
     GET_LOC(this, alpha);
+    GET_LOC(this, grid_enabled);
+    GET_LOC(this, grid_spacing);
+    GET_LOC(this, grid_minor_color);
+    GET_LOC(this, grid_major_color);
+    GET_LOC(this, grid_axis_x_color);
+    GET_LOC(this, grid_axis_y_color);
+    GET_LOC(this, viewport_size);
+    GET_LOC(this, projmat_viewmat_inv);
 }
 
 void BackgroundRenderer::render()
@@ -64,6 +73,14 @@ void BackgroundRenderer::render()
 
     gl_color_to_uniform_3f(m_color_top_loc, m_ca.m_appearance.get_color(ColorP::BACKGROUND_TOP));
     gl_color_to_uniform_3f(m_color_bottom_loc, m_ca.m_appearance.get_color(ColorP::BACKGROUND_BOTTOM));
+    gl_color_to_uniform_3f(m_grid_minor_color_loc, m_ca.m_appearance.get_color(ColorP::INACTIVE_ENTITY));
+    gl_color_to_uniform_3f(m_grid_major_color_loc, m_ca.m_appearance.get_color(ColorP::CONSTRUCTION_ENTITY));
+    glUniform3f(m_grid_axis_x_color_loc, 0.84f, 0.30f, 0.30f);
+    glUniform3f(m_grid_axis_y_color_loc, 0.29f, 0.66f, 0.43f);
+    glUniform1i(m_grid_enabled_loc, m_ca.m_grid_enabled ? 1 : 0);
+    glUniform1f(m_grid_spacing_loc, m_ca.get_effective_grid_spacing_mm());
+    glUniform2f(m_viewport_size_loc, static_cast<float>(m_ca.m_dev_width), static_cast<float>(m_ca.m_dev_height));
+    glUniformMatrix4fv(m_projmat_viewmat_inv_loc, 1, GL_FALSE, glm::value_ptr(m_ca.m_projmat_viewmat_inv));
     glUniform1f(m_alpha_loc, 1);
     GL_CHECK_ERROR
 
@@ -80,6 +97,7 @@ void BackgroundRenderer::render_error()
 
     gl_color_to_uniform_3f(m_color_bottom_loc, m_ca.m_appearance.get_color(ColorP::ERROR_OVERLAY));
     gl_color_to_uniform_3f(m_color_top_loc, m_ca.m_appearance.get_color(ColorP::ERROR_OVERLAY));
+    glUniform1i(m_grid_enabled_loc, 0);
     glUniform1f(m_alpha_loc, .25);
     GL_CHECK_ERROR
 

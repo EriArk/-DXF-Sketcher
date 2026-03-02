@@ -27,6 +27,7 @@ enum class ConstraintType;
 class Renderer : private EntityVisitor, private ConstraintVisitor {
 public:
     Renderer(ICanvas &ca, IDocumentProvider &docprv);
+    using OverlayLine = std::pair<glm::dvec3, glm::dvec3>;
     void render(const Document &doc, const UUID &current_group, const IDocumentView &doc_view,
                 const IWorkspaceView &wrk_view, const std::filesystem::path &containing_dir,
                 std::optional<SelectableRef> sr);
@@ -34,6 +35,7 @@ public:
     bool m_solid_model_edge_select_mode = false;
     bool m_connect_curvature_comb = true;
     UUID m_first_group;
+    std::vector<OverlayLine> m_overlay_construction_lines;
 
     void add_constraint_icons(glm::vec3 p, glm::vec3 v, const std::vector<ConstraintType> &constraints);
     static unsigned int get_chunk_from_group(const Group &group);

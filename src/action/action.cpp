@@ -27,6 +27,10 @@ static std::string keyval_to_string(unsigned int kv)
         return "<";
     case GDK_KEY_greater:
         return ">";
+    case GDK_KEY_bracketleft:
+        return "[";
+    case GDK_KEY_bracketright:
+        return "]";
     case GDK_KEY_BackSpace:
 #ifdef __APPLE__
         return "Delete";

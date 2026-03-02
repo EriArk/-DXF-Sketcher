@@ -109,6 +109,110 @@
             }
         ]
     ],
+    "TOGGLE_RECTANGLE_SQUARE": [
+        [
+            {
+                "key": "s",
+                "mod": 0
+            }
+        ]
+    ],
+    "TOGGLE_RECTANGLE_ROUNDED": [
+        [
+            {
+                "key": "r",
+                "mod": 0
+            }
+        ]
+    ],
+    "RECTANGLE_CORNER_RADIUS_DEC": [
+        [
+            {
+                "key": "bracketleft",
+                "mod": 0
+            }
+        ]
+    ],
+    "RECTANGLE_CORNER_RADIUS_INC": [
+        [
+            {
+                "key": "bracketright",
+                "mod": 0
+            }
+        ]
+    ],
+    "TOGGLE_CIRCLE_OVAL": [
+        [
+            {
+                "key": "o",
+                "mod": 0
+            }
+        ]
+    ],
+    "TOGGLE_CIRCLE_SLICE": [
+        [
+            {
+                "key": "a",
+                "mod": 0
+            }
+        ]
+    ],
+    "CIRCLE_SPAN_DEC": [
+        [
+            {
+                "key": "bracketleft",
+                "mod": 0
+            }
+        ]
+    ],
+    "CIRCLE_SPAN_INC": [
+        [
+            {
+                "key": "bracketright",
+                "mod": 0
+            }
+        ]
+    ],
+    "TOGGLE_TEXT_BOLD": [
+        [
+            {
+                "key": "b",
+                "mod": 0
+            }
+        ]
+    ],
+    "TOGGLE_TEXT_ITALIC": [
+        [
+            {
+                "key": "i",
+                "mod": 0
+            }
+        ]
+    ],
+    "TOGGLE_POLYGON_ROUNDED": [
+        [
+            {
+                "key": "r",
+                "mod": 0
+            }
+        ]
+    ],
+    "POLYGON_CORNER_RADIUS_DEC": [
+        [
+            {
+                "key": "bracketleft",
+                "mod": 0
+            }
+        ]
+    ],
+    "POLYGON_CORNER_RADIUS_INC": [
+        [
+            {
+                "key": "bracketright",
+                "mod": 0
+            }
+        ]
+    ],
     "TOGGLE_TANGENT_CONSTRAINT": [
         [
             {

@@ -59,6 +59,8 @@ public:
 
     // tracked by save/restore
     virtual void set_vertex_inactive(bool inactive) = 0;
+    virtual void set_vertex_hover(bool hover) = 0;
+    virtual void set_vertex_icon_no_flip(bool no_flip) = 0;
     virtual void set_vertex_constraint(bool c) = 0;
     virtual void set_vertex_construction(bool c) = 0;
     virtual void set_no_points(bool c) = 0;

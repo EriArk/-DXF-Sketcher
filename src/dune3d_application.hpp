@@ -80,5 +80,8 @@ private:
     type_signal_recent_items_changed m_signal_recent_items_changed;
 
     void on_action_about();
+    void on_action_help();
+    void on_action_theme_light();
+    void on_action_theme_dark();
 };
 } // namespace dune3d

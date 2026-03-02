@@ -48,19 +48,12 @@ KeySequencesPreferencesEditorBase::KeySequencesPreferencesEditorBase(BaseObjectT
                                        /* passthrough */ false, /* autoexpand */ true);
     m_selection_model = Gtk::SingleSelection::create(m_model);
 
-    {
-        auto load_default_button = x->get_widget<Gtk::Button>("load_default_button");
-        auto import_button = x->get_widget<Gtk::Button>("import_button");
-        auto export_button = x->get_widget<Gtk::Button>("export_button");
-        load_default_button->signal_clicked().connect(
-                sigc::mem_fun(*this, &KeySequencesPreferencesEditorBase::handle_load_default));
-        import_button->signal_clicked().connect(
-                sigc::mem_fun(*this, &KeySequencesPreferencesEditorBase::handle_import));
-        export_button->signal_clicked().connect(
-                sigc::mem_fun(*this, &KeySequencesPreferencesEditorBase::handle_export));
-    }
-
     m_action_editors = x->get_widget<Gtk::FlowBox>("action_editors");
+    m_action_editors_revealer = x->get_widget<Gtk::Revealer>("action_editors_revealer");
+    if (m_action_editors_revealer) {
+        m_action_editors_revealer->set_reveal_child(false);
+        m_action_editors_revealer->set_visible(false);
+    }
 
     m_view = x->get_widget<Gtk::ColumnView>("key_sequences_view");
     m_view->set_model(m_selection_model);
@@ -114,6 +107,8 @@ KeySequencesPreferencesEditorBase::KeySequencesPreferencesEditorBase(BaseObjectT
     }
 
     m_selection_model->signal_selection_changed().connect([this](guint, guint) { update_action_editors(); });
+    if (m_model->get_n_items() > 0)
+        m_selection_model->set_selected(0);
     update_action_editors();
 }
 
@@ -139,8 +134,19 @@ public:
 
 void KeySequencesPreferencesEditorBase::update_action_editors()
 {
+    auto has_editor_children = [this] {
+        if (!m_action_editors)
+            return false;
+        auto children = m_action_editors->observe_children();
+        return children && children->get_n_items() > 0;
+    };
+
     while (auto child = m_action_editors->get_first_child())
         m_action_editors->remove(*child);
+    if (m_action_editors_revealer) {
+        m_action_editors_revealer->set_reveal_child(false);
+        m_action_editors_revealer->set_visible(false);
+    }
 
     auto row = std::dynamic_pointer_cast<Gtk::TreeListRow>(m_selection_model->get_selected_item());
     if (!row)
@@ -150,6 +156,26 @@ void KeySequencesPreferencesEditorBase::update_action_editors()
         return;
 
     update_action_editors(*col);
+    if (m_action_editors_revealer) {
+        const bool has_children = has_editor_children();
+        m_action_editors_revealer->set_visible(has_children);
+        m_action_editors_revealer->set_reveal_child(has_editor_children());
+    }
+}
+
+void KeySequencesPreferencesEditorBase::load_defaults()
+{
+    handle_load_default();
+}
+
+void KeySequencesPreferencesEditorBase::import_keys()
+{
+    handle_import();
+}
+
+void KeySequencesPreferencesEditorBase::export_keys()
+{
+    handle_export();
 }
 
 void KeySequencesPreferencesEditorBase::handle_import()

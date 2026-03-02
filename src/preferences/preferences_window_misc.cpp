@@ -94,6 +94,7 @@ MiscPreferencesEditor::MiscPreferencesEditor(Preferences &prefs) : m_preferences
             gr->add_row(*r);
         }
     }
+#ifndef DUNE_SKETCHER_ONLY
     {
         auto gr = Gtk::make_managed<PreferencesGroup>("Action Bar");
         box->append(*gr);
@@ -126,15 +127,7 @@ MiscPreferencesEditor::MiscPreferencesEditor(Preferences &prefs) : m_preferences
             gr->add_row(*r);
         }
     }
-    {
-        auto gr = Gtk::make_managed<PreferencesGroup>("Appearance");
-        box->append(*gr);
-        {
-            auto r = Gtk::make_managed<PreferencesRowBool>("Dark theme", "Use dark theme variant if available",
-                                                           m_preferences, m_preferences.canvas.dark_theme);
-            gr->add_row(*r);
-        }
-    }
+#endif
 }
 
 } // namespace dune3d

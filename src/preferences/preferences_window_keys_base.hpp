@@ -11,6 +11,9 @@ public:
                                       class Preferences &prefs);
 
     void update_keys();
+    void load_defaults();
+    void import_keys();
+    void export_keys();
 
 
 protected:
@@ -56,6 +59,7 @@ private:
     Glib::RefPtr<Gtk::SingleSelection> m_selection_model;
     Glib::RefPtr<Gio::ListModel> create_model(const Glib::RefPtr<Glib::ObjectBase> &item = {});
 
+    Gtk::Revealer *m_action_editors_revealer = nullptr;
 
     void update_action_editors();
     void handle_save();
