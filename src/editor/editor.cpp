@@ -613,7 +613,8 @@ void Editor::init()
     get_canvas().signal_selection_changed().connect([this] {
         update_action_sensitivity();
         sync_symmetry_popover_context();
-        apply_symmetry_live_from_popover(false);
+        if (!m_core.tool_is_active())
+            apply_symmetry_live_from_popover(false);
         sync_draw_text_popover_from_selection(true);
 #ifdef DUNE_SKETCHER_ONLY
         if (m_selection_transform_enabled && !m_selection_transform_drag_active && !m_core.tool_is_active())
