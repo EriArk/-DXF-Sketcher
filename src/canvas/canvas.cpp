@@ -879,24 +879,10 @@ float Canvas::get_magic_number() const
 
 float Canvas::get_effective_grid_spacing_mm() const
 {
-    const float base_spacing = std::max(m_grid_spacing_mm, 0.01f);
-    const float world_per_px = glm::length(get_center_shift(glm::vec2(1, 0)));
-    if (!std::isfinite(world_per_px) || world_per_px <= 1e-8f)
-        return base_spacing;
-
-    float spacing = base_spacing;
-    float px = spacing / world_per_px;
-    constexpr float min_px = 28.0f;
-    constexpr float max_px = 120.0f;
-    while (px < min_px) {
-        spacing *= 2.0f;
-        px *= 2.0f;
-    }
-    while (px > max_px) {
-        spacing *= 0.5f;
-        px *= 0.5f;
-    }
-    return spacing;
+    // Keep rendered grid spacing exactly equal to the user-selected value.
+    // This avoids zoom-threshold jumps where the visible grid no longer
+    // matches the configured millimeter spacing.
+    return std::max(m_grid_spacing_mm, 0.01f);
 }
 
 glm::vec3 Canvas::get_center_shift(const glm::vec2 &shift) const
