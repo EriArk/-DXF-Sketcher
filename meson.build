@@ -148,6 +148,7 @@ src_common = files(
   'src/util/picture_data.cpp',
   'src/util/picture_load.cpp',
   'src/util/picture_util.cpp',
+  'src/util/image_trace.cpp',
   'src/util/paths.cpp',
 )
 
@@ -303,6 +304,7 @@ src_gui = files(
   'src/dialogs/rotate_window.cpp',
   'src/dialogs/tool_window.cpp',
   'src/dialogs/enter_text_window.cpp',
+  'src/dialogs/image_trace_dialog.cpp',
   'src/widgets/spin_button_dim.cpp',
   'src/widgets/spin_button_angle.cpp',
   'src/util/gtk_util.cpp',

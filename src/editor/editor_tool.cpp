@@ -16,7 +16,8 @@ ToolResponse Editor::tool_update_with_symmetry(ToolArgs &args)
 #endif
     auto response = m_core.tool_update(args);
 #ifdef DUNE_SKETCHER_ONLY
-    if (tool_before_update == ToolID::IMPORT_PICTURE && response.result == ToolResponse::Result::COMMIT
+    if ((tool_before_update == ToolID::IMPORT_PICTURE || tool_before_update == ToolID::IMPORT_PICTURE_SILENT)
+        && response.result == ToolResponse::Result::COMMIT
         && !m_core.tool_is_active()) {
         m_sticky_draw_tool = ToolID::NONE;
         m_sticky_tool_restart_connection.disconnect();

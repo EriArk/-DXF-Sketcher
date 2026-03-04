@@ -21,6 +21,7 @@
 #include "document/entity/entity_arc2d.hpp"
 #include "document/entity/entity_bezier2d.hpp"
 #include "document/entity/entity_point2d.hpp"
+#include "document/entity/entity_cluster.hpp"
 #include "document/entity/entity_text.hpp"
 #include "document/entity/ientity_in_workplane.hpp"
 #include "logger/logger.hpp"
@@ -36,13 +37,16 @@
 #include "import_dxf/dxf_importer.hpp"
 #include "widgets/clipping_plane_window.hpp"
 #include "widgets/selection_filter_window.hpp"
+#include "dialogs/image_trace_dialog.hpp"
 #include "core/tools/tool_draw_regular_polygon.hpp"
 #include "core/tools/tool_draw_rectangle.hpp"
 #include "core/tools/tool_draw_circle_2d.hpp"
 #include "core/tools/tool_draw_text.hpp"
+#include "core/tool_data_path.hpp"
 #include "system/system.hpp"
 #include "logger/log_util.hpp"
 #include "util/text_render.hpp"
+#include "util/uuid.hpp"
 #include "nlohmann/json.hpp"
 #include "buffer.hpp"
 #include "icon_texture_id.hpp"
@@ -59,6 +63,7 @@
 #include <functional>
 #include <limits>
 #include <memory>
+#include <fstream>
 #include <glm/gtx/quaternion.hpp>
 
 namespace dune3d {
@@ -264,6 +269,13 @@ void append_entity_points_for_transform_bbox(const Entity &en, std::vector<glm::
     else if (const auto *point = dynamic_cast<const EntityPoint2D *>(&en)) {
         points.push_back(point->m_p);
     }
+    else if (const auto *cluster = dynamic_cast<const EntityCluster *>(&en)) {
+        const auto bb = cluster->get_bbox();
+        points.push_back(bb.first);
+        points.push_back({bb.first.x, bb.second.y});
+        points.push_back(bb.second);
+        points.push_back({bb.second.x, bb.first.y});
+    }
 }
 
 bool collect_selection_transform_overlay_data(const Document &doc, const std::set<SelectableRef> &selection,
@@ -302,7 +314,7 @@ bool collect_selection_transform_overlay_data(const Document &doc, const std::se
         if (!en)
             continue;
         if (!en->of_type(Entity::Type::LINE_2D, Entity::Type::ARC_2D, Entity::Type::CIRCLE_2D, Entity::Type::BEZIER_2D,
-                         Entity::Type::POINT_2D))
+                         Entity::Type::POINT_2D, Entity::Type::CLUSTER))
             continue;
         if (!group_set) {
             group = en->m_group;
@@ -390,7 +402,7 @@ bool collect_selection_transform_overlay_data(const Document &doc, const std::se
 }
 
 void transform_2d_entity(Entity &dst, const Entity &src, const std::function<glm::dvec2(const glm::dvec2 &)> &transform,
-                         double uniform_scale)
+                         double uniform_scale, double rotation_angle_rad)
 {
     if (auto *line = dynamic_cast<EntityLine2D *>(&dst)) {
         if (const auto *src_line = dynamic_cast<const EntityLine2D *>(&src)) {
@@ -422,6 +434,19 @@ void transform_2d_entity(Entity &dst, const Entity &src, const std::function<glm
     else if (auto *point = dynamic_cast<EntityPoint2D *>(&dst)) {
         if (const auto *src_point = dynamic_cast<const EntityPoint2D *>(&src))
             point->m_p = transform(src_point->m_p);
+    }
+    else if (auto *cluster = dynamic_cast<EntityCluster *>(&dst)) {
+        if (const auto *src_cluster = dynamic_cast<const EntityCluster *>(&src)) {
+            cluster->m_origin = transform(src_cluster->m_origin);
+            cluster->m_scale_x = std::max(1e-9, src_cluster->m_scale_x * uniform_scale);
+            cluster->m_scale_y = std::max(1e-9, src_cluster->m_scale_y * uniform_scale);
+            cluster->m_angle = src_cluster->m_angle + glm::degrees(rotation_angle_rad);
+            for (auto &[idx, enp] : cluster->m_anchors) {
+                if (!cluster->m_content || !cluster->m_content->m_entities.contains(enp.entity))
+                    continue;
+                cluster->m_anchors_transformed[idx] = cluster->transform(cluster->get_anchor_point(enp));
+            }
+        }
     }
 }
 
@@ -719,6 +744,15 @@ void Editor::init()
         transform_row->append(*m_selection_transform_switch);
         box->append(*transform_row);
 
+        auto markers_row = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 8);
+        auto markers_label = Gtk::make_managed<Gtk::Label>("Show markers");
+        markers_label->set_hexpand(true);
+        markers_label->set_xalign(0);
+        m_selection_markers_switch = Gtk::make_managed<Gtk::Switch>();
+        markers_row->append(*markers_label);
+        markers_row->append(*m_selection_markers_switch);
+        box->append(*markers_row);
+
         m_selection_transform_switch->property_active().signal_changed().connect([this] {
             if (m_updating_selection_mode_popover)
                 return;
@@ -728,6 +762,14 @@ void Editor::init()
             }
             canvas_update_keep_selection();
             update_sketcher_toolbar_button_states();
+        });
+        m_selection_markers_switch->property_active().signal_changed().connect([this] {
+            if (m_updating_selection_mode_popover)
+                return;
+            m_show_technical_markers = m_selection_markers_switch->get_active();
+            if (!m_show_technical_markers)
+                end_selection_transform_drag();
+            canvas_update_keep_selection();
         });
     }
     sync_selection_mode_popover();
@@ -751,6 +793,15 @@ void Editor::init()
             trigger_action(ToolID::IMPORT_PICTURE);
             update_sketcher_toolbar_button_states();
         });
+        m_win.add_action_button(*button);
+    }
+    {
+        auto button = Gtk::make_managed<Gtk::Button>();
+        button->set_icon_name("applications-graphics-symbolic");
+        button->set_tooltip_text("Trace Image");
+        button->set_has_frame(true);
+        button->add_css_class("sketch-toolbar-button");
+        button->signal_clicked().connect(sigc::mem_fun(*this, &Editor::on_trace_image_button));
         m_win.add_action_button(*button);
     }
 #endif
@@ -1412,10 +1463,11 @@ void Editor::sync_selection_mode_popover()
     if (!m_selection_mode_button)
         return;
     m_selection_mode_button->set_tooltip_text("Selection tool (Middle mouse)");
-    if (!m_selection_transform_switch)
+    if (!m_selection_transform_switch || !m_selection_markers_switch)
         return;
     m_updating_selection_mode_popover = true;
     m_selection_transform_switch->set_active(m_selection_transform_enabled);
+    m_selection_markers_switch->set_active(m_show_technical_markers);
     m_updating_selection_mode_popover = false;
 #endif
 }
@@ -3592,6 +3644,120 @@ void Editor::on_open_folder()
 #endif
 }
 
+void Editor::on_trace_image_button()
+{
+#ifdef DUNE_SKETCHER_ONLY
+    if (!m_core.has_documents()) {
+        tool_bar_flash("Open or create a sketch first");
+        return;
+    }
+
+    if (m_core.tool_is_active() && !force_end_tool())
+        return;
+
+    auto dialog = Gtk::FileDialog::create();
+    {
+        auto dir = m_core.get_current_document_directory();
+        if (!dir.empty())
+            dialog->set_initial_folder(Gio::File::create_for_path(path_to_string(dir)));
+    }
+
+    auto filters = Gio::ListStore<Gtk::FileFilter>::create();
+    auto filter_any = Gtk::FileFilter::create();
+    filter_any->add_pixbuf_formats();
+    filter_any->set_name("Pictures");
+    filters->append(filter_any);
+    dialog->set_filters(filters);
+
+    dialog->open(m_win, [this, dialog](const Glib::RefPtr<Gio::AsyncResult> &result) {
+        try {
+            auto file = dialog->open_finish(result);
+            if (!file)
+                return;
+
+            if (!m_image_trace_dialog) {
+                m_image_trace_dialog = std::make_unique<ImageTraceDialog>();
+                m_image_trace_dialog->set_transient_for(m_win);
+                m_image_trace_dialog->signal_apply().connect(sigc::mem_fun(*this, &Editor::apply_traced_svg));
+            }
+
+            std::string error_message;
+            if (!m_image_trace_dialog->load_image(path_from_string(file->get_path()), error_message)) {
+                tool_bar_flash("Couldn't load image for tracing");
+                if (!error_message.empty())
+                    Logger::get().log_warning(error_message, Logger::Domain::EDITOR);
+                return;
+            }
+            m_image_trace_dialog->present();
+        }
+        catch (const Gtk::DialogError &) {
+        }
+        catch (const Glib::Error &err) {
+            Logger::get().log_warning(err.what(), Logger::Domain::EDITOR);
+        }
+    });
+#endif
+}
+
+void Editor::apply_traced_svg(const std::string &svg)
+{
+#ifdef DUNE_SKETCHER_ONLY
+    if (svg.empty())
+        return;
+    if (!m_core.has_documents()) {
+        tool_bar_flash("Open a sketch before importing trace");
+        return;
+    }
+
+    if (m_core.tool_is_active() && !force_end_tool())
+        return;
+
+    const auto selection_before_trace_import = get_canvas().get_selection();
+
+    std::filesystem::path temp_svg;
+    try {
+        temp_svg = std::filesystem::temp_directory_path() / ("dxfsketcher-trace-" + std::string(UUID::random()) + ".svg");
+        std::ofstream ofs(path_to_string(temp_svg), std::ios::out | std::ios::binary | std::ios::trunc);
+        if (!ofs.good()) {
+            tool_bar_flash("Couldn't create temporary trace file");
+            return;
+        }
+        ofs.write(svg.data(), static_cast<std::streamsize>(svg.size()));
+        ofs.close();
+    }
+    catch (const std::exception &err) {
+        Logger::get().log_warning(err.what(), Logger::Domain::EDITOR);
+        tool_bar_flash("Couldn't prepare trace import");
+        return;
+    }
+
+    tool_begin(ToolID::IMPORT_PICTURE_SILENT);
+    if (!m_core.tool_is_active()) {
+        std::error_code ec;
+        std::filesystem::remove(temp_svg, ec);
+        tool_bar_flash("Couldn't import traced image in current context");
+        return;
+    }
+    tool_update_data(std::make_unique<ToolDataPath>(temp_svg));
+    if (!m_core.tool_is_active()) {
+        const auto selection_after_trace_import = get_canvas().get_selection();
+        std::size_t imported_entities = 0;
+        for (const auto &sr : selection_after_trace_import) {
+            if (sr.type == SelectableRef::Type::ENTITY)
+                imported_entities++;
+        }
+        if (imported_entities >= 2 && selection_after_trace_import != selection_before_trace_import)
+            trigger_action(ToolID::CREATE_CLUSTER);
+    }
+
+    std::error_code ec;
+    std::filesystem::remove(temp_svg, ec);
+
+    if (m_image_trace_dialog)
+        m_image_trace_dialog->hide();
+#endif
+}
+
 void Editor::open_folder(const std::filesystem::path &folder_path)
 {
 #ifdef DUNE_SKETCHER_ONLY
@@ -4049,6 +4215,7 @@ void Editor::render_document(const IDocumentInfo &doc)
     }
     Renderer renderer(get_canvas(), m_core);
     renderer.m_solid_model_edge_select_mode = m_solid_model_edge_select_mode;
+    renderer.m_show_entity_points = m_show_technical_markers;
     renderer.m_connect_curvature_comb = m_preferences.canvas.connect_curvature_combs;
     renderer.m_first_group = m_update_groups_after;
 
@@ -4070,6 +4237,8 @@ void Editor::draw_selection_transform_overlay(const std::set<SelectableRef> &sel
 {
 #ifdef DUNE_SKETCHER_ONLY
     if (!m_selection_transform_enabled)
+        return;
+    if (!m_show_technical_markers)
         return;
     if (!m_core.has_documents())
         return;
@@ -4405,7 +4574,7 @@ void Editor::update_selection_transform_drag()
                                     return rotate_point_2d(scaled, m_selection_transform_center,
                                                            m_selection_transform_drag_angle);
                                 },
-                                m_selection_transform_drag_scale);
+                                m_selection_transform_drag_scale, m_selection_transform_drag_angle);
         }
     }
     else if (m_selection_transform_drag_mode == SelectionTransformDragMode::SCALE) {
@@ -4432,7 +4601,7 @@ void Editor::update_selection_transform_drag()
                                     return rotate_point_2d(scaled, m_selection_transform_center,
                                                            m_selection_transform_drag_angle);
                                 },
-                                m_selection_transform_drag_scale);
+                                m_selection_transform_drag_scale, m_selection_transform_drag_angle);
         }
     }
 

@@ -19,12 +19,62 @@
 #include "util/template_util.hpp"
 #include "logger/logger.hpp"
 #include <array>
+#include <cmath>
 #include <ranges>
 #include <glm/gtx/io.hpp>
 
 namespace dune3d {
 
 using IconID = IconTexture::IconTextureID;
+
+namespace {
+double point_line_distance_2d(const glm::dvec2 &p, const glm::dvec2 &a, const glm::dvec2 &b)
+{
+    const auto ab = b - a;
+    const auto len = glm::length(ab);
+    if (len < 1e-12)
+        return glm::length(p - a);
+    const auto area = std::abs((p.x - a.x) * ab.y - (p.y - a.y) * ab.x);
+    return area / len;
+}
+
+double point_line_distance_3d(const glm::dvec3 &p, const glm::dvec3 &a, const glm::dvec3 &b)
+{
+    const auto ab = b - a;
+    const auto len2 = glm::dot(ab, ab);
+    if (len2 < 1e-18)
+        return glm::length(p - a);
+    const auto t = std::clamp(glm::dot(p - a, ab) / len2, 0.0, 1.0);
+    const auto proj = a + ab * t;
+    return glm::length(p - proj);
+}
+
+unsigned int estimate_bezier_steps(const glm::dvec2 &p1, const glm::dvec2 &c1, const glm::dvec2 &c2, const glm::dvec2 &p2,
+                                   unsigned int cap)
+{
+    const auto ctrl_len = glm::length(c1 - p1) + glm::length(c2 - c1) + glm::length(p2 - c2);
+    const auto chord = glm::length(p2 - p1);
+    const auto curvature = std::max(point_line_distance_2d(c1, p1, p2), point_line_distance_2d(c2, p1, p2));
+    const auto complexity = std::max(0.0, ctrl_len - chord) + curvature * 2.2;
+
+    auto steps = static_cast<unsigned int>(std::lround(6.0 + complexity * 1.8));
+    steps = std::clamp(steps, 6u, std::max(6u, cap));
+    return steps;
+}
+
+unsigned int estimate_bezier_steps(const glm::dvec3 &p1, const glm::dvec3 &c1, const glm::dvec3 &c2, const glm::dvec3 &p2,
+                                   unsigned int cap)
+{
+    const auto ctrl_len = glm::length(c1 - p1) + glm::length(c2 - c1) + glm::length(p2 - c2);
+    const auto chord = glm::length(p2 - p1);
+    const auto curvature = std::max(point_line_distance_3d(c1, p1, p2), point_line_distance_3d(c2, p1, p2));
+    const auto complexity = std::max(0.0, ctrl_len - chord) + curvature * 2.2;
+
+    auto steps = static_cast<unsigned int>(std::lround(6.0 + complexity * 1.8));
+    steps = std::clamp(steps, 6u, std::max(6u, cap));
+    return steps;
+}
+} // namespace
 
 class Renderer::AutoSaveRestore {
 public:
@@ -84,6 +134,30 @@ void Renderer::render(const Document &doc, const UUID &current_group, const IDoc
     m_is_current_document = !sr.has_value();
     m_containing_dir = containing_dir;
     m_curvature_comb_scale = m_workspace_view->get_curvature_comb_scale();
+    m_bezier_steps_cap = 28;
+
+    std::size_t visible_bezier_count = 0;
+    for (const auto &[uu, en] : doc.m_entities) {
+        if (!en->m_visible)
+            continue;
+        if (!group_is_visible(en->m_group))
+            continue;
+        if (dynamic_cast<const EntityBezier2D *>(en.get()) || dynamic_cast<const EntityBezier3D *>(en.get()))
+            visible_bezier_count++;
+    }
+
+    if (visible_bezier_count > 4000) {
+        m_bezier_steps_cap = 10;
+    }
+    else if (visible_bezier_count > 2000) {
+        m_bezier_steps_cap = 12;
+    }
+    else if (visible_bezier_count > 800) {
+        m_bezier_steps_cap = 16;
+    }
+    else if (visible_bezier_count > 300) {
+        m_bezier_steps_cap = 20;
+    }
 
     int first_group_index = 0;
     if (m_first_group)
@@ -210,6 +284,7 @@ void Renderer::render(const Entity &entity)
     m_ca.set_vertex_inactive(entity.m_group != m_current_group->m_uuid);
     m_ca.set_selection_invisible(entity.m_selection_invisible);
     m_ca.set_vertex_construction(entity.m_construction);
+    m_ca.set_no_points(!m_show_entity_points);
     try {
         entity.accept(*this);
     }
@@ -567,7 +642,7 @@ void Renderer::visit(const EntityBezier2D &bezier)
     const auto c1 = wrkpl.transform(bezier.m_c1);
     const auto c2 = wrkpl.transform(bezier.m_c2);
     const auto sr = SelectableRef{SelectableRef::Type::ENTITY, bezier.m_uuid, 0};
-    unsigned int steps = 64;
+    const unsigned int steps = estimate_bezier_steps(bezier.m_p1, bezier.m_c1, bezier.m_c2, bezier.m_p2, m_bezier_steps_cap);
     glm::vec2 last = bezier.m_p1;
     for (unsigned int i = 1; i <= steps; i++) {
         const auto t = (double)i / steps;
@@ -615,7 +690,7 @@ void Renderer::visit(const EntityBezier2D &bezier)
 void Renderer::visit(const EntityBezier3D &bezier)
 {
     const auto sr = SelectableRef{SelectableRef::Type::ENTITY, bezier.m_uuid, 0};
-    unsigned int steps = 64;
+    const unsigned int steps = estimate_bezier_steps(bezier.m_p1, bezier.m_c1, bezier.m_c2, bezier.m_p2, m_bezier_steps_cap);
     glm::vec3 last = bezier.m_p1;
     for (unsigned int i = 1; i <= steps; i++) {
         const auto t = (double)i / steps;

@@ -195,7 +195,7 @@ ToolResponse ToolImportPicture::begin(const ToolArgs &args)
             }
         });
     }
-    else {
+    else if (m_tool_id == ToolID::PASTE_PICTURE) {
         auto clipboard = Gdk::Display::get_default()->get_clipboard();
         m_intf.tool_bar_set_tool_tip("waiting for paste data");
         clipboard->read_texture_async([this, clipboard](const Glib::RefPtr<Gio::AsyncResult> &result) {
@@ -206,6 +206,9 @@ ToolResponse ToolImportPicture::begin(const ToolArgs &args)
                 m_intf.tool_update_data(std::make_unique<ToolDataTexture>(nullptr));
             }
         });
+    }
+    else if (m_tool_id == ToolID::IMPORT_PICTURE_SILENT) {
+        m_intf.tool_bar_set_tool_tip("waiting for trace result");
     }
 
 

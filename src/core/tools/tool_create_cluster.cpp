@@ -84,6 +84,8 @@ ToolResponse ToolCreateCluster::begin(const ToolArgs &args)
     m_intf.show_delete_items_popup(selected_items, items_to_delete);
 
     doc.delete_items(items_to_delete);
+    m_selection.clear();
+    m_selection.emplace(SelectableRef::Type::ENTITY, en_cluster.m_uuid, 0);
 
     return ToolResponse::commit();
 }

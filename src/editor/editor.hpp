@@ -27,6 +27,7 @@ class Dune3DAppWindow;
 class Canvas;
 class ClippingPlaneWindow;
 class SelectionFilterWindow;
+class ImageTraceDialog;
 class Buffer;
 class Entity;
 enum class SelectionMode;
@@ -145,6 +146,8 @@ private:
     void on_export_projection(const ActionConnection &conn);
     void on_open_document(const ActionConnection &conn);
     void on_open_folder();
+    void on_trace_image_button();
+    void apply_traced_svg(const std::string &svg);
     void on_save_as(const ActionConnection &conn);
     void on_create_group_action(const ActionConnection &conn);
     void on_move_group_action(const ActionConnection &conn);
@@ -245,6 +248,7 @@ private:
     Gtk::Button *m_selection_mode_button = nullptr;
     Gtk::Popover *m_selection_mode_popover = nullptr;
     Gtk::Switch *m_selection_transform_switch = nullptr;
+    Gtk::Switch *m_selection_markers_switch = nullptr;
     Gtk::Popover *m_draw_text_popover = nullptr;
     Gtk::Button *m_draw_text_font_button = nullptr;
     Gtk::Switch *m_draw_text_bold_switch = nullptr;
@@ -255,6 +259,7 @@ private:
     bool m_updating_draw_text_popover = false;
     bool m_updating_selection_mode_popover = false;
     bool m_selection_transform_enabled = false;
+    bool m_show_technical_markers = true;
     enum class SelectionTransformDragMode { NONE, ROTATE, SCALE };
     SelectionTransformDragMode m_selection_transform_drag_mode = SelectionTransformDragMode::NONE;
     bool m_selection_transform_drag_active = false;
@@ -426,6 +431,7 @@ private:
     glm::vec3 m_constraint_tip_vec;
 
     std::unique_ptr<SelectionFilterWindow> m_selection_filter_window;
+    std::unique_ptr<ImageTraceDialog> m_image_trace_dialog;
 
     SelectionMenuCreator m_selection_menu_creator;
 
