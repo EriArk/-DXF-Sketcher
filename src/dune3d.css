@@ -40,6 +40,27 @@
   color: @theme_fg_color;
 }
 
+.sketch-toolbar-divider {
+  background-color: alpha(@theme_fg_color, 0.22);
+  border-radius: 1px;
+}
+
+.sketch-toolbar-divider-vertical {
+  min-width: 1px;
+  min-height: 22px;
+}
+
+.sketch-toolbar-divider-horizontal {
+  min-width: 22px;
+  min-height: 1px;
+}
+
+.sketch-theme-value {
+  border: 1px solid alpha(@borders, 0.8);
+  border-radius: 6px;
+  padding: 4px 8px;
+}
+
 .sketch-toolbar-button.sketch-toolbar-active {
   background-image: none;
   background-color: transparent;
@@ -74,3 +95,310 @@ button.osd:disabled:backdrop {background-image: image(rgba(53, 53, 53, 0.7));}
 
 .context-menu-button {padding-left: 11px; padding-top:2px; padding-bottom:2px;}
 .context-menu-button-3d {padding-left: 4px; padding-right: 4px; padding-top:2px; padding-bottom:2px;}
+
+.sketch-dark-blue {
+  background-image:
+    radial-gradient(circle at 14% 9%, alpha(#86a8df, 0.14), alpha(#86a8df, 0) 34%),
+    radial-gradient(circle at 88% 92%, alpha(#5d79a8, 0.12), alpha(#5d79a8, 0) 30%),
+    linear-gradient(156deg, #111a2b, #0b1220);
+  color: #dce8ff;
+}
+
+.sketch-dark-blue headerbar {
+  background-image: linear-gradient(to bottom, #243655, #162642 58%, #13213b);
+  border-bottom: 1px solid #324c76;
+  box-shadow:
+    inset 0 1px alpha(#ffffff, 0.13),
+    inset 0 -1px alpha(#08101c, 0.72);
+  color: #dce8ff;
+}
+
+.sketch-dark-blue headerbar label {
+  color: #dce8ff;
+}
+
+.sketch-dark-blue button,
+.sketch-dark-blue menubutton > button,
+.sketch-dark-blue entry,
+.sketch-dark-blue spinbutton,
+.sketch-dark-blue combobox box {
+  background-image: linear-gradient(to bottom, #223454, #1a2a45 56%, #17243d);
+  border-color: #355279;
+  box-shadow:
+    inset 0 1px alpha(#dce8ff, 0.11),
+    inset 0 -1px alpha(#070f1a, 0.68),
+    0 1px 2px alpha(#04080f, 0.35);
+  color: #dce8ff;
+}
+
+.sketch-dark-blue button,
+.sketch-dark-blue menubutton > button,
+.sketch-dark-blue .sketch-toolbar-button,
+.sketch-dark-blue .suggested-action {
+  border-color: alpha(#000000, 0);
+}
+
+.sketch-dark-blue button:hover,
+.sketch-dark-blue menubutton > button:hover {
+  background-image: linear-gradient(to bottom, #2a3f64, #1f3152 56%, #1a2945);
+  border-color: alpha(#000000, 0);
+}
+
+.sketch-dark-blue button:active,
+.sketch-dark-blue button:checked,
+.sketch-dark-blue menubutton > button:active,
+.sketch-dark-blue menubutton > button:checked {
+  background-image: linear-gradient(to bottom, #16243e, #1b2b47 58%, #213656);
+  border-color: alpha(#000000, 0);
+  box-shadow:
+    inset 0 1px alpha(#000000, 0.45),
+    inset 0 -1px alpha(#89a8d9, 0.23);
+}
+
+.sketch-dark-blue .suggested-action {
+  background-image: linear-gradient(to bottom, #5f92f7, #4b79cf 56%, #426cbc);
+  border-color: #7ea6f3;
+  box-shadow:
+    inset 0 1px alpha(#f5f8ff, 0.24),
+    inset 0 -1px alpha(#1a315d, 0.45),
+    0 2px 6px alpha(#071122, 0.46);
+  color: #f5f8ff;
+}
+
+.sketch-dark-blue .sketch-toolbar-button {
+  background-image: linear-gradient(to bottom, #223454, #1a2a45 56%, #17243d);
+  border-color: #355279;
+  color: #dce8ff;
+}
+
+.sketch-dark-blue .sketch-toolbar-button.sketch-toolbar-active {
+  background-image: none;
+  background-color: alpha(#ffb04a, 0.14);
+  border-color: alpha(#000000, 0);
+  color: #ffb04a;
+  box-shadow: 0 0 8px alpha(#ffb04a, 0.55);
+}
+
+.sketch-dark-blue .sketch-toolbar-button.sketch-toolbar-active image {
+  color: #ffb04a;
+  -gtk-icon-shadow: 0 0 7px alpha(#ffb04a, 0.75);
+}
+
+.sketch-dark-blue .sketch-toolbar-divider {
+  background-color: alpha(#95add6, 0.45);
+}
+
+.sketch-dark-blue popover contents,
+.sketch-dark-blue .selection-menu contents,
+.sketch-dark-blue .selection-menu arrow,
+.sketch-dark-blue .sketch-sidebar-popover contents,
+.sketch-dark-blue .sketch-sidebar-popover arrow,
+.sketch-dark-blue .sketch-grid-popover contents,
+.sketch-dark-blue .sketch-grid-popover arrow {
+  background-image: linear-gradient(to bottom, #1d2e4e, #162642 58%, #13213a);
+  border-color: #355382;
+  box-shadow:
+    inset 0 1px alpha(#dce8ff, 0.07),
+    0 8px 22px alpha(#040913, 0.55);
+  color: #dce8ff;
+}
+
+.sketch-dark-blue .welcome-box {
+  border-color: #385780;
+  background-image: linear-gradient(to bottom, alpha(#213556, 0.92), alpha(#16263f, 0.92));
+  box-shadow:
+    inset 0 1px alpha(#dce8ff, 0.08),
+    0 16px 30px alpha(#050a12, 0.48);
+}
+
+.sketch-heaven {
+  background-image:
+    radial-gradient(140% 48% at 50% -8%, alpha(#ffffff, 0.42), alpha(#ffffff, 0) 74%),
+    radial-gradient(circle at 14% 12%, alpha(#ffffff, 0.68) 0 5.6%, alpha(#ffffff, 0) 8.8%),
+    radial-gradient(circle at 19.7% 13.5%, alpha(#ffffff, 0.56) 0 5.2%, alpha(#ffffff, 0) 8.5%),
+    radial-gradient(circle at 16.2% 18.4%, alpha(#ffffff, 0.58) 0 4.8%, alpha(#ffffff, 0) 7.8%),
+    radial-gradient(circle at 80.8% 17.5%, alpha(#ffffff, 0.66) 0 5.9%, alpha(#ffffff, 0) 9.1%),
+    radial-gradient(circle at 86% 19%, alpha(#ffffff, 0.56) 0 5.1%, alpha(#ffffff, 0) 8.5%),
+    radial-gradient(circle at 83.3% 24%, alpha(#ffffff, 0.57) 0 4.7%, alpha(#ffffff, 0) 7.8%),
+    linear-gradient(165deg, #b9ddfb, #a3d2f6 56%, #8fc3ef);
+  color: #0d2747;
+}
+
+.sketch-heaven headerbar {
+  background-image:
+    radial-gradient(180% 82% at 50% -35%, alpha(#ffffff, 0.50), alpha(#ffffff, 0) 72%),
+    radial-gradient(12% 42% at 13% 18%, alpha(#ffffff, 0.42), alpha(#ffffff, 0) 86%),
+    radial-gradient(12% 42% at 88% 20%, alpha(#ffffff, 0.39), alpha(#ffffff, 0) 86%),
+    linear-gradient(to bottom, #c5e3fa, #aed4f3 58%, #a2cbeb);
+  border-bottom: 1px solid #79a9cd;
+  box-shadow:
+    inset 0 1px alpha(#ffffff, 0.64),
+    inset 0 -1px alpha(#6c99bd, 0.40);
+  color: #123257;
+}
+
+.sketch-heaven headerbar label {
+  color: #123257;
+}
+
+.sketch-heaven button,
+.sketch-heaven menubutton > button,
+.sketch-heaven entry,
+.sketch-heaven spinbutton,
+.sketch-heaven combobox box {
+  background-image: none;
+  background-color: alpha(#eff8ff, 0.56);
+  border-color: alpha(#000000, 0);
+  box-shadow: none;
+  color: #173a62;
+}
+
+.sketch-heaven button,
+.sketch-heaven menubutton > button,
+.sketch-heaven .sketch-toolbar-button,
+.sketch-heaven .suggested-action {
+  border-color: alpha(#000000, 0);
+}
+
+.sketch-heaven button:hover,
+.sketch-heaven menubutton > button:hover {
+  background-image: none;
+  background-color: alpha(#f7fcff, 0.74);
+  border-color: alpha(#000000, 0);
+  box-shadow: none;
+}
+
+.sketch-heaven button:active,
+.sketch-heaven button:checked,
+.sketch-heaven menubutton > button:active,
+.sketch-heaven menubutton > button:checked {
+  background-image: none;
+  background-color: alpha(#84b8e3, 0.44);
+  border-color: alpha(#000000, 0);
+  box-shadow: none;
+}
+
+.sketch-heaven .suggested-action {
+  background-image: none;
+  background-color: #4f9df2;
+  border-color: alpha(#000000, 0);
+  box-shadow: none;
+  color: #f7fbff;
+}
+
+.sketch-heaven .sketch-toolbar-button {
+  background-image: none;
+  background-color: alpha(#eff8ff, 0.50);
+  border-color: alpha(#000000, 0);
+  box-shadow: none;
+  color: #173a62;
+}
+
+.sketch-heaven .sketch-toolbar-button.sketch-toolbar-active {
+  background-image: none;
+  background-color: alpha(#ffc96f, 0.86);
+  border-color: alpha(#000000, 0);
+  color: #6a3a00;
+  box-shadow: 0 0 6px alpha(#f2aa45, 0.44);
+}
+
+.sketch-heaven .sketch-toolbar-button.sketch-toolbar-active image {
+  color: #6a3a00;
+}
+
+.sketch-heaven .sketch-toolbar-divider {
+  background-color: alpha(#4f88b8, 0.45);
+}
+
+.sketch-heaven .sketch-theme-value {
+  border-color: #7cb0dc;
+  background-image: linear-gradient(to bottom, alpha(#f6fbff, 0.9), alpha(#dcedff, 0.9));
+}
+
+.sketch-heaven popover contents,
+.sketch-heaven .selection-menu contents,
+.sketch-heaven .selection-menu arrow,
+.sketch-heaven .sketch-sidebar-popover contents,
+.sketch-heaven .sketch-sidebar-popover arrow,
+.sketch-heaven .sketch-grid-popover contents,
+.sketch-heaven .sketch-grid-popover arrow {
+  background-image: linear-gradient(to bottom, #e9f5ff, #d5ebff 62%, #cbe4fb);
+  border-color: #82b2da;
+  color: #123257;
+  box-shadow:
+    inset 0 1px alpha(#ffffff, 0.65),
+    0 8px 22px alpha(#7ba8cf, 0.34);
+}
+
+/* Flatten custom theme buttons so they match Dark theme mechanics */
+.sketch-dark-blue button,
+.sketch-dark-blue menubutton > button,
+.sketch-dark-blue .sketch-toolbar-button,
+.sketch-dark-blue .suggested-action {
+  background-image: none;
+  background-color: transparent;
+  border-color: alpha(#000000, 0);
+  box-shadow: none;
+}
+
+.sketch-dark-blue button:hover,
+.sketch-dark-blue menubutton > button:hover,
+.sketch-dark-blue .sketch-toolbar-button:hover,
+.sketch-dark-blue .suggested-action:hover {
+  background-image: none;
+  background-color: alpha(#eff5ff, 0.10);
+  border-color: alpha(#000000, 0);
+  box-shadow: none;
+}
+
+.sketch-dark-blue button:active,
+.sketch-dark-blue button:checked,
+.sketch-dark-blue menubutton > button:active,
+.sketch-dark-blue menubutton > button:checked,
+.sketch-dark-blue .suggested-action:active,
+.sketch-dark-blue .suggested-action:checked {
+  background-image: none;
+  background-color: alpha(#c7dcff, 0.13);
+  border-color: alpha(#000000, 0);
+  box-shadow: none;
+}
+
+.sketch-dark-blue .suggested-action {
+  color: #dce8ff;
+}
+
+.sketch-heaven button,
+.sketch-heaven menubutton > button,
+.sketch-heaven .sketch-toolbar-button,
+.sketch-heaven .suggested-action {
+  background-image: none;
+  background-color: transparent;
+  border-color: alpha(#000000, 0);
+  box-shadow: none;
+}
+
+.sketch-heaven button:hover,
+.sketch-heaven menubutton > button:hover,
+.sketch-heaven .sketch-toolbar-button:hover,
+.sketch-heaven .suggested-action:hover {
+  background-image: none;
+  background-color: alpha(#ffffff, 0.18);
+  border-color: alpha(#000000, 0);
+  box-shadow: none;
+}
+
+.sketch-heaven button:active,
+.sketch-heaven button:checked,
+.sketch-heaven menubutton > button:active,
+.sketch-heaven menubutton > button:checked,
+.sketch-heaven .suggested-action:active,
+.sketch-heaven .suggested-action:checked {
+  background-image: none;
+  background-color: alpha(#8dbbe1, 0.26);
+  border-color: alpha(#000000, 0);
+  box-shadow: none;
+}
+
+.sketch-heaven .suggested-action {
+  color: #173a62;
+}

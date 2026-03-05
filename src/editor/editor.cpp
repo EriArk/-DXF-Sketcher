@@ -93,6 +93,56 @@ std::string format_line_width_multiplier(double line_width)
     return ss.str();
 }
 
+constexpr std::array<CanvasPreferences::ThemeVariant, 4> kSketchThemeOrder = {
+        CanvasPreferences::ThemeVariant::LIGHT,
+        CanvasPreferences::ThemeVariant::DARK,
+        CanvasPreferences::ThemeVariant::DARK_BLUE,
+        CanvasPreferences::ThemeVariant::HEAVEN,
+};
+
+CanvasPreferences::ThemeVariant normalize_sketch_theme_variant(CanvasPreferences::ThemeVariant variant)
+{
+    switch (variant) {
+    case CanvasPreferences::ThemeVariant::DARK:
+    case CanvasPreferences::ThemeVariant::LIGHT:
+    case CanvasPreferences::ThemeVariant::DARK_BLUE:
+    case CanvasPreferences::ThemeVariant::HEAVEN:
+        return variant;
+    case CanvasPreferences::ThemeVariant::AUTO:
+    default:
+        return CanvasPreferences::ThemeVariant::LIGHT;
+    }
+}
+
+CanvasPreferences::ThemeVariant cycle_sketch_theme_variant(CanvasPreferences::ThemeVariant current, int dir)
+{
+    const auto normalized = normalize_sketch_theme_variant(current);
+    auto it = std::find(kSketchThemeOrder.begin(), kSketchThemeOrder.end(), normalized);
+    if (it == kSketchThemeOrder.end())
+        it = kSketchThemeOrder.begin();
+    const auto idx = static_cast<int>(std::distance(kSketchThemeOrder.begin(), it));
+    const auto size = static_cast<int>(kSketchThemeOrder.size());
+    const auto next_idx = (idx + (dir >= 0 ? 1 : -1) + size) % size;
+    return kSketchThemeOrder.at(static_cast<std::size_t>(next_idx));
+}
+
+const char *sketch_theme_variant_name(CanvasPreferences::ThemeVariant variant)
+{
+    switch (normalize_sketch_theme_variant(variant)) {
+    case CanvasPreferences::ThemeVariant::LIGHT:
+        return "Light";
+    case CanvasPreferences::ThemeVariant::DARK:
+        return "Dark";
+    case CanvasPreferences::ThemeVariant::DARK_BLUE:
+        return "Dark-Blue";
+    case CanvasPreferences::ThemeVariant::HEAVEN:
+        return "Heaven";
+    case CanvasPreferences::ThemeVariant::AUTO:
+    default:
+        return "Light";
+    }
+}
+
 [[maybe_unused]] bool group_has_user_entities(const Document &doc, const UUID &group_uu)
 {
     for (const auto &[en_uu, en] : doc.m_entities) {
@@ -776,10 +826,32 @@ void Editor::init()
     m_win.add_action_button(*m_selection_mode_button);
 #endif
 
+    auto add_sketch_toolbar_divider = [this]() {
+        const bool in_header_bar = m_win.get_header_action_box() != nullptr;
+        auto divider = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 0);
+        divider->add_css_class("sketch-toolbar-divider");
+        if (in_header_bar) {
+            divider->add_css_class("sketch-toolbar-divider-vertical");
+            divider->set_size_request(1, 22);
+            divider->set_valign(Gtk::Align::CENTER);
+            divider->set_margin_start(4);
+            divider->set_margin_end(4);
+        }
+        else {
+            divider->add_css_class("sketch-toolbar-divider-horizontal");
+            divider->set_size_request(22, 1);
+            divider->set_halign(Gtk::Align::CENTER);
+            divider->set_margin_top(4);
+            divider->set_margin_bottom(4);
+        }
+        m_win.add_action_button(*divider);
+    };
+
     create_action_bar_button(ToolID::DRAW_CONTOUR);
     create_action_bar_button(ToolID::DRAW_RECTANGLE);
     create_action_bar_button(ToolID::DRAW_CIRCLE_2D);
     create_action_bar_button(ToolID::DRAW_REGULAR_POLYGON);
+    add_sketch_toolbar_divider();
     create_action_bar_button(ToolID::DRAW_TEXT);
 #ifdef DUNE_SKETCHER_ONLY
     {
@@ -864,15 +936,16 @@ void Editor::init()
         auto controller = Gtk::EventControllerKey::create();
         controller->set_propagation_phase(Gtk::PropagationPhase::CAPTURE);
         controller->signal_key_pressed().connect(
-                [this](guint keyval, guint keycode, Gdk::ModifierType state) -> bool {
-                    if (keyval == GDK_KEY_Tab
-                        && (state & (Gdk::ModifierType::SHIFT_MASK | Gdk::ModifierType::CONTROL_MASK
-                                     | Gdk::ModifierType::ALT_MASK))
+                [this, controller](guint keyval, guint keycode, Gdk::ModifierType state) -> bool {
+                    auto *focus = m_win.get_focus();
+                    const auto mods = state & (Gdk::ModifierType::SHIFT_MASK | Gdk::ModifierType::CONTROL_MASK
+                                               | Gdk::ModifierType::ALT_MASK);
+                    if (focus && (GTK_IS_EDITABLE(focus->gobj()) || GTK_IS_TEXT_VIEW(focus->gobj()))
+                        && (mods & (Gdk::ModifierType::CONTROL_MASK | Gdk::ModifierType::ALT_MASK))
                                    == static_cast<Gdk::ModifierType>(0)) {
-                        toggle_sidebar_visibility();
-                        return true;
+                        return false;
                     }
-                    return false;
+                    return handle_action_key(controller, keyval, keycode, state);
                 },
                 true);
         m_win.add_controller(controller);
@@ -1584,7 +1657,7 @@ void Editor::init_canvas()
         auto controller = Gtk::EventControllerKey::create();
         controller->signal_key_pressed().connect(
                 [this, controller](guint keyval, guint keycode, Gdk::ModifierType state) -> bool {
-                    return handle_action_key(controller, keyval, state);
+                    return handle_action_key(controller, keyval, keycode, state);
                 },
                 true);
 
@@ -2122,8 +2195,17 @@ void Editor::init_header_bar()
 #ifdef DUNE_SKETCHER_ONLY
         auto sep = Gtk::make_managed<Gtk::Separator>(Gtk::Orientation::VERTICAL);
         m_win.get_header_bar().pack_start(*sep);
-        if (auto header_action_box = m_win.get_header_action_box())
+        if (auto header_action_box = m_win.get_header_action_box()) {
             m_win.get_header_bar().pack_start(*header_action_box);
+            auto action_grid_sep = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 0);
+            action_grid_sep->add_css_class("sketch-toolbar-divider");
+            action_grid_sep->add_css_class("sketch-toolbar-divider-vertical");
+            action_grid_sep->set_size_request(1, 22);
+            action_grid_sep->set_valign(Gtk::Align::CENTER);
+            action_grid_sep->set_margin_start(4);
+            action_grid_sep->set_margin_end(4);
+            m_win.get_header_bar().pack_start(*action_grid_sep);
+        }
 
         m_grid_menu_button = Gtk::make_managed<Gtk::Button>();
         m_grid_menu_button->set_icon_name("view-grid-symbolic");
@@ -3389,28 +3471,45 @@ void Editor::init_settings_popover()
     theme_row->add_css_class("linked");
     root->append(*theme_row);
 
-    m_theme_light_button = Gtk::make_managed<Gtk::ToggleButton>("Light");
-    m_theme_dark_button = Gtk::make_managed<Gtk::ToggleButton>("Dark");
-    m_theme_dark_button->set_group(*m_theme_light_button);
-    m_theme_light_button->set_hexpand(true);
-    m_theme_dark_button->set_hexpand(true);
-    theme_row->append(*m_theme_light_button);
-    theme_row->append(*m_theme_dark_button);
+    m_theme_prev_button = Gtk::make_managed<Gtk::Button>();
+    m_theme_prev_button->set_icon_name("go-previous-symbolic");
+    m_theme_prev_button->set_tooltip_text("Previous theme");
+    m_theme_prev_button->set_has_frame(true);
+    theme_row->append(*m_theme_prev_button);
 
-    m_theme_light_button->signal_toggled().connect([this] {
-        if (m_updating_settings_popover || !m_theme_light_button->get_active())
-            return;
-        m_preferences.canvas.theme_variant = CanvasPreferences::ThemeVariant::LIGHT;
-        m_preferences.canvas.dark_theme = false;
+    auto theme_value_box = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 0);
+    theme_value_box->add_css_class("sketch-theme-value");
+    theme_value_box->set_hexpand(true);
+    m_theme_value_label = Gtk::make_managed<Gtk::Label>();
+    m_theme_value_label->set_halign(Gtk::Align::CENTER);
+    m_theme_value_label->set_hexpand(true);
+    theme_value_box->append(*m_theme_value_label);
+    theme_row->append(*theme_value_box);
+
+    m_theme_next_button = Gtk::make_managed<Gtk::Button>();
+    m_theme_next_button->set_icon_name("go-next-symbolic");
+    m_theme_next_button->set_tooltip_text("Next theme");
+    m_theme_next_button->set_has_frame(true);
+    theme_row->append(*m_theme_next_button);
+
+    const auto set_theme_variant = [this, popover](CanvasPreferences::ThemeVariant variant) {
+        const bool keep_open = popover && popover->get_visible();
+        const auto normalized = normalize_sketch_theme_variant(variant);
+        m_preferences.canvas.theme_variant = normalized;
+        m_preferences.canvas.dark_theme = (normalized == CanvasPreferences::ThemeVariant::DARK
+                                           || normalized == CanvasPreferences::ThemeVariant::DARK_BLUE);
         m_preferences.signal_changed().emit();
-    });
-    m_theme_dark_button->signal_toggled().connect([this] {
-        if (m_updating_settings_popover || !m_theme_dark_button->get_active())
-            return;
-        m_preferences.canvas.theme_variant = CanvasPreferences::ThemeVariant::DARK;
-        m_preferences.canvas.dark_theme = true;
-        m_preferences.signal_changed().emit();
-    });
+        if (keep_open) {
+            Glib::signal_idle().connect_once([popover] {
+                if (popover && popover->get_root())
+                    popover->popup();
+            });
+        }
+    };
+    m_theme_prev_button->signal_clicked().connect(
+            [this, set_theme_variant] { set_theme_variant(cycle_sketch_theme_variant(m_preferences.canvas.theme_variant, -1)); });
+    m_theme_next_button->signal_clicked().connect(
+            [this, set_theme_variant] { set_theme_variant(cycle_sketch_theme_variant(m_preferences.canvas.theme_variant, +1)); });
 
     auto width_title = Gtk::make_managed<Gtk::Label>("Line Thickness");
     width_title->set_halign(Gtk::Align::CENTER);
@@ -3496,13 +3595,12 @@ void Editor::init_settings_popover()
 
 void Editor::sync_settings_popover_from_preferences()
 {
-    if (!m_theme_light_button || !m_theme_dark_button || !m_line_width_scale || !m_line_width_value_label
-        || !m_right_click_popovers_switch)
+    if (!m_theme_prev_button || !m_theme_next_button || !m_theme_value_label || !m_line_width_scale
+        || !m_line_width_value_label || !m_right_click_popovers_switch)
         return;
     m_updating_settings_popover = true;
-    const bool dark = m_preferences.canvas.theme_variant == CanvasPreferences::ThemeVariant::DARK;
-    m_theme_dark_button->set_active(dark);
-    m_theme_light_button->set_active(!dark);
+    const auto variant = normalize_sketch_theme_variant(m_preferences.canvas.theme_variant);
+    m_theme_value_label->set_text(sketch_theme_variant_name(variant));
     m_line_width_scale->set_value(m_preferences.canvas.appearance.line_width);
     m_line_width_value_label->set_text(format_line_width_multiplier(m_preferences.canvas.appearance.line_width));
     m_right_click_popovers_switch->set_active(m_right_click_popovers_only);
@@ -4123,10 +4221,20 @@ void Editor::apply_preferences()
     }
 
     auto dark = Gtk::Settings::get_default()->property_gtk_application_prefer_dark_theme().get_value();
+    bool dark_blue = false;
+    bool heaven = false;
 #ifdef DUNE_SKETCHER_ONLY
     // In sketcher mode, Theme Variant drives both GTK and canvas theme.
     switch (m_preferences.canvas.theme_variant) {
     case CanvasPreferences::ThemeVariant::AUTO:
+        break;
+    case CanvasPreferences::ThemeVariant::HEAVEN:
+        dark = false;
+        heaven = true;
+        break;
+    case CanvasPreferences::ThemeVariant::DARK_BLUE:
+        dark = true;
+        dark_blue = true;
         break;
     case CanvasPreferences::ThemeVariant::DARK:
         dark = true;
@@ -4145,6 +4253,12 @@ void Editor::apply_preferences()
     switch (m_preferences.canvas.theme_variant) {
     case CanvasPreferences::ThemeVariant::AUTO:
         break;
+    case CanvasPreferences::ThemeVariant::HEAVEN:
+        dark = false;
+        break;
+    case CanvasPreferences::ThemeVariant::DARK_BLUE:
+        dark = true;
+        break;
     case CanvasPreferences::ThemeVariant::DARK:
         dark = true;
         break;
@@ -4152,6 +4266,16 @@ void Editor::apply_preferences()
         dark = false;
         break;
     }
+#endif
+#ifdef DUNE_SKETCHER_ONLY
+    if (dark_blue)
+        m_win.add_css_class("sketch-dark-blue");
+    else
+        m_win.remove_css_class("sketch-dark-blue");
+    if (heaven)
+        m_win.add_css_class("sketch-heaven");
+    else
+        m_win.remove_css_class("sketch-heaven");
 #endif
     if (color_themes.contains(m_preferences.canvas.theme)) {
         Appearance appearance = m_preferences.canvas.appearance;

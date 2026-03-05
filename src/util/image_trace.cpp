@@ -167,6 +167,59 @@ static std::vector<glm::dvec2> smooth_closed_preserve_corners(const std::vector<
     return out;
 }
 
+static std::vector<glm::dvec2> suppress_micro_waves(const std::vector<glm::dvec2> &poly, double max_dev,
+                                                     double max_extra_path, int passes)
+{
+    if (poly.size() < 6 || passes <= 0 || max_dev <= 1e-9 || max_extra_path <= 1e-9)
+        return poly;
+
+    std::vector<glm::dvec2> out = poly;
+    const double straight_angle_min = 2.30; // ~132 deg, preserve sharper corners
+
+    for (int pass = 0; pass < passes; pass++) {
+        if (out.size() < 6)
+            break;
+
+        std::vector<glm::dvec2> next;
+        next.reserve(out.size());
+
+        for (std::size_t i = 0; i < out.size(); i++) {
+            const auto &prev = out.at((i + out.size() - 1) % out.size());
+            const auto &cur = out.at(i);
+            const auto &nxt = out.at((i + 1) % out.size());
+
+            const auto v_prev = cur - prev;
+            const auto v_next = nxt - cur;
+            const auto l_prev = glm::length(v_prev);
+            const auto l_next = glm::length(v_next);
+            const auto l_chord = glm::length(nxt - prev);
+
+            bool remove = false;
+            if (l_prev > 1e-9 && l_next > 1e-9 && l_chord > 1e-9) {
+                const auto dot = std::clamp(glm::dot(v_prev / l_prev, v_next / l_next), -1.0, 1.0);
+                const auto angle = std::acos(dot);
+                const double dev = point_line_distance(cur, prev, nxt);
+                const double extra_path = (l_prev + l_next) - l_chord;
+
+                if (angle >= straight_angle_min && dev <= max_dev && extra_path <= max_extra_path) {
+                    remove = true;
+                }
+            }
+
+            if (!remove)
+                next.push_back(cur);
+        }
+
+        if (next.size() < 3)
+            break;
+        if (next.size() == out.size())
+            break;
+        out = std::move(next);
+    }
+
+    return out;
+}
+
 static double polygon_area_abs(const std::vector<glm::dvec2> &poly)
 {
     if (poly.size() < 3)
@@ -562,12 +615,20 @@ ImageTraceResult trace_picture_to_svg(const PictureData &picture, const ImageTra
         const double corner_keep_deg = 26.0 + detail_preserve * 44.0 - opt_tolerance * 6.0;
         const double post_simplify =
                 (0.03 + anti_stair_strength * 0.12 + opt_tolerance * 0.10) * (1.0 - 0.55 * detail_preserve);
+        const int anti_stair_passes =
+                std::clamp(static_cast<int>(std::lround(1.0 + anti_stair_strength * 2.0 + settings.smoothness * 0.20)),
+                           1, 4);
+        const double anti_stair_dev =
+                0.08 + anti_stair_strength * 0.42 + opt_tolerance * 0.10 + std::max(0.0, settings.smoothness) * 0.08;
+        const double anti_stair_extra = anti_stair_dev * (1.15 + (1.0 - detail_preserve) * 0.65);
         for (auto &poly : result.contours) {
             if (denoise_iterations > 0)
                 poly = smooth_closed_preserve_corners(poly, denoise_iterations, corner_keep_deg);
             poly = chaikin_closed(poly, adjusted_iterations);
             if (poly.size() < 3)
                 continue;
+            if (settings.anti_stair)
+                poly = suppress_micro_waves(poly, anti_stair_dev, anti_stair_extra, anti_stair_passes);
             if (post_simplify > 1e-9)
                 poly = simplify_closed_polygon(poly, post_simplify);
             poly = remove_collinear(poly);

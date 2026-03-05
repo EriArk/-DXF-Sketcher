@@ -163,6 +163,12 @@ CanvasPreferencesEditor::CanvasPreferencesEditor(BaseObjectType *cobject, const 
         switch (m_preferences.canvas.theme_variant) {
         case CanvasPreferences::ThemeVariant::AUTO:
             break;
+        case CanvasPreferences::ThemeVariant::HEAVEN:
+            dark = false;
+            break;
+        case CanvasPreferences::ThemeVariant::DARK_BLUE:
+            dark = true;
+            break;
         case CanvasPreferences::ThemeVariant::DARK:
             dark = true;
             break;
@@ -180,13 +186,42 @@ CanvasPreferencesEditor::CanvasPreferencesEditor(BaseObjectType *cobject, const 
         update_color_chooser();
     });
     {
-        std::map<CanvasPreferences::ThemeVariant, Gtk::ToggleButton *> buttons = {
-                {CanvasPreferences::ThemeVariant::AUTO, m_theme_variant_auto_button},
-                {CanvasPreferences::ThemeVariant::LIGHT, m_theme_variant_light_button},
-                {CanvasPreferences::ThemeVariant::DARK, m_theme_variant_dark_button},
-        };
-        bind_widget<CanvasPreferences::ThemeVariant>(buttons, m_canvas_preferences.theme_variant,
-                                                     [this](auto v) { m_preferences.signal_changed().emit(); });
+        // Canvas preferences editor exposes only Auto/Light/Dark UI toggles.
+        // Extended variants are mapped to the nearest base toggle for display.
+        m_updating_theme_variant_buttons = true;
+        switch (m_canvas_preferences.theme_variant) {
+        case CanvasPreferences::ThemeVariant::AUTO:
+            m_theme_variant_auto_button->set_active(true);
+            break;
+        case CanvasPreferences::ThemeVariant::DARK:
+        case CanvasPreferences::ThemeVariant::DARK_BLUE:
+            m_theme_variant_dark_button->set_active(true);
+            break;
+        case CanvasPreferences::ThemeVariant::LIGHT:
+        case CanvasPreferences::ThemeVariant::HEAVEN:
+            m_theme_variant_light_button->set_active(true);
+            break;
+        }
+        m_updating_theme_variant_buttons = false;
+
+        m_theme_variant_auto_button->signal_toggled().connect([this] {
+            if (m_updating_theme_variant_buttons || !m_theme_variant_auto_button->get_active())
+                return;
+            m_canvas_preferences.theme_variant = CanvasPreferences::ThemeVariant::AUTO;
+            m_preferences.signal_changed().emit();
+        });
+        m_theme_variant_light_button->signal_toggled().connect([this] {
+            if (m_updating_theme_variant_buttons || !m_theme_variant_light_button->get_active())
+                return;
+            m_canvas_preferences.theme_variant = CanvasPreferences::ThemeVariant::LIGHT;
+            m_preferences.signal_changed().emit();
+        });
+        m_theme_variant_dark_button->signal_toggled().connect([this] {
+            if (m_updating_theme_variant_buttons || !m_theme_variant_dark_button->get_active())
+                return;
+            m_canvas_preferences.theme_variant = CanvasPreferences::ThemeVariant::DARK;
+            m_preferences.signal_changed().emit();
+        });
     }
 
     for (const auto &[color, name] : color_names) {

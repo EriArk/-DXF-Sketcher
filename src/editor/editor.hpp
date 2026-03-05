@@ -166,8 +166,9 @@ private:
 
     Gtk::PopoverMenu *m_context_menu = nullptr;
     Gtk::Popover *m_settings_popover = nullptr;
-    Gtk::ToggleButton *m_theme_light_button = nullptr;
-    Gtk::ToggleButton *m_theme_dark_button = nullptr;
+    Gtk::Button *m_theme_prev_button = nullptr;
+    Gtk::Button *m_theme_next_button = nullptr;
+    Gtk::Label *m_theme_value_label = nullptr;
     Gtk::Scale *m_line_width_scale = nullptr;
     Gtk::Label *m_line_width_value_label = nullptr;
     Gtk::Switch *m_right_click_popovers_switch = nullptr;
@@ -317,7 +318,7 @@ private:
 
     KeySequence m_keys_current;
     KeyMatchResult keys_match(const KeySequence &keys) const;
-    bool handle_action_key(Glib::RefPtr<Gtk::EventControllerKey> controller, unsigned int keyval,
+    bool handle_action_key(Glib::RefPtr<Gtk::EventControllerKey> controller, unsigned int keyval, unsigned int keycode,
                            Gdk::ModifierType state);
     void handle_tool_action(const ActionConnection &conn);
 

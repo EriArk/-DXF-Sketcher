@@ -114,6 +114,7 @@ private:
     std::vector<TracePreset> m_presets;
     int m_custom_preset_counter = 1;
     bool m_updating_preset_list = false;
+    bool m_suppress_auto_trace_updates = false;
     double m_outline_offset_mm = 0.0;
     sigc::connection m_trace_debounce_conn;
 

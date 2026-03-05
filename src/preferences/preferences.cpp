@@ -296,6 +296,8 @@ static const LutEnumStr<CanvasPreferences::ThemeVariant> theme_variant_lut = {
         {"auto", CanvasPreferences::ThemeVariant::AUTO},
         {"light", CanvasPreferences::ThemeVariant::LIGHT},
         {"dark", CanvasPreferences::ThemeVariant::DARK},
+        {"dark_blue", CanvasPreferences::ThemeVariant::DARK_BLUE},
+        {"heaven", CanvasPreferences::ThemeVariant::HEAVEN},
 };
 
 static const LutEnumStr<RotationScheme> rotation_scheme_lut = {

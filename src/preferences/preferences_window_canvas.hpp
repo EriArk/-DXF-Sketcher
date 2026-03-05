@@ -27,6 +27,7 @@ private:
 
     std::vector<unsigned int> m_msaa_settings;
     std::vector<std::string> m_themes;
+    bool m_updating_theme_variant_buttons = false;
     void update_colors_revealer();
 
     void update_color_chooser();

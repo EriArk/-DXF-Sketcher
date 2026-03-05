@@ -26,7 +26,7 @@ public:
     bool connect_curvature_combs = true;
     RotationScheme rotation_scheme = RotationScheme::ARCBALL;
     std::string theme = "Default";
-    enum class ThemeVariant { AUTO, DARK, LIGHT };
+    enum class ThemeVariant { AUTO, DARK, LIGHT, DARK_BLUE, HEAVEN };
     ThemeVariant theme_variant = ThemeVariant::AUTO;
     fs::path pick_path;
 

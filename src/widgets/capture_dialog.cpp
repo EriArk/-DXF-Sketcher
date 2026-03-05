@@ -43,7 +43,7 @@ CaptureDialog::CaptureDialog(Gtk::Window *parent)
                     if (ev->is_modifier())
                         return false;
                     state &= ~ev->get_consumed_modifiers();
-                    remap_keys(keyval, state);
+                    remap_keys(keyval, keycode, state);
                     state &= (Gdk::ModifierType::SHIFT_MASK | Gdk::ModifierType::CONTROL_MASK
                               | Gdk::ModifierType::ALT_MASK);
                     m_keys.emplace_back(keyval, state);

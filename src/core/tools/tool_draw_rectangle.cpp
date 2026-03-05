@@ -214,6 +214,31 @@ ToolResponse ToolDrawRectangle::update(const ToolArgs &args)
         case InToolActionID::LMB: {
             if (m_lines.front()) {
                 if (m_rounded) {
+                    auto pick_arc_endpoint = [](const EntityArc2D &arc, const glm::dvec2 &p) -> unsigned int {
+                        const auto d_from = glm::dot(arc.m_from - p, arc.m_from - p);
+                        const auto d_to = glm::dot(arc.m_to - p, arc.m_to - p);
+                        return d_from <= d_to ? 1u : 2u;
+                    };
+
+                    for (size_t i = 0; i < m_lines.size(); i++) {
+                        const auto *line = m_lines.at(i);
+                        if (!line)
+                            continue;
+
+                        if (const auto *arc_at_p1 = m_arcs.at(i)) {
+                            auto &constraint = add_constraint<ConstraintPointsCoincident>();
+                            constraint.m_entity1 = {line->m_uuid, 1};
+                            constraint.m_entity2 = {arc_at_p1->m_uuid, pick_arc_endpoint(*arc_at_p1, line->m_p1)};
+                            constraint.m_wrkpl = m_wrkpl->m_uuid;
+                        }
+
+                        if (const auto *arc_at_p2 = m_arcs.at((i + 1) % m_arcs.size())) {
+                            auto &constraint = add_constraint<ConstraintPointsCoincident>();
+                            constraint.m_entity1 = {line->m_uuid, 2};
+                            constraint.m_entity2 = {arc_at_p2->m_uuid, pick_arc_endpoint(*arc_at_p2, line->m_p2)};
+                            constraint.m_wrkpl = m_wrkpl->m_uuid;
+                        }
+                    }
                     return ToolResponse::commit();
                 }
                 auto last_line = m_lines.back();

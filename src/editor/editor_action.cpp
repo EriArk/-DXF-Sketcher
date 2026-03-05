@@ -163,6 +163,10 @@ void Editor::init_actions()
     }
 
     connect_action(ActionID::UNDO, [this](const auto &a) {
+        if (m_core.tool_is_active() && !force_end_tool())
+            return;
+        if (!m_core.can_undo())
+            return;
         m_core.undo();
         m_win.hide_delete_items_popup();
         CanvasUpdater canvas_updater{*this};
@@ -171,6 +175,10 @@ void Editor::init_actions()
         update_action_sensitivity();
     });
     connect_action(ActionID::REDO, [this](const auto &a) {
+        if (m_core.tool_is_active() && !force_end_tool())
+            return;
+        if (!m_core.can_redo())
+            return;
         m_core.redo();
         m_win.hide_delete_items_popup();
         CanvasUpdater canvas_updater{*this};
@@ -507,7 +515,7 @@ void Editor::update_action_sensitivity()
 
 void Editor::update_action_sensitivity(const std::set<SelectableRef> &sel)
 {
-    m_action_sensitivity[ActionID::UNDO] = m_core.can_undo();
+    m_action_sensitivity[ActionID::UNDO] = m_core.can_undo() || m_core.tool_is_active();
     m_action_sensitivity[ActionID::REDO] = m_core.can_redo();
     m_action_sensitivity[ActionID::SAVE_ALL] = m_core.get_needs_save_any();
     m_action_sensitivity[ActionID::SAVE] = m_core.has_documents();
@@ -665,7 +673,8 @@ bool Editor::trigger_action(ActionToolID action, ActionSource source)
         const auto action_id = std::get_if<ActionID>(&action);
         const auto tool_id = std::get_if<ToolID>(&action);
         const bool allowed_while_tool = (action_id && (*action_id == ActionID::OPEN_DOCUMENT || *action_id == ActionID::SAVE
-                                                        || *action_id == ActionID::SAVE_AS))
+                                                        || *action_id == ActionID::SAVE_AS || *action_id == ActionID::UNDO
+                                                        || *action_id == ActionID::REDO))
                                         || (tool_id && *tool_id == ToolID::IMPORT_PICTURE);
         if (allowed_while_tool) {
             if (!force_end_tool())
@@ -694,8 +703,11 @@ bool Editor::get_action_sensitive(ActionID action) const
 
     if (m_core.tool_is_active()) { // actions available int tools are always sensitive
 #ifdef DUNE_SKETCHER_ONLY
-        if (action == ActionID::OPEN_DOCUMENT || action == ActionID::SAVE || action == ActionID::SAVE_AS)
+        if (action == ActionID::OPEN_DOCUMENT || action == ActionID::SAVE || action == ActionID::SAVE_AS
+            || action == ActionID::UNDO)
             return true;
+        if (action == ActionID::REDO)
+            return m_core.can_redo();
 #endif
         return action_catalog.at(action).flags & ActionCatalogItem::FLAGS_IN_TOOL;
     }
@@ -783,14 +795,37 @@ std::optional<ActionToolID> Editor::get_doubleclick_action(const SelectableRef &
 
 
 bool Editor::handle_action_key(Glib::RefPtr<Gtk::EventControllerKey> controller, unsigned int keyval,
-                               Gdk::ModifierType state)
+                               unsigned int keycode, Gdk::ModifierType state)
 {
     auto ev = controller->get_current_event();
     if (ev->is_modifier())
         return false;
-    state &= ~ev->get_consumed_modifiers();
-    remap_keys(keyval, state);
-    state &= (Gdk::ModifierType::SHIFT_MASK | Gdk::ModifierType::CONTROL_MASK | Gdk::ModifierType::ALT_MASK);
+    const auto primary_mods = Gdk::ModifierType::SHIFT_MASK | Gdk::ModifierType::CONTROL_MASK | Gdk::ModifierType::ALT_MASK;
+    state &= ~(ev->get_consumed_modifiers() & ~primary_mods);
+    remap_keys(keyval, keycode, state);
+    state &= primary_mods;
+
+    // Keep core undo/redo global regardless of active tool/focus routing.
+    if (keyval == GDK_KEY_z && state == Gdk::ModifierType::CONTROL_MASK) {
+        if (m_core.tool_is_active() && !force_end_tool())
+            return true;
+        if (m_core.can_undo()) {
+            trigger_action(ActionID::UNDO, ActionSource::KEY);
+            return true;
+        }
+        return false;
+    }
+    if ((keyval == GDK_KEY_y && state == Gdk::ModifierType::CONTROL_MASK)
+        || (keyval == GDK_KEY_z
+            && state == (Gdk::ModifierType::CONTROL_MASK | Gdk::ModifierType::SHIFT_MASK))) {
+        if (m_core.tool_is_active() && !force_end_tool())
+            return true;
+        if (m_core.can_redo()) {
+            trigger_action(ActionID::REDO, ActionSource::KEY);
+            return true;
+        }
+        return false;
+    }
 #ifdef DUNE_SKETCHER_ONLY
     if (keyval == GDK_KEY_Tab && state == static_cast<Gdk::ModifierType>(0)) {
         toggle_sidebar_visibility();

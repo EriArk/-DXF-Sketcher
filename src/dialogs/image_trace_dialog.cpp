@@ -137,6 +137,17 @@ ImageTraceDialog::ImageTraceDialog()
     add_slider_row("Noise ignore (px)", m_noise_scale, m_noise_value_label, 0, 500, 1, 0);
     add_slider_row("Opt tolerance", m_curve_strength_scale, m_curve_strength_value_label, 0.0, 1.0, 0.01, 2);
 
+    auto anti_stair_row = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 6);
+    auto anti_stair_label = Gtk::make_managed<Gtk::Label>("Anti-stair");
+    anti_stair_label->set_xalign(0);
+    anti_stair_label->set_hexpand(true);
+    anti_stair_label->set_tooltip_text("Reduces tiny stair-step waves on traced contours");
+    m_anti_stair_switch = Gtk::make_managed<Gtk::Switch>();
+    m_anti_stair_switch->set_active(true);
+    anti_stair_row->append(*anti_stair_label);
+    anti_stair_row->append(*m_anti_stair_switch);
+    controls->append(*anti_stair_row);
+
     auto outline_row = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 6);
     auto outline_label = Gtk::make_managed<Gtk::Label>("Outline mode");
     outline_label->set_xalign(0);
@@ -282,7 +293,11 @@ ImageTraceDialog::ImageTraceDialog()
     m_curve_strength_scale->set_value(0.38);
     m_outline_offset_mm = 0.0;
 
-    auto on_value_changed = [this] { update_scale_value_labels(); };
+    auto on_value_changed = [this] {
+        update_scale_value_labels();
+        if (!m_suppress_auto_trace_updates)
+            queue_trace_update();
+    };
     m_threshold_scale->signal_value_changed().connect(on_value_changed);
     m_smoothness_scale->signal_value_changed().connect(on_value_changed);
     m_noise_scale->signal_value_changed().connect(on_value_changed);
@@ -297,6 +312,9 @@ ImageTraceDialog::ImageTraceDialog()
     connect_scale_auto_trace(*m_smoothness_scale);
     connect_scale_auto_trace(*m_noise_scale);
     connect_scale_auto_trace(*m_curve_strength_scale);
+    if (m_anti_stair_switch) {
+        m_anti_stair_switch->property_active().signal_changed().connect([this] { queue_trace_update(); });
+    }
     if (m_outline_switch) {
         m_outline_switch->property_active().signal_changed().connect([this] {
             if (m_outline_offset_dec_button)
@@ -415,12 +433,14 @@ void ImageTraceDialog::queue_trace_update()
 {
     if (m_trace_debounce_conn.connected())
         m_trace_debounce_conn.disconnect();
+
+    constexpr unsigned int kTraceDebounceMs = 70;
     m_trace_debounce_conn = Glib::signal_timeout().connect(
             [this] {
                 run_trace();
                 return false;
             },
-            120);
+            kTraceDebounceMs);
 }
 
 void ImageTraceDialog::connect_scale_auto_trace(Gtk::Scale &scale)
@@ -489,20 +509,27 @@ ImageTraceSettings ImageTraceDialog::read_settings_from_ui() const
     settings.noise_ignore = static_cast<int>(std::round(m_noise_scale->get_value()));
     settings.opt_tolerance = std::clamp(m_curve_strength_scale->get_value(), 0.0, 1.0);
     settings.blur = std::clamp(static_cast<int>(std::lround(settings.smoothness * 0.55)), 0, 4);
-    settings.anti_stair = true;
-    settings.anti_stair_strength = std::clamp(0.20 + settings.opt_tolerance * 0.80, 0.0, 1.0);
-    settings.detail_preserve = std::clamp(0.90 - settings.opt_tolerance * 0.70, 0.0, 1.0);
+    settings.anti_stair = m_anti_stair_switch ? m_anti_stair_switch->get_active() : true;
+    const double smooth_norm = std::clamp(settings.smoothness / 6.0, 0.0, 1.0);
+    if (settings.anti_stair) {
+        settings.anti_stair_strength = std::clamp(0.35 + settings.opt_tolerance * 0.65 + smooth_norm * 0.15, 0.0, 1.0);
+        settings.detail_preserve = std::clamp(0.88 - settings.opt_tolerance * 0.62 - smooth_norm * 0.08, 0.0, 1.0);
+    }
+    else {
+        settings.anti_stair_strength = 0.0;
+        settings.detail_preserve = 1.0;
+    }
     settings.outline_mode = m_outline_switch && m_outline_switch->get_active();
     settings.outline_with_trace = m_outline_with_trace_switch && m_outline_with_trace_switch->get_active();
     settings.outline_offset_mm = std::clamp(m_outline_offset_mm, 0.0, 100.0);
     settings.curve_fit = true;
-    const double smooth_norm = std::clamp(settings.smoothness / 6.0, 0.0, 1.0);
     settings.curve_strength = std::clamp(0.82 + smooth_norm * 0.12, 0.75, 1.05);
     return settings;
 }
 
 void ImageTraceDialog::apply_settings_to_ui(const ImageTraceSettings &settings)
 {
+    m_suppress_auto_trace_updates = true;
     m_threshold_scale->set_value(std::clamp(settings.threshold, 0, 255));
     m_smoothness_scale->set_value(std::clamp(settings.smoothness, 0.0, 6.0));
     m_noise_scale->set_value(std::clamp(settings.noise_ignore, 0, 500));
@@ -512,6 +539,8 @@ void ImageTraceDialog::apply_settings_to_ui(const ImageTraceSettings &settings)
     }
     m_curve_strength_scale->set_value(std::clamp(opt, 0.0, 1.0));
     m_outline_offset_mm = std::clamp(settings.outline_offset_mm, 0.0, 100.0);
+    if (m_anti_stair_switch)
+        m_anti_stair_switch->set_active(settings.anti_stair);
     if (m_outline_switch)
         m_outline_switch->set_active(settings.outline_mode);
     if (m_outline_with_trace_switch)
@@ -524,6 +553,7 @@ void ImageTraceDialog::apply_settings_to_ui(const ImageTraceSettings &settings)
         m_outline_with_trace_switch->set_sensitive(settings.outline_mode);
     if (m_outline_offset_value_label)
         m_outline_offset_value_label->set_sensitive(settings.outline_mode);
+    m_suppress_auto_trace_updates = false;
     update_scale_value_labels();
 }
 

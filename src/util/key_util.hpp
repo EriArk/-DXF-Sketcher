@@ -2,5 +2,5 @@
 #include <gtkmm.h>
 
 namespace dune3d {
-void remap_keys(guint &keyval, Gdk::ModifierType &state);
+void remap_keys(guint &keyval, guint keycode, Gdk::ModifierType &state);
 } // namespace dune3d
