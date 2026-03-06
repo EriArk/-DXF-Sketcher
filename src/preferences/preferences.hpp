@@ -39,10 +39,18 @@ public:
 
 class EditorPreferences {
 public:
+    enum class RadialMenuTrigger {
+        SHIFT_RMB,
+        SHIFT_MMB,
+        MOUSE_BACK,
+        MOUSE_FORWARD,
+    };
+
     bool preview_constraints = true;
     int constraint_value_rounding = 3;
     enum class TrailingZeros { OFF, ONE_DECIMAL, ON };
     TrailingZeros constraint_trailing_zeros = TrailingZeros::ONE_DECIMAL;
+    RadialMenuTrigger radial_menu_trigger = RadialMenuTrigger::SHIFT_RMB;
 
     void load_from_json(const json &j);
     json serialize() const;

@@ -117,6 +117,16 @@ private:
     std::vector<std::pair<glm::dvec3, glm::dvec3>> get_symmetry_overlay_lines_world();
     void init_settings_popover();
     void sync_settings_popover_from_preferences();
+#ifdef DUNE_SKETCHER_ONLY
+    void init_radial_menu();
+    void open_radial_menu(double x, double y);
+    void close_radial_menu();
+    bool matches_radial_menu_trigger(unsigned int button, Gdk::ModifierType state) const;
+    void trigger_radial_tool(ToolID tool_id);
+    void toggle_radial_grid();
+    void toggle_radial_symmetry();
+    void update_radial_menu_button_states();
+#endif
     void init_actions();
     void init_tool_popover();
     void init_canvas();
@@ -173,6 +183,15 @@ private:
     Gtk::Label *m_line_width_value_label = nullptr;
     Gtk::Switch *m_right_click_popovers_switch = nullptr;
     bool m_right_click_popovers_only = false;
+#ifdef DUNE_SKETCHER_ONLY
+    std::map<ToolID, Gtk::Popover *> m_quick_tool_option_popovers;
+    Gtk::Popover *m_quick_grid_popover = nullptr;
+    Gtk::Popover *m_quick_symmetry_popover = nullptr;
+    Gtk::Popover *m_radial_menu_popover = nullptr;
+    std::map<ToolID, Gtk::Button *> m_radial_tool_buttons;
+    Gtk::Button *m_radial_grid_button = nullptr;
+    Gtk::Button *m_radial_symmetry_button = nullptr;
+#endif
     Gtk::Button *m_grid_menu_button = nullptr;
     Gtk::SpinButton *m_grid_spacing_spin = nullptr;
     Gtk::Switch *m_grid_snap_button = nullptr;

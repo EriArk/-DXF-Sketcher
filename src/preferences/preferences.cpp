@@ -250,12 +250,20 @@ static const LutEnumStr<EditorPreferences::TrailingZeros> trailing_zeros_lut = {
         {"on", EditorPreferences::TrailingZeros::ON},
 };
 
+static const LutEnumStr<EditorPreferences::RadialMenuTrigger> radial_menu_trigger_lut = {
+        {"shift_rmb", EditorPreferences::RadialMenuTrigger::SHIFT_RMB},
+        {"shift_mmb", EditorPreferences::RadialMenuTrigger::SHIFT_MMB},
+        {"mouse_back", EditorPreferences::RadialMenuTrigger::MOUSE_BACK},
+        {"mouse_forward", EditorPreferences::RadialMenuTrigger::MOUSE_FORWARD},
+};
+
 json EditorPreferences::serialize() const
 {
     json j;
     j["preview_constraints"] = preview_constraints;
     j["constraint_value_rounding"] = constraint_value_rounding;
     j["constraint_trailing_zeros"] = trailing_zeros_lut.lookup_reverse(constraint_trailing_zeros);
+    j["radial_menu_trigger"] = radial_menu_trigger_lut.lookup_reverse(radial_menu_trigger);
     return j;
 }
 
@@ -265,6 +273,8 @@ void EditorPreferences::load_from_json(const json &j)
     constraint_value_rounding = j.value("constraint_value_rounding", 3);
     constraint_trailing_zeros =
             trailing_zeros_lut.lookup(j.value("constraint_trailing_zeros", "one_decimal"), TrailingZeros::ONE_DECIMAL);
+    radial_menu_trigger =
+            radial_menu_trigger_lut.lookup(j.value("radial_menu_trigger", "shift_rmb"), RadialMenuTrigger::SHIFT_RMB);
 }
 
 

@@ -679,6 +679,9 @@ void Editor::init()
     init_actions();
     init_tool_popover();
     init_canvas();
+#ifdef DUNE_SKETCHER_ONLY
+    init_radial_menu();
+#endif
 
     m_core.signal_needs_save().connect([this] {
         update_action_sensitivity();
@@ -1598,6 +1601,7 @@ void Editor::update_sketcher_toolbar_button_states()
         else
             m_symmetry_menu_button->remove_css_class("sketch-toolbar-active");
     }
+    update_radial_menu_button_states();
 #endif
 }
 
@@ -1857,7 +1861,685 @@ void Editor::init_canvas()
      * so we need to attach them afterwards since event controllers attached last run first
      */
     get_canvas().setup_controllers();
+#ifdef DUNE_SKETCHER_ONLY
+    {
+        auto controller = Gtk::GestureClick::create();
+        controller->set_button(0);
+        controller->set_propagation_phase(Gtk::PropagationPhase::CAPTURE);
+        controller->signal_pressed().connect([this, controller](int n_press, double x, double y) {
+            const auto button = controller->get_current_button();
+            const auto state = controller->get_current_event_state();
+            if (n_press != 1)
+                return;
+            const bool is_trigger = matches_radial_menu_trigger(button, state);
+            if (!is_trigger) {
+                if (m_radial_menu_popover && m_radial_menu_popover->get_visible())
+                    close_radial_menu();
+                return;
+            }
+            controller->set_state(Gtk::EventSequenceState::CLAIMED);
+            if (m_context_menu && m_context_menu->get_visible())
+                m_context_menu->popdown();
+            open_radial_menu(x, y);
+        });
+        get_canvas().add_controller(controller);
+    }
+#endif
 }
+
+#ifdef DUNE_SKETCHER_ONLY
+void Editor::init_radial_menu()
+{
+    if (m_radial_menu_popover)
+        return;
+
+    m_radial_menu_popover = Gtk::make_managed<Gtk::Popover>();
+    m_radial_menu_popover->add_css_class("sketch-quick-menu");
+    m_radial_menu_popover->set_has_arrow(true);
+    m_radial_menu_popover->set_autohide(true);
+    m_radial_menu_popover->set_position(Gtk::PositionType::LEFT);
+    m_radial_menu_popover->set_offset(-8, 0);
+    m_radial_menu_popover->set_size_request(64, -1);
+    m_radial_menu_popover->set_parent(get_canvas());
+
+    auto layout = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 4);
+    layout->set_margin_start(6);
+    layout->set_margin_end(6);
+    layout->set_margin_top(6);
+    layout->set_margin_bottom(6);
+    m_radial_menu_popover->set_child(*layout);
+
+    const auto add_strip_button = [layout](const char *icon_name, const char *tooltip) {
+        auto button = Gtk::make_managed<Gtk::Button>();
+        button->set_icon_name(icon_name);
+        button->set_tooltip_text(tooltip);
+        button->set_has_frame(true);
+        button->set_size_request(44, 44);
+        button->add_css_class("sketch-toolbar-button");
+        button->add_css_class("sketch-quick-menu-button");
+        layout->append(*button);
+        return button;
+    };
+    const auto create_quick_options_popover = [](Gtk::Button &anchor) {
+        auto popover = Gtk::make_managed<Gtk::Popover>();
+        popover->add_css_class("sketch-grid-popover");
+        popover->set_has_arrow(true);
+        popover->set_autohide(true);
+        popover->set_position(Gtk::PositionType::LEFT);
+        popover->set_parent(anchor);
+        popover->set_size_request(sketch_popover_total_width, -1);
+        auto box = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 10);
+        box->set_margin_start(12);
+        box->set_margin_end(12);
+        box->set_margin_top(12);
+        box->set_margin_bottom(12);
+        box->set_size_request(sketch_popover_content_width, -1);
+        popover->set_child(*box);
+        return std::pair<Gtk::Popover *, Gtk::Box *>(popover, box);
+    };
+
+    auto contour_button = add_strip_button("action-draw-contour-symbolic", "Draw contour");
+    contour_button->signal_clicked().connect([this] { trigger_radial_tool(ToolID::DRAW_CONTOUR); });
+    m_radial_tool_buttons[ToolID::DRAW_CONTOUR] = contour_button;
+
+    auto rectangle_button = add_strip_button("action-draw-line-rectangle-symbolic", "Draw rectangle");
+    rectangle_button->signal_clicked().connect([this] { trigger_radial_tool(ToolID::DRAW_RECTANGLE); });
+    m_radial_tool_buttons[ToolID::DRAW_RECTANGLE] = rectangle_button;
+    {
+        auto [popover, box] = create_quick_options_popover(*rectangle_button);
+        m_quick_tool_option_popovers[ToolID::DRAW_RECTANGLE] = popover;
+        auto square_row = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 8);
+        auto square_label = Gtk::make_managed<Gtk::Label>("Square");
+        square_label->set_hexpand(true);
+        square_label->set_xalign(0);
+        auto square_switch = Gtk::make_managed<Gtk::Switch>();
+        square_switch->set_active(ToolDrawRectangle::get_default_square());
+        square_row->append(*square_label);
+        square_row->append(*square_switch);
+        box->append(*square_row);
+
+        auto rounded_row = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 8);
+        auto rounded_label = Gtk::make_managed<Gtk::Label>("Rounded");
+        rounded_label->set_hexpand(true);
+        rounded_label->set_xalign(0);
+        auto rounded_switch = Gtk::make_managed<Gtk::Switch>();
+        rounded_switch->set_active(ToolDrawRectangle::get_default_rounded());
+        rounded_row->append(*rounded_label);
+        rounded_row->append(*rounded_switch);
+        box->append(*rounded_row);
+
+        auto radius_revealer = Gtk::make_managed<Gtk::Revealer>();
+        radius_revealer->set_transition_type(Gtk::RevealerTransitionType::SLIDE_DOWN);
+        radius_revealer->set_transition_duration(120);
+        auto radius_row = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 8);
+        auto radius_label = Gtk::make_managed<Gtk::Label>("Radius");
+        radius_label->set_hexpand(true);
+        radius_label->set_xalign(0);
+        auto radius_spin = Gtk::make_managed<Gtk::SpinButton>();
+        radius_spin->set_range(0.0, 9999.99);
+        radius_spin->set_increments(0.1, 1.0);
+        radius_spin->set_digits(2);
+        radius_spin->set_numeric(true);
+        radius_spin->set_width_chars(5);
+        radius_spin->set_value(ToolDrawRectangle::get_default_round_radius());
+        auto mm_label = Gtk::make_managed<Gtk::Label>("mm");
+        mm_label->add_css_class("dim-label");
+        radius_row->append(*radius_label);
+        radius_row->append(*radius_spin);
+        radius_row->append(*mm_label);
+        radius_revealer->set_child(*radius_row);
+        radius_revealer->set_reveal_child(rounded_switch->get_active());
+        box->append(*radius_revealer);
+
+        square_switch->property_active().signal_changed().connect(
+                [square_switch] { ToolDrawRectangle::set_default_square(square_switch->get_active()); });
+        rounded_switch->property_active().signal_changed().connect([rounded_switch, radius_revealer] {
+            const bool active = rounded_switch->get_active();
+            ToolDrawRectangle::set_default_rounded(active);
+            radius_revealer->set_reveal_child(active);
+        });
+        radius_spin->signal_value_changed().connect(
+                [radius_spin] { ToolDrawRectangle::set_default_round_radius(radius_spin->get_value()); });
+    }
+
+    auto circle_button = add_strip_button("action-draw-line-circle-symbolic", "Draw circle / oval");
+    circle_button->signal_clicked().connect([this] { trigger_radial_tool(ToolID::DRAW_CIRCLE_2D); });
+    m_radial_tool_buttons[ToolID::DRAW_CIRCLE_2D] = circle_button;
+    {
+        auto [popover, box] = create_quick_options_popover(*circle_button);
+        m_quick_tool_option_popovers[ToolID::DRAW_CIRCLE_2D] = popover;
+        auto oval_row = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 8);
+        auto oval_label = Gtk::make_managed<Gtk::Label>("Oval");
+        oval_label->set_hexpand(true);
+        oval_label->set_xalign(0);
+        auto oval_switch = Gtk::make_managed<Gtk::Switch>();
+        oval_switch->set_active(ToolDrawCircle2D::get_default_oval_mode());
+        oval_row->append(*oval_label);
+        oval_row->append(*oval_switch);
+        box->append(*oval_row);
+        oval_switch->property_active().signal_changed().connect(
+                [oval_switch] { ToolDrawCircle2D::set_default_oval_mode(oval_switch->get_active()); });
+
+        auto slice_row = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 8);
+        auto slice_label = Gtk::make_managed<Gtk::Label>("Slice");
+        slice_label->set_hexpand(true);
+        slice_label->set_xalign(0);
+        auto slice_switch = Gtk::make_managed<Gtk::Switch>();
+        const auto default_span = ToolDrawCircle2D::get_default_span_degrees();
+        slice_switch->set_active(default_span < 359.999);
+        slice_row->append(*slice_label);
+        slice_row->append(*slice_switch);
+        box->append(*slice_row);
+
+        auto angle_revealer = Gtk::make_managed<Gtk::Revealer>();
+        angle_revealer->set_transition_type(Gtk::RevealerTransitionType::SLIDE_DOWN);
+        angle_revealer->set_transition_duration(120);
+        auto angle_row = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 8);
+        auto angle_label = Gtk::make_managed<Gtk::Label>("Angle");
+        angle_label->set_hexpand(true);
+        angle_label->set_xalign(0);
+        auto angle_spin = Gtk::make_managed<Gtk::SpinButton>();
+        angle_spin->set_range(1.0, 359.0);
+        angle_spin->set_increments(1.0, 15.0);
+        angle_spin->set_digits(0);
+        angle_spin->set_numeric(true);
+        angle_spin->set_width_chars(3);
+        angle_spin->set_value(std::clamp(default_span, 1.0, 359.0));
+        auto deg_label = Gtk::make_managed<Gtk::Label>("deg");
+        deg_label->add_css_class("dim-label");
+        angle_row->append(*angle_label);
+        angle_row->append(*angle_spin);
+        angle_row->append(*deg_label);
+        angle_revealer->set_child(*angle_row);
+        angle_revealer->set_reveal_child(slice_switch->get_active());
+        box->append(*angle_revealer);
+
+        slice_switch->property_active().signal_changed().connect([slice_switch, angle_spin, angle_revealer] {
+            if (slice_switch->get_active()) {
+                auto span = ToolDrawCircle2D::get_default_span_degrees();
+                if (span >= 359.999)
+                    span = 180.0;
+                ToolDrawCircle2D::set_default_span_degrees(span);
+                angle_spin->set_value(std::clamp(span, 1.0, 359.0));
+                angle_revealer->set_reveal_child(true);
+            }
+            else {
+                ToolDrawCircle2D::set_default_span_degrees(360.0);
+                angle_revealer->set_reveal_child(false);
+            }
+        });
+        angle_spin->signal_value_changed().connect([angle_spin, slice_switch] {
+            if (!slice_switch->get_active())
+                return;
+            ToolDrawCircle2D::set_default_span_degrees(angle_spin->get_value());
+        });
+    }
+
+    auto polygon_button = add_strip_button("action-draw-line-regular-polygon-symbolic", "Draw polygon");
+    polygon_button->signal_clicked().connect([this] { trigger_radial_tool(ToolID::DRAW_REGULAR_POLYGON); });
+    m_radial_tool_buttons[ToolID::DRAW_REGULAR_POLYGON] = polygon_button;
+    {
+        auto [popover, box] = create_quick_options_popover(*polygon_button);
+        m_quick_tool_option_popovers[ToolID::DRAW_REGULAR_POLYGON] = popover;
+        auto sides_row = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 8);
+        auto sides_label = Gtk::make_managed<Gtk::Label>("Sides");
+        sides_label->set_hexpand(true);
+        sides_label->set_xalign(0);
+        auto sides_spin = Gtk::make_managed<Gtk::SpinButton>();
+        sides_spin->set_range(3, 64);
+        sides_spin->set_increments(1, 1);
+        sides_spin->set_digits(0);
+        sides_spin->set_numeric(true);
+        sides_spin->set_width_chars(2);
+        sides_spin->set_value(ToolDrawRegularPolygon::get_default_sides());
+        sides_row->append(*sides_label);
+        sides_row->append(*sides_spin);
+        box->append(*sides_row);
+
+        auto rounded_row = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 8);
+        auto rounded_label = Gtk::make_managed<Gtk::Label>("Rounded");
+        rounded_label->set_hexpand(true);
+        rounded_label->set_xalign(0);
+        auto rounded_switch = Gtk::make_managed<Gtk::Switch>();
+        rounded_switch->set_active(ToolDrawRegularPolygon::get_default_rounded());
+        rounded_row->append(*rounded_label);
+        rounded_row->append(*rounded_switch);
+        box->append(*rounded_row);
+
+        auto radius_revealer = Gtk::make_managed<Gtk::Revealer>();
+        radius_revealer->set_transition_type(Gtk::RevealerTransitionType::SLIDE_DOWN);
+        radius_revealer->set_transition_duration(120);
+        auto radius_row = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 8);
+        auto radius_label = Gtk::make_managed<Gtk::Label>("Radius");
+        radius_label->set_hexpand(true);
+        radius_label->set_xalign(0);
+        auto radius_spin = Gtk::make_managed<Gtk::SpinButton>();
+        radius_spin->set_range(0.0, 9999.99);
+        radius_spin->set_increments(0.1, 1.0);
+        radius_spin->set_digits(2);
+        radius_spin->set_numeric(true);
+        radius_spin->set_width_chars(5);
+        radius_spin->set_value(ToolDrawRegularPolygon::get_default_round_radius());
+        auto mm_label = Gtk::make_managed<Gtk::Label>("mm");
+        mm_label->add_css_class("dim-label");
+        radius_row->append(*radius_label);
+        radius_row->append(*radius_spin);
+        radius_row->append(*mm_label);
+        radius_revealer->set_child(*radius_row);
+        radius_revealer->set_reveal_child(rounded_switch->get_active());
+        box->append(*radius_revealer);
+
+        sides_spin->signal_value_changed().connect(
+                [sides_spin] { ToolDrawRegularPolygon::set_default_sides(static_cast<unsigned int>(sides_spin->get_value())); });
+        rounded_switch->property_active().signal_changed().connect([rounded_switch, radius_revealer] {
+            const bool active = rounded_switch->get_active();
+            ToolDrawRegularPolygon::set_default_rounded(active);
+            radius_revealer->set_reveal_child(active);
+        });
+        radius_spin->signal_value_changed().connect(
+                [radius_spin] { ToolDrawRegularPolygon::set_default_round_radius(radius_spin->get_value()); });
+    }
+
+    auto text_button = add_strip_button("action-draw-text-symbolic", "Draw text");
+    text_button->signal_clicked().connect([this] { trigger_radial_tool(ToolID::DRAW_TEXT); });
+    m_radial_tool_buttons[ToolID::DRAW_TEXT] = text_button;
+    {
+        auto [popover, box] = create_quick_options_popover(*text_button);
+        m_quick_tool_option_popovers[ToolID::DRAW_TEXT] = popover;
+        auto font_dialog = Gtk::FontDialog::create();
+        font_dialog->set_modal(true);
+        auto font_desc = std::make_shared<Pango::FontDescription>(ToolDrawText::get_default_font());
+        auto font_features = std::make_shared<Glib::ustring>(ToolDrawText::get_default_font_features());
+        auto font_row = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 8);
+        auto font_label = Gtk::make_managed<Gtk::Label>("Font");
+        font_label->set_hexpand(true);
+        font_label->set_xalign(0);
+        auto font_button = Gtk::make_managed<Gtk::Button>();
+        font_button->set_has_frame(true);
+        font_button->set_hexpand(true);
+        font_button->set_halign(Gtk::Align::END);
+        font_row->append(*font_label);
+        font_row->append(*font_button);
+        box->append(*font_row);
+
+        auto bold_row = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 8);
+        auto bold_label = Gtk::make_managed<Gtk::Label>("Bold");
+        bold_label->set_hexpand(true);
+        bold_label->set_xalign(0);
+        auto bold_switch = Gtk::make_managed<Gtk::Switch>();
+        bold_row->append(*bold_label);
+        bold_row->append(*bold_switch);
+        box->append(*bold_row);
+
+        auto italic_row = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 8);
+        auto italic_label = Gtk::make_managed<Gtk::Label>("Italic");
+        italic_label->set_hexpand(true);
+        italic_label->set_xalign(0);
+        auto italic_switch = Gtk::make_managed<Gtk::Switch>();
+        italic_row->append(*italic_label);
+        italic_row->append(*italic_switch);
+        box->append(*italic_row);
+
+        const auto sync_font_ui = [font_button, bold_switch, italic_switch, font_desc] {
+            if (!font_button || !bold_switch || !italic_switch || !font_desc)
+                return;
+            auto family = font_desc->get_family();
+            if (family.empty())
+                family = "Default";
+            font_button->set_label(family);
+            const auto weight = font_desc->get_weight();
+            bold_switch->set_active(weight >= Pango::Weight::BOLD);
+            italic_switch->set_active(font_desc->get_style() == Pango::Style::ITALIC);
+        };
+        sync_font_ui();
+
+        font_button->signal_clicked().connect([this, popover, font_dialog, font_desc, font_features, sync_font_ui] {
+            popover->popdown();
+            font_dialog->choose_font_and_features(
+                    m_win,
+                    [popover, font_dialog, font_desc, font_features, sync_font_ui](const Glib::RefPtr<Gio::AsyncResult> &result) {
+                        try {
+                            auto [desc, features, language] = font_dialog->choose_font_and_features_finish(result);
+                            (void)language;
+                            *font_desc = desc;
+                            *font_features = features;
+                            ToolDrawText::set_default_font(font_desc->to_string());
+                            ToolDrawText::set_default_font_features(*font_features);
+                            sync_font_ui();
+                        }
+                        catch (const Glib::Error &) {
+                        }
+                        popover->popup();
+                    },
+                    *font_desc);
+        });
+        bold_switch->property_active().signal_changed().connect([bold_switch, font_desc, font_features, sync_font_ui] {
+            auto desc = *font_desc;
+            desc.set_weight(bold_switch->get_active() ? Pango::Weight::BOLD : Pango::Weight::NORMAL);
+            *font_desc = desc;
+            ToolDrawText::set_default_font(font_desc->to_string());
+            ToolDrawText::set_default_font_features(*font_features);
+            sync_font_ui();
+        });
+        italic_switch->property_active().signal_changed().connect([italic_switch, font_desc, font_features, sync_font_ui] {
+            auto desc = *font_desc;
+            desc.set_style(italic_switch->get_active() ? Pango::Style::ITALIC : Pango::Style::NORMAL);
+            *font_desc = desc;
+            ToolDrawText::set_default_font(font_desc->to_string());
+            ToolDrawText::set_default_font_features(*font_features);
+            sync_font_ui();
+        });
+    }
+
+    auto sep = Gtk::make_managed<Gtk::Separator>(Gtk::Orientation::HORIZONTAL);
+    sep->add_css_class("sketch-toolbar-divider");
+    layout->append(*sep);
+
+    m_radial_grid_button = add_strip_button("view-grid-symbolic", "Toggle grid");
+    m_radial_grid_button->signal_clicked().connect([this] { toggle_radial_grid(); });
+    {
+        auto [popover, box] = create_quick_options_popover(*m_radial_grid_button);
+        m_quick_grid_popover = popover;
+        auto snap_row = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 8);
+        auto snap_label = Gtk::make_managed<Gtk::Label>("Snap to grid");
+        snap_label->set_hexpand(true);
+        snap_label->set_xalign(0);
+        auto snap_switch = Gtk::make_managed<Gtk::Switch>();
+        snap_row->append(*snap_label);
+        snap_row->append(*snap_switch);
+        box->append(*snap_row);
+        auto spacing_box = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 6);
+        auto spacing_title = Gtk::make_managed<Gtk::Label>("Size");
+        spacing_title->set_hexpand(true);
+        spacing_title->set_xalign(0);
+        auto spacing_spin = Gtk::make_managed<Gtk::SpinButton>();
+        spacing_spin->set_range(0.1, 100000.0);
+        spacing_spin->set_increments(0.1, 1.0);
+        spacing_spin->set_digits(2);
+        spacing_spin->set_numeric(true);
+        spacing_spin->set_width_chars(6);
+        spacing_spin->set_halign(Gtk::Align::END);
+        auto spacing_label = Gtk::make_managed<Gtk::Label>("mm");
+        spacing_label->add_css_class("dim-label");
+        spacing_box->append(*spacing_title);
+        spacing_box->append(*spacing_spin);
+        spacing_box->append(*spacing_label);
+        box->append(*spacing_box);
+        popover->signal_show().connect([this, snap_switch, spacing_spin] {
+            snap_switch->set_active(get_canvas().get_grid_snap_enabled());
+            spacing_spin->set_value(get_canvas().get_grid_spacing_mm());
+        });
+        snap_switch->property_active().signal_changed().connect(
+                [this, snap_switch] { get_canvas().set_grid_snap_enabled(snap_switch->get_active()); });
+        spacing_spin->signal_value_changed().connect(
+                [this, spacing_spin] { get_canvas().set_grid_spacing_mm(spacing_spin->get_value()); });
+    }
+
+    m_radial_symmetry_button = add_strip_button("object-flip-horizontal-symbolic", "Toggle symmetry");
+    m_radial_symmetry_button->signal_clicked().connect([this] { toggle_radial_symmetry(); });
+    {
+        auto [popover, box] = create_quick_options_popover(*m_radial_symmetry_button);
+        m_quick_symmetry_popover = popover;
+        auto updating = std::make_shared<bool>(false);
+        auto radial_row = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 8);
+        auto radial_label = Gtk::make_managed<Gtk::Label>("Radial");
+        radial_label->set_hexpand(true);
+        radial_label->set_xalign(0);
+        auto radial_switch = Gtk::make_managed<Gtk::Switch>();
+        radial_row->append(*radial_label);
+        radial_row->append(*radial_switch);
+        box->append(*radial_row);
+
+        auto mode_row = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 8);
+        auto mode_label = Gtk::make_managed<Gtk::Label>("Mode");
+        mode_label->set_hexpand(true);
+        mode_label->set_xalign(0);
+        auto mode_combo = Gtk::make_managed<Gtk::ComboBoxText>();
+        mode_combo->append("h", "Horizontal");
+        mode_combo->append("v", "Vertical");
+        mode_row->append(*mode_label);
+        mode_row->append(*mode_combo);
+        box->append(*mode_row);
+
+        auto axes_row = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 8);
+        auto axes_label = Gtk::make_managed<Gtk::Label>("Segments");
+        axes_label->set_hexpand(true);
+        axes_label->set_xalign(0);
+        auto axes_spin = Gtk::make_managed<Gtk::SpinButton>();
+        axes_spin->set_range(3, 32);
+        axes_spin->set_increments(1, 1);
+        axes_spin->set_digits(0);
+        axes_spin->set_numeric(true);
+        axes_row->append(*axes_label);
+        axes_row->append(*axes_spin);
+        box->append(*axes_row);
+
+        auto rot_row = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 8);
+        auto rot_label = Gtk::make_managed<Gtk::Label>("Rotation");
+        rot_label->set_hexpand(true);
+        rot_label->set_xalign(0);
+        auto rot_spin = Gtk::make_managed<Gtk::SpinButton>();
+        rot_spin->set_range(-180, 180);
+        rot_spin->set_increments(1, 10);
+        rot_spin->set_digits(1);
+        rot_spin->set_numeric(true);
+        auto rot_unit = Gtk::make_managed<Gtk::Label>("deg");
+        rot_row->append(*rot_label);
+        rot_row->append(*rot_spin);
+        rot_row->append(*rot_unit);
+        box->append(*rot_row);
+
+        auto set_axis_button = Gtk::make_managed<Gtk::Button>("Set Axis");
+        set_axis_button->set_hexpand(true);
+        box->append(*set_axis_button);
+
+        const auto sync_quick = [this, updating, radial_switch, mode_combo, axes_spin, rot_spin, mode_row, axes_row] {
+            if (!m_symmetry_radial_switch || !m_symmetry_axes_spin || !m_symmetry_rotation_spin)
+                return;
+            *updating = true;
+            radial_switch->set_active(m_symmetry_radial_switch->get_active());
+            mode_combo->set_active((m_symmetry_mode_selected % 2u) == 0u ? 0 : 1);
+            axes_spin->set_value(m_symmetry_axes_spin->get_value());
+            rot_spin->set_value(m_symmetry_rotation_spin->get_value());
+            const bool radial = radial_switch->get_active();
+            mode_row->set_visible(!radial);
+            axes_row->set_visible(radial);
+            *updating = false;
+        };
+        popover->signal_show().connect(sync_quick);
+        radial_switch->property_active().signal_changed().connect(
+                [this, updating, radial_switch, mode_row, axes_row] {
+                    if (*updating || !m_symmetry_radial_switch)
+                        return;
+                    m_symmetry_radial_switch->set_active(radial_switch->get_active());
+                    const bool radial = radial_switch->get_active();
+                    mode_row->set_visible(!radial);
+                    axes_row->set_visible(radial);
+                    sync_symmetry_popover_context();
+                    apply_symmetry_live_from_popover(false);
+                });
+        mode_combo->signal_changed().connect([this, updating, mode_combo] {
+            if (*updating)
+                return;
+            m_symmetry_mode_selected = (mode_combo->get_active_row_number() == 1) ? 1u : 0u;
+            sync_symmetry_popover_context();
+            apply_symmetry_live_from_popover(false);
+        });
+        axes_spin->signal_value_changed().connect([this, updating, axes_spin] {
+            if (*updating || !m_symmetry_axes_spin)
+                return;
+            m_symmetry_axes_spin->set_value(axes_spin->get_value());
+        });
+        rot_spin->signal_value_changed().connect([this, updating, rot_spin] {
+            if (*updating || !m_symmetry_rotation_spin)
+                return;
+            m_symmetry_rotation_spin->set_value(rot_spin->get_value());
+        });
+        set_axis_button->signal_clicked().connect([this] { apply_symmetry_from_popover(); });
+    }
+
+    update_radial_menu_button_states();
+}
+
+void Editor::open_radial_menu(double x, double y)
+{
+    if (!m_radial_menu_popover)
+        return;
+    for (const auto &[tool_id, popover] : m_quick_tool_option_popovers) {
+        (void)tool_id;
+        if (popover && popover->get_visible())
+            popover->popdown();
+    }
+    if (m_quick_grid_popover && m_quick_grid_popover->get_visible())
+        m_quick_grid_popover->popdown();
+    if (m_quick_symmetry_popover && m_quick_symmetry_popover->get_visible())
+        m_quick_symmetry_popover->popdown();
+    update_radial_menu_button_states();
+    Gdk::Rectangle rect;
+    rect.set_x(static_cast<int>(std::round(x)));
+    rect.set_y(static_cast<int>(std::round(y)));
+    rect.set_width(1);
+    rect.set_height(1);
+    m_radial_menu_popover->set_pointing_to(rect);
+    m_radial_menu_popover->popup();
+}
+
+void Editor::close_radial_menu()
+{
+    for (const auto &[tool_id, popover] : m_quick_tool_option_popovers) {
+        (void)tool_id;
+        if (popover && popover->get_visible())
+            popover->popdown();
+    }
+    if (m_quick_grid_popover && m_quick_grid_popover->get_visible())
+        m_quick_grid_popover->popdown();
+    if (m_quick_symmetry_popover && m_quick_symmetry_popover->get_visible())
+        m_quick_symmetry_popover->popdown();
+    if (m_radial_menu_popover && m_radial_menu_popover->get_visible())
+        m_radial_menu_popover->popdown();
+}
+
+bool Editor::matches_radial_menu_trigger(unsigned int button, Gdk::ModifierType state) const
+{
+    const auto primary_mods = Gdk::ModifierType::SHIFT_MASK | Gdk::ModifierType::CONTROL_MASK | Gdk::ModifierType::ALT_MASK;
+    const auto mods = state & primary_mods;
+#ifdef G_OS_WIN32
+    static constexpr unsigned int button_back = 4;
+    static constexpr unsigned int button_forward = 5;
+#else
+    static constexpr unsigned int button_back = 8;
+    static constexpr unsigned int button_forward = 9;
+#endif
+    switch (m_preferences.editor.radial_menu_trigger) {
+    case EditorPreferences::RadialMenuTrigger::SHIFT_MMB:
+        return button == 2 && mods == Gdk::ModifierType::SHIFT_MASK;
+    case EditorPreferences::RadialMenuTrigger::MOUSE_BACK:
+        return button == button_back && mods == static_cast<Gdk::ModifierType>(0);
+    case EditorPreferences::RadialMenuTrigger::MOUSE_FORWARD:
+        return button == button_forward && mods == static_cast<Gdk::ModifierType>(0);
+    case EditorPreferences::RadialMenuTrigger::SHIFT_RMB:
+    default:
+        return button == 3 && mods == Gdk::ModifierType::SHIFT_MASK;
+    }
+}
+
+void Editor::trigger_radial_tool(ToolID tool_id)
+{
+    if (!m_core.has_documents())
+        return;
+    const bool should_keep_sticky = is_sticky_draw_tool(tool_id);
+    if (!force_end_tool())
+        return;
+    if (!trigger_action(tool_id))
+        return;
+    m_sticky_draw_tool = should_keep_sticky ? tool_id : ToolID::NONE;
+    update_sketcher_toolbar_button_states();
+    update_radial_menu_button_states();
+    if (m_quick_tool_option_popovers.count(tool_id) && m_quick_tool_option_popovers.at(tool_id)) {
+        auto *popover = m_quick_tool_option_popovers.at(tool_id);
+        if (g_active_hover_popover && g_active_hover_popover != popover && g_active_hover_popover->get_visible())
+            g_active_hover_popover->popdown();
+        popover->popup();
+        g_active_hover_popover = popover;
+    }
+    else {
+        close_radial_menu();
+    }
+}
+
+void Editor::toggle_radial_grid()
+{
+    if (!m_core.has_documents())
+        return;
+    get_canvas().set_grid_enabled(!get_canvas().get_grid_enabled());
+    update_sketcher_toolbar_button_states();
+    sync_symmetry_popover_context();
+    update_radial_menu_button_states();
+    if (m_quick_grid_popover) {
+        if (g_active_hover_popover && g_active_hover_popover != m_quick_grid_popover && g_active_hover_popover->get_visible())
+            g_active_hover_popover->popdown();
+        m_quick_grid_popover->popup();
+        g_active_hover_popover = m_quick_grid_popover;
+    }
+}
+
+void Editor::toggle_radial_symmetry()
+{
+    if (!m_core.has_documents())
+        return;
+    if (m_symmetry_enabled)
+        set_symmetry_enabled(false, false);
+    else
+        set_symmetry_enabled(true, true);
+    update_sketcher_toolbar_button_states();
+    update_radial_menu_button_states();
+    if (m_quick_symmetry_popover) {
+        if (g_active_hover_popover && g_active_hover_popover != m_quick_symmetry_popover
+            && g_active_hover_popover->get_visible())
+            g_active_hover_popover->popdown();
+        m_quick_symmetry_popover->popup();
+        g_active_hover_popover = m_quick_symmetry_popover;
+    }
+}
+
+void Editor::update_radial_menu_button_states()
+{
+    const bool has_docs = m_core.has_documents();
+    const auto active_tool = m_core.get_tool_id();
+    for (const auto &[tool_id, button] : m_radial_tool_buttons) {
+        if (!button)
+            continue;
+        bool sensitive = false;
+        if (has_docs) {
+            sensitive = m_core.tool_can_begin(tool_id, {}).get_can_begin();
+        }
+        button->set_sensitive(sensitive);
+        bool active = false;
+        if (m_core.tool_is_active())
+            active = (active_tool == tool_id);
+        else
+            active = (m_sticky_draw_tool == tool_id) && is_sticky_draw_tool(tool_id);
+        if (active)
+            button->add_css_class("sketch-toolbar-active");
+        else
+            button->remove_css_class("sketch-toolbar-active");
+    }
+    if (m_radial_grid_button) {
+        m_radial_grid_button->set_sensitive(has_docs);
+        if (get_canvas().get_grid_enabled())
+            m_radial_grid_button->add_css_class("sketch-toolbar-active");
+        else
+            m_radial_grid_button->remove_css_class("sketch-toolbar-active");
+    }
+    if (m_radial_symmetry_button) {
+        m_radial_symmetry_button->set_sensitive(has_docs);
+        if (m_symmetry_enabled)
+            m_radial_symmetry_button->add_css_class("sketch-toolbar-active");
+        else
+            m_radial_symmetry_button->remove_css_class("sketch-toolbar-active");
+    }
+}
+#endif
 
 void Editor::update_selection_mode_label()
 {
@@ -3005,9 +3687,10 @@ void Editor::update_symmetry_live_preview_entities()
                 transform_entity(*clone, src, [&](const glm::dvec2 &p) { return rotate_point_2d(p, center, angle); }, false);
                 clone->m_uuid = UUID::random();
                 clone->m_group = m_symmetry_group;
-                clone->m_kind = ItemKind::USER;
+                clone->m_kind = ItemKind::GENRERATED;
                 clone->m_generated_from = uu;
-                clone->m_selection_invisible = false;
+                // Keep preview geometry non-interactive: tools must not snap/constrain against ephemeral clones.
+                clone->m_selection_invisible = true;
                 clone->m_move_instead.clear();
                 clones.push_back(std::move(clone));
             }
@@ -3022,9 +3705,10 @@ void Editor::update_symmetry_live_preview_entities()
                                  [&](const glm::dvec2 &p) { return reflect_point_2d(p, axis_point, axis_dir); }, true);
                 clone->m_uuid = UUID::random();
                 clone->m_group = m_symmetry_group;
-                clone->m_kind = ItemKind::USER;
+                clone->m_kind = ItemKind::GENRERATED;
                 clone->m_generated_from = uu;
-                clone->m_selection_invisible = false;
+                // Keep preview geometry non-interactive: tools must not snap/constrain against ephemeral clones.
+                clone->m_selection_invisible = true;
                 clone->m_move_instead.clear();
                 clones.push_back(std::move(clone));
             }

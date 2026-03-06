@@ -67,6 +67,54 @@ PreferencesWindow::PreferencesWindow(Preferences &prefs) : Gtk::Window(), m_pref
     }
     {
         auto keys_box = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 0);
+#ifdef DUNE_SKETCHER_ONLY
+        auto radial_row = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 8);
+        radial_row->set_margin_start(12);
+        radial_row->set_margin_end(12);
+        radial_row->set_margin_top(12);
+        radial_row->set_margin_bottom(6);
+        auto radial_label = Gtk::make_managed<Gtk::Label>("Radial menu trigger");
+        radial_label->set_xalign(0);
+        radial_label->set_hexpand(true);
+        auto radial_combo = Gtk::make_managed<Gtk::ComboBoxText>();
+        radial_combo->append("shift_rmb", "Shift + Right Click");
+        radial_combo->append("shift_mmb", "Shift + Middle Click");
+        radial_combo->append("mouse_back", "Mouse Side Button (Back)");
+        radial_combo->append("mouse_forward", "Mouse Side Button (Forward)");
+        switch (m_preferences.editor.radial_menu_trigger) {
+        case EditorPreferences::RadialMenuTrigger::SHIFT_MMB:
+            radial_combo->set_active_id("shift_mmb");
+            break;
+        case EditorPreferences::RadialMenuTrigger::MOUSE_BACK:
+            radial_combo->set_active_id("mouse_back");
+            break;
+        case EditorPreferences::RadialMenuTrigger::MOUSE_FORWARD:
+            radial_combo->set_active_id("mouse_forward");
+            break;
+        case EditorPreferences::RadialMenuTrigger::SHIFT_RMB:
+        default:
+            radial_combo->set_active_id("shift_rmb");
+            break;
+        }
+        radial_combo->signal_changed().connect([this, radial_combo] {
+            if (!radial_combo)
+                return;
+            const auto id = radial_combo->get_active_id();
+            if (id == "shift_mmb")
+                m_preferences.editor.radial_menu_trigger = EditorPreferences::RadialMenuTrigger::SHIFT_MMB;
+            else if (id == "mouse_back")
+                m_preferences.editor.radial_menu_trigger = EditorPreferences::RadialMenuTrigger::MOUSE_BACK;
+            else if (id == "mouse_forward")
+                m_preferences.editor.radial_menu_trigger = EditorPreferences::RadialMenuTrigger::MOUSE_FORWARD;
+            else
+                m_preferences.editor.radial_menu_trigger = EditorPreferences::RadialMenuTrigger::SHIFT_RMB;
+            m_preferences.signal_changed().emit();
+        });
+        radial_row->append(*radial_label);
+        radial_row->append(*radial_combo);
+        keys_box->append(*radial_row);
+#endif
+
         m_keys_notebook = Gtk::make_managed<Gtk::Notebook>();
         m_keys_notebook->set_hexpand(true);
         m_keys_notebook->set_vexpand(true);

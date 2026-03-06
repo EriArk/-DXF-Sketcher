@@ -87,6 +87,19 @@ button.osd:disabled:backdrop {background-image: image(rgba(53, 53, 53, 0.7));}
 .selection-menu contents, .selection-menu arrow {background-color: alpha(@theme_bg_color, .75);}
 .sketch-sidebar-popover contents, .sketch-sidebar-popover arrow {background-color: alpha(@theme_bg_color, .9);}
 .sketch-grid-popover contents, .sketch-grid-popover arrow {background-color: alpha(@theme_bg_color, .92);}
+.sketch-quick-menu contents {
+  background-color: alpha(@theme_bg_color, 0.92);
+  border: 1px solid alpha(@borders, 0.8);
+  border-radius: 12px;
+  padding: 4px;
+}
+
+.sketch-quick-menu-button {
+  border-radius: 8px;
+  min-width: 44px;
+  min-height: 44px;
+  padding: 0;
+}
 
 .window-title-label {font-weight: bold;}
 .window-subtitle-label {font-size: 80%;}

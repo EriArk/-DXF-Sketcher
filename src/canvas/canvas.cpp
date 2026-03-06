@@ -729,6 +729,8 @@ std::optional<SelectableRef> Canvas::get_selectable_ref_for_vertex_ref(const Ver
 {
     if (m_vertex_to_selectable_map.contains(vref)) {
         auto sr = m_vertex_to_selectable_map.at(vref);
+        if (!m_selectable_to_vertex_map.contains(sr))
+            return {};
         if (!m_selection_filter || m_selection_filter->can_select(sr))
             return sr;
         else
@@ -799,6 +801,8 @@ void Canvas::update_hover_selection()
 
         if (auto sr = get_selectable_ref_for_pick(pick))
             m_hover_selection = *sr;
+        if (m_hover_selection.has_value() && !m_selectable_to_vertex_map.contains(m_hover_selection.value()))
+            m_hover_selection.reset();
 
 
         if (m_hover_selection != last_hover_selection) {
@@ -808,9 +812,12 @@ void Canvas::update_hover_selection()
             }
             clear_flags(mask);
             if (m_hover_selection.has_value()) {
-                for (const auto &vref : m_selectable_to_vertex_map.at(m_hover_selection.value())) {
-                    auto &flags = get_vertex_flags(vref);
-                    flags |= mask;
+                const auto it = m_selectable_to_vertex_map.find(m_hover_selection.value());
+                if (it != m_selectable_to_vertex_map.end()) {
+                    for (const auto &vref : it->second) {
+                        auto &flags = get_vertex_flags(vref);
+                        flags |= mask;
+                    }
                 }
             }
             m_push_flags =
@@ -1463,7 +1470,13 @@ void Canvas::clear_chunks(unsigned int first_chunk)
     for (auto it = m_vertex_to_selectable_map.cbegin(); it != m_vertex_to_selectable_map.cend() /* not hoisted */;
          /* no increment */) {
         if (it->first.chunk >= first_chunk) {
-            m_selectable_to_vertex_map.erase(it->second);
+            const auto sr = it->second;
+            if (auto sel_it = m_selectable_to_vertex_map.find(sr); sel_it != m_selectable_to_vertex_map.end()) {
+                auto &vrefs = sel_it->second;
+                vrefs.erase(std::remove(vrefs.begin(), vrefs.end(), it->first), vrefs.end());
+                if (vrefs.empty())
+                    m_selectable_to_vertex_map.erase(sel_it);
+            }
             it = m_vertex_to_selectable_map.erase(it);
         }
         else {

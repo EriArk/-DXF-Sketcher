@@ -7,6 +7,8 @@
 #include "document/constraint/constraint_points_coincident.hpp"
 #include "document/constraint/constraint_hv.hpp"
 #include "document/constraint/constraint_midpoint.hpp"
+#include "document/constraint/constraint_arc_line_tangent.hpp"
+#include "document/constraint/constraint_diameter_radius.hpp"
 #include "editor/editor_interface.hpp"
 #include "util/selection_util.hpp"
 #include "util/action_label.hpp"
@@ -226,18 +228,45 @@ ToolResponse ToolDrawRectangle::update(const ToolArgs &args)
                             continue;
 
                         if (const auto *arc_at_p1 = m_arcs.at(i)) {
+                            const auto arc_point = pick_arc_endpoint(*arc_at_p1, line->m_p1);
                             auto &constraint = add_constraint<ConstraintPointsCoincident>();
                             constraint.m_entity1 = {line->m_uuid, 1};
-                            constraint.m_entity2 = {arc_at_p1->m_uuid, pick_arc_endpoint(*arc_at_p1, line->m_p1)};
+                            constraint.m_entity2 = {arc_at_p1->m_uuid, arc_point};
                             constraint.m_wrkpl = m_wrkpl->m_uuid;
+
+                            auto &tangent = add_constraint<ConstraintArcLineTangent>();
+                            tangent.m_line = line->m_uuid;
+                            tangent.m_arc = {arc_at_p1->m_uuid, arc_point};
                         }
 
                         if (const auto *arc_at_p2 = m_arcs.at((i + 1) % m_arcs.size())) {
+                            const auto arc_point = pick_arc_endpoint(*arc_at_p2, line->m_p2);
                             auto &constraint = add_constraint<ConstraintPointsCoincident>();
                             constraint.m_entity1 = {line->m_uuid, 2};
-                            constraint.m_entity2 = {arc_at_p2->m_uuid, pick_arc_endpoint(*arc_at_p2, line->m_p2)};
+                            constraint.m_entity2 = {arc_at_p2->m_uuid, arc_point};
                             constraint.m_wrkpl = m_wrkpl->m_uuid;
+
+                            auto &tangent = add_constraint<ConstraintArcLineTangent>();
+                            tangent.m_line = line->m_uuid;
+                            tangent.m_arc = {arc_at_p2->m_uuid, arc_point};
                         }
+
+                        ConstraintHV *constraint = nullptr;
+                        if (i == 0 || i == 2)
+                            constraint = &add_constraint<ConstraintHorizontal>();
+                        else
+                            constraint = &add_constraint<ConstraintVertical>();
+                        constraint->m_entity1 = {line->m_uuid, 1};
+                        constraint->m_entity2 = {line->m_uuid, 2};
+                        constraint->m_wrkpl = m_wrkpl->m_uuid;
+                    }
+
+                    for (auto *arc : m_arcs) {
+                        if (!arc)
+                            continue;
+                        auto &radius = add_constraint<ConstraintRadius>();
+                        radius.m_entity = arc->m_uuid;
+                        radius.m_distance = m_round_radius;
                     }
                     return ToolResponse::commit();
                 }
