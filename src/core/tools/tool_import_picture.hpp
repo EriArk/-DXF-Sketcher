@@ -1,6 +1,8 @@
 #include "tool_common.hpp"
 #include "tool_helper_constrain.hpp"
 #include "in_tool_action/in_tool_action.hpp"
+#include "dialogs/image_import_dialog.hpp"
+#include <memory>
 
 namespace dune3d {
 
@@ -31,6 +33,7 @@ private:
     EntityPicture *m_pic = nullptr;
     const EntityWorkplane *m_wrkpl = nullptr;
     void add_picture(std::shared_ptr<const PictureData> data);
+    std::unique_ptr<ImageImportDialog> m_image_import_dialog;
 
     void update_tip();
     bool m_constrain = true;

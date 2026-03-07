@@ -4,6 +4,7 @@
 #include "face.hpp"
 #include <glm/gtx/quaternion.hpp>
 #include <memory>
+#include <cstdint>
 
 namespace dune3d {
 
@@ -65,6 +66,8 @@ public:
     virtual void set_vertex_construction(bool c) = 0;
     virtual void set_no_points(bool c) = 0;
     virtual void set_line_style(LineStyle style) = 0;
+    virtual void set_line_wide(bool wide) = 0;
+    virtual void set_line_layer_color_index(uint8_t index) = 0;
     virtual void set_transform(const glm::mat4 &transform) = 0;
 
     virtual void set_override_selectable(const SelectableRef &sr) = 0;

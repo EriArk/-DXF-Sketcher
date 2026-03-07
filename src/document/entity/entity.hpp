@@ -76,6 +76,7 @@ public:
     std::set<ConstraintType> get_constraint_types(const Document &doc) const;
 
     UUID m_group;
+    UUID m_layer;
     std::string m_name;
     virtual bool has_name() const
     {

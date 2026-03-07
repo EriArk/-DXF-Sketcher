@@ -64,6 +64,7 @@
 #include <limits>
 #include <memory>
 #include <fstream>
+#include <cstdint>
 #include <glm/gtx/quaternion.hpp>
 
 namespace dune3d {
@@ -240,6 +241,80 @@ std::string format_text_font_label(const Pango::FontDescription &desc)
     if (family.empty())
         family = desc.to_string();
     return family;
+}
+
+const std::array<std::pair<int, const char *>, 12> kSketchLayerColorPalette = {{
+        {1, "#e53935"},  // red
+        {2, "#fbc02d"},  // yellow
+        {3, "#43a047"},  // green
+        {4, "#00acc1"},  // cyan
+        {5, "#1e88e5"},  // blue
+        {6, "#8e24aa"},  // magenta
+        {7, "#111111"},  // black
+        {30, "#f57c00"}, // orange
+        {140, "#6d4c41"},
+        {171, "#5e35b1"},
+        {210, "#546e7a"},
+        {250, "#9e9e9e"},
+}};
+
+const char *process_icon_name(GroupSketch::SketchLayerProcess process)
+{
+    switch (process) {
+    case GroupSketch::SketchLayerProcess::LINE_ENGRAVING:
+        return "action-draw-contour-symbolic";
+    case GroupSketch::SketchLayerProcess::FILL_ENGRAVING:
+        return "tool-brush-symbolic";
+    case GroupSketch::SketchLayerProcess::LINE_CUTTING:
+        return "edit-cut-symbolic";
+    case GroupSketch::SketchLayerProcess::IMAGE_ENGRAVING:
+        return "image-x-generic-symbolic";
+    default:
+        return "applications-graphics-symbolic";
+    }
+}
+
+const char *process_label(GroupSketch::SketchLayerProcess process)
+{
+    switch (process) {
+    case GroupSketch::SketchLayerProcess::LINE_ENGRAVING:
+        return "Line engraving";
+    case GroupSketch::SketchLayerProcess::FILL_ENGRAVING:
+        return "Fill engraving";
+    case GroupSketch::SketchLayerProcess::LINE_CUTTING:
+        return "Line cutting";
+    case GroupSketch::SketchLayerProcess::IMAGE_ENGRAVING:
+        return "Image engraving";
+    default:
+        return "Layer process";
+    }
+}
+
+std::string aci_color_hex(int aci)
+{
+    for (const auto &[palette_aci, hex] : kSketchLayerColorPalette) {
+        if (palette_aci == aci)
+            return hex;
+    }
+    return "#111111";
+}
+
+uint8_t aci_layer_color_slot(int aci)
+{
+    for (size_t i = 0; i < kSketchLayerColorPalette.size(); i++) {
+        if (kSketchLayerColorPalette.at(i).first == aci)
+            return static_cast<uint8_t>(i + 1);
+    }
+    return 7; // fallback to black-ish glow
+}
+
+double wrap_angle_0_2pi(double value)
+{
+    while (value < 0)
+        value += 2 * M_PI;
+    while (value >= 2 * M_PI)
+        value -= 2 * M_PI;
+    return value;
 }
 
 const UUID &selection_transform_rotate_uuid()
@@ -752,8 +827,12 @@ void Editor::init()
         if (!m_core.has_documents()) {
             m_sticky_draw_tool = ToolID::NONE;
             set_symmetry_enabled(false, false);
+            m_layers_mode_enabled = false;
+            m_cup_template_enabled = false;
+            m_active_layer_by_group.clear();
         }
 #endif
+        rebuild_layers_popover();
         update_sketcher_toolbar_button_states();
     });
 
@@ -806,6 +885,15 @@ void Editor::init()
         markers_row->append(*m_selection_markers_switch);
         box->append(*markers_row);
 
+        auto snap_row = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 8);
+        auto snap_label = Gtk::make_managed<Gtk::Label>("Snap");
+        snap_label->set_hexpand(true);
+        snap_label->set_xalign(0);
+        m_selection_snap_switch = Gtk::make_managed<Gtk::Switch>();
+        snap_row->append(*snap_label);
+        snap_row->append(*m_selection_snap_switch);
+        box->append(*snap_row);
+
         m_selection_transform_switch->property_active().signal_changed().connect([this] {
             if (m_updating_selection_mode_popover)
                 return;
@@ -824,9 +912,16 @@ void Editor::init()
                 end_selection_transform_drag();
             canvas_update_keep_selection();
         });
+        m_selection_snap_switch->property_active().signal_changed().connect([this] {
+            if (m_updating_selection_mode_popover)
+                return;
+            m_selection_snap_enabled = m_selection_snap_switch->get_active();
+        });
     }
     sync_selection_mode_popover();
     m_win.add_action_button(*m_selection_mode_button);
+    init_layers_popover();
+    init_cup_template_popover();
 #endif
 
     auto add_sketch_toolbar_divider = [this]() {
@@ -878,6 +973,13 @@ void Editor::init()
         button->add_css_class("sketch-toolbar-button");
         button->signal_clicked().connect(sigc::mem_fun(*this, &Editor::on_trace_image_button));
         m_win.add_action_button(*button);
+    }
+    if (m_layers_mode_button || m_cup_template_button)
+        add_sketch_toolbar_divider();
+    if (m_cup_template_button)
+        m_win.add_action_button(*m_cup_template_button);
+    if (m_layers_mode_button) {
+        m_win.add_action_button(*m_layers_mode_button);
     }
 #endif
 
@@ -1539,12 +1641,790 @@ void Editor::sync_selection_mode_popover()
     if (!m_selection_mode_button)
         return;
     m_selection_mode_button->set_tooltip_text("Selection tool (Middle mouse)");
-    if (!m_selection_transform_switch || !m_selection_markers_switch)
+    if (!m_selection_transform_switch || !m_selection_markers_switch || !m_selection_snap_switch)
         return;
     m_updating_selection_mode_popover = true;
     m_selection_transform_switch->set_active(m_selection_transform_enabled);
     m_selection_markers_switch->set_active(m_show_technical_markers);
+    m_selection_snap_switch->set_active(m_selection_snap_enabled);
     m_updating_selection_mode_popover = false;
+#endif
+}
+
+void Editor::init_layers_popover()
+{
+#ifdef DUNE_SKETCHER_ONLY
+    m_layers_mode_button = Gtk::make_managed<Gtk::Button>();
+    m_layers_mode_button->set_icon_name("view-list-bullet-symbolic");
+    m_layers_mode_button->set_tooltip_text("Layers");
+    m_layers_mode_button->set_has_frame(true);
+    m_layers_mode_button->add_css_class("sketch-toolbar-button");
+
+    m_layers_popover = Gtk::make_managed<Gtk::Popover>();
+    m_layers_popover->set_has_arrow(true);
+    m_layers_popover->set_autohide(false);
+    m_layers_popover->add_css_class("sketch-grid-popover");
+    m_layers_popover->set_parent(*m_layers_mode_button);
+    m_layers_popover->set_size_request(sketch_popover_total_width, -1);
+    install_hover_popover(*m_layers_mode_button, *m_layers_popover, [this] { return !m_primary_button_pressed; },
+                          [this] { return m_right_click_popovers_only; });
+    m_layers_popover->signal_show().connect([this] { rebuild_layers_popover(); });
+
+    auto root = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 8);
+    root->set_margin_start(12);
+    root->set_margin_end(12);
+    root->set_margin_top(12);
+    root->set_margin_bottom(12);
+    root->set_size_request(sketch_popover_content_width, -1);
+    m_layers_popover->set_child(*root);
+
+    m_layers_list_box = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 4);
+    root->append(*m_layers_list_box);
+
+    auto controls_root = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 6);
+    controls_root->set_margin_top(4);
+    root->append(*controls_root);
+
+    auto add_remove_row = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 0);
+    add_remove_row->add_css_class("linked");
+    add_remove_row->set_hexpand(true);
+    controls_root->append(*add_remove_row);
+
+    auto add_button = Gtk::make_managed<Gtk::Button>();
+    add_button->set_icon_name("list-add-symbolic");
+    add_button->set_tooltip_text("Add layer");
+    add_button->set_has_frame(true);
+    add_button->set_focusable(false);
+    add_button->set_hexpand(true);
+    add_button->set_halign(Gtk::Align::FILL);
+    add_remove_row->append(*add_button);
+
+    auto remove_button = Gtk::make_managed<Gtk::Button>();
+    remove_button->set_icon_name("list-remove-symbolic");
+    remove_button->set_tooltip_text("Remove layer");
+    remove_button->set_has_frame(true);
+    remove_button->set_focusable(false);
+    remove_button->set_hexpand(true);
+    remove_button->set_halign(Gtk::Align::FILL);
+    add_remove_row->append(*remove_button);
+
+    auto reorder_row = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 0);
+    reorder_row->add_css_class("linked");
+    reorder_row->set_hexpand(true);
+    controls_root->append(*reorder_row);
+
+    auto move_up_button = Gtk::make_managed<Gtk::Button>();
+    move_up_button->set_icon_name("go-up-symbolic");
+    move_up_button->set_tooltip_text("Move layer up");
+    move_up_button->set_has_frame(true);
+    move_up_button->set_focusable(false);
+    move_up_button->set_hexpand(true);
+    move_up_button->set_halign(Gtk::Align::FILL);
+    reorder_row->append(*move_up_button);
+
+    auto move_down_button = Gtk::make_managed<Gtk::Button>();
+    move_down_button->set_icon_name("go-down-symbolic");
+    move_down_button->set_tooltip_text("Move layer down");
+    move_down_button->set_has_frame(true);
+    move_down_button->set_focusable(false);
+    move_down_button->set_hexpand(true);
+    move_down_button->set_halign(Gtk::Align::FILL);
+    reorder_row->append(*move_down_button);
+
+    auto commit_layer_change = [this](const std::string &message) {
+        m_core.set_needs_save();
+        m_core.rebuild(message);
+        canvas_update_keep_selection();
+        update_action_sensitivity();
+        rebuild_layers_popover();
+        refresh_layer_edit_popover();
+    };
+
+    add_button->signal_clicked().connect([this, commit_layer_change] {
+        if (!m_core.has_documents())
+            return;
+        if (m_core.tool_is_active() && !force_end_tool())
+            return;
+        auto &group = m_core.get_current_document().get_group(m_core.get_current_group());
+        auto *sketch = dynamic_cast<GroupSketch *>(&group);
+        if (!sketch)
+            return;
+        const auto new_layer = sketch->add_layer();
+        select_active_layer_for_current_group(new_layer);
+        commit_layer_change("add sketch layer");
+    });
+
+    remove_button->signal_clicked().connect([this, commit_layer_change] {
+        if (!m_core.has_documents())
+            return;
+        if (m_core.tool_is_active() && !force_end_tool())
+            return;
+        auto &doc = m_core.get_current_document();
+        auto &group = doc.get_group(m_core.get_current_group());
+        auto *sketch = dynamic_cast<GroupSketch *>(&group);
+        if (!sketch)
+            return;
+        ensure_current_group_layers_initialized();
+        const auto active_layer = get_active_layer_for_current_group();
+        UUID fallback_layer;
+        if (!sketch->remove_layer(active_layer, fallback_layer))
+            return;
+        for (auto &[uu, en] : doc.m_entities) {
+            if (en->m_group != group.m_uuid)
+                continue;
+            if (en->m_layer == active_layer)
+                en->m_layer = fallback_layer;
+        }
+        select_active_layer_for_current_group(fallback_layer);
+        commit_layer_change("remove sketch layer");
+    });
+
+    move_up_button->signal_clicked().connect([this, commit_layer_change] {
+        if (!m_core.has_documents())
+            return;
+        if (m_core.tool_is_active() && !force_end_tool())
+            return;
+        auto &group = m_core.get_current_document().get_group(m_core.get_current_group());
+        auto *sketch = dynamic_cast<GroupSketch *>(&group);
+        if (!sketch)
+            return;
+        const auto active_layer = get_active_layer_for_current_group();
+        if (!sketch->move_layer(active_layer, -1))
+            return;
+        commit_layer_change("reorder sketch layer");
+    });
+
+    move_down_button->signal_clicked().connect([this, commit_layer_change] {
+        if (!m_core.has_documents())
+            return;
+        if (m_core.tool_is_active() && !force_end_tool())
+            return;
+        auto &group = m_core.get_current_document().get_group(m_core.get_current_group());
+        auto *sketch = dynamic_cast<GroupSketch *>(&group);
+        if (!sketch)
+            return;
+        const auto active_layer = get_active_layer_for_current_group();
+        if (!sketch->move_layer(active_layer, 1))
+            return;
+        commit_layer_change("reorder sketch layer");
+    });
+
+    m_layer_edit_popover = Gtk::make_managed<Gtk::Popover>();
+    m_layer_edit_popover->set_has_arrow(true);
+    m_layer_edit_popover->set_autohide(true);
+    m_layer_edit_popover->add_css_class("sketch-grid-popover");
+    m_layer_edit_popover->set_parent(*m_layers_mode_button);
+    m_layer_edit_popover->set_size_request(sketch_popover_total_width, -1);
+
+    auto edit_root = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 8);
+    edit_root->set_margin_start(12);
+    edit_root->set_margin_end(12);
+    edit_root->set_margin_top(12);
+    edit_root->set_margin_bottom(12);
+    edit_root->set_size_request(sketch_popover_content_width, -1);
+    m_layer_edit_popover->set_child(*edit_root);
+
+    auto name_label = Gtk::make_managed<Gtk::Label>("Layer name");
+    name_label->set_xalign(0);
+    edit_root->append(*name_label);
+
+    m_layer_edit_name_entry = Gtk::make_managed<Gtk::Entry>();
+    edit_root->append(*m_layer_edit_name_entry);
+
+    auto icon_row = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 8);
+    auto icon_label = Gtk::make_managed<Gtk::Label>("Show process icon");
+    icon_label->set_xalign(0);
+    icon_label->set_hexpand(true);
+    m_layer_edit_icon_switch = Gtk::make_managed<Gtk::Switch>();
+    icon_row->append(*icon_label);
+    icon_row->append(*m_layer_edit_icon_switch);
+    edit_root->append(*icon_row);
+
+    m_layer_edit_process_label = Gtk::make_managed<Gtk::Label>("Process");
+    m_layer_edit_process_label->set_xalign(0);
+    edit_root->append(*m_layer_edit_process_label);
+
+    m_layer_edit_process_box = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 0);
+    m_layer_edit_process_box->add_css_class("linked");
+    edit_root->append(*m_layer_edit_process_box);
+
+    const std::array<GroupSketch::SketchLayerProcess, 4> processes = {
+            GroupSketch::SketchLayerProcess::LINE_ENGRAVING,
+            GroupSketch::SketchLayerProcess::LINE_CUTTING,
+            GroupSketch::SketchLayerProcess::FILL_ENGRAVING,
+            GroupSketch::SketchLayerProcess::IMAGE_ENGRAVING,
+    };
+
+    for (const auto process : processes) {
+        auto process_button = Gtk::make_managed<Gtk::Button>();
+        process_button->set_icon_name(process_icon_name(process));
+        process_button->set_has_frame(true);
+        process_button->set_tooltip_text(process_label(process));
+        process_button->set_size_request(44, 40);
+        process_button->set_hexpand(true);
+        process_button->set_halign(Gtk::Align::FILL);
+        m_layer_edit_process_buttons[process] = process_button;
+        process_button->signal_clicked().connect([this, process, commit_layer_change] {
+            if (!m_core.has_documents() || !m_layer_editing_uuid)
+                return;
+            auto &group_now = m_core.get_current_document().get_group(m_core.get_current_group());
+            auto *sketch_now = dynamic_cast<GroupSketch *>(&group_now);
+            if (!sketch_now)
+                return;
+            auto *layer_now = sketch_now->get_layer_ptr(m_layer_editing_uuid);
+            if (!layer_now || layer_now->m_process == process)
+                return;
+            layer_now->m_process = process;
+            commit_layer_change("set sketch layer process");
+        });
+        m_layer_edit_process_box->append(*process_button);
+    }
+
+    auto color_title = Gtk::make_managed<Gtk::Label>("Color");
+    color_title->set_xalign(0);
+    edit_root->append(*color_title);
+
+    auto color_grid = Gtk::make_managed<Gtk::Grid>();
+    color_grid->set_row_spacing(4);
+    color_grid->set_column_spacing(4);
+    edit_root->append(*color_grid);
+
+    int palette_idx = 0;
+    for (const auto &[aci, hex] : kSketchLayerColorPalette) {
+        auto color_button = Gtk::make_managed<Gtk::Button>();
+        color_button->set_has_frame(true);
+        color_button->set_tooltip_text("ACI " + std::to_string(aci));
+        auto color_swatch = Gtk::make_managed<Gtk::Label>();
+        color_swatch->set_markup("<span foreground=\"" + std::string(hex) + "\">■</span>");
+        color_button->set_child(*color_swatch);
+        m_layer_edit_color_buttons[aci] = color_button;
+        color_button->signal_clicked().connect([this, aci, commit_layer_change] {
+            if (!m_core.has_documents() || !m_layer_editing_uuid)
+                return;
+            auto &group_now = m_core.get_current_document().get_group(m_core.get_current_group());
+            auto *sketch_now = dynamic_cast<GroupSketch *>(&group_now);
+            if (!sketch_now)
+                return;
+            auto *layer_now = sketch_now->get_layer_ptr(m_layer_editing_uuid);
+            if (!layer_now || layer_now->m_color == aci)
+                return;
+            layer_now->m_color = aci;
+            commit_layer_change("set sketch layer color");
+        });
+        const int column = palette_idx % 6;
+        const int row_idx = palette_idx / 6;
+        color_grid->attach(*color_button, column, row_idx);
+        palette_idx++;
+    }
+
+    auto apply_name = [this, commit_layer_change] {
+        if (m_updating_layer_edit_popover)
+            return;
+        if (!m_core.has_documents() || !m_layer_editing_uuid || !m_layer_edit_name_entry)
+            return;
+        auto &group_now = m_core.get_current_document().get_group(m_core.get_current_group());
+        auto *sketch_now = dynamic_cast<GroupSketch *>(&group_now);
+        if (!sketch_now)
+            return;
+        auto *layer_now = sketch_now->get_layer_ptr(m_layer_editing_uuid);
+        if (!layer_now)
+            return;
+        const auto new_name = m_layer_edit_name_entry->get_text();
+        if (new_name.empty() || new_name == layer_now->m_name)
+            return;
+        layer_now->m_name = new_name;
+        commit_layer_change("rename sketch layer");
+    };
+
+    m_layer_edit_name_entry->signal_activate().connect(apply_name);
+    m_layer_edit_name_entry->property_has_focus().signal_changed().connect([this, apply_name] {
+        if (!m_layer_edit_name_entry->has_focus())
+            apply_name();
+    });
+
+    m_layer_edit_icon_switch->property_active().signal_changed().connect([this, commit_layer_change] {
+        if (m_updating_layer_edit_popover)
+            return;
+        if (!m_core.has_documents() || !m_layer_editing_uuid || !m_layer_edit_icon_switch)
+            return;
+        auto &group_now = m_core.get_current_document().get_group(m_core.get_current_group());
+        auto *sketch_now = dynamic_cast<GroupSketch *>(&group_now);
+        if (!sketch_now)
+            return;
+        auto *layer_now = sketch_now->get_layer_ptr(m_layer_editing_uuid);
+        if (!layer_now)
+            return;
+        const bool show_icon = m_layer_edit_icon_switch->get_active();
+        if (layer_now->m_show_process_icon == show_icon)
+            return;
+        layer_now->m_show_process_icon = show_icon;
+        commit_layer_change("toggle sketch layer process icon");
+    });
+
+    m_layers_mode_button->signal_clicked().connect([this] {
+        m_layers_mode_enabled = !m_layers_mode_enabled;
+        if (m_layers_mode_enabled)
+            ensure_current_group_layers_initialized();
+        rebuild_layers_popover();
+        update_sketcher_toolbar_button_states();
+        if (!m_layers_popover)
+            return;
+        if (m_layers_popover->get_visible()) {
+            m_layers_popover->popdown();
+            if (m_layer_edit_popover && m_layer_edit_popover->get_visible())
+                m_layer_edit_popover->popdown();
+            if (g_active_hover_popover == m_layers_popover)
+                g_active_hover_popover = nullptr;
+        }
+        else {
+            m_layers_popover->popup();
+            g_active_hover_popover = m_layers_popover;
+        }
+        canvas_update_keep_selection();
+    });
+#endif
+}
+
+void Editor::init_cup_template_popover()
+{
+#ifdef DUNE_SKETCHER_ONLY
+    m_cup_template_button = Gtk::make_managed<Gtk::Button>();
+    m_cup_template_button->set_icon_name("view-column-symbolic");
+    m_cup_template_button->set_tooltip_text("Cup template");
+    m_cup_template_button->set_has_frame(true);
+    m_cup_template_button->set_focusable(false);
+    m_cup_template_button->add_css_class("sketch-toolbar-button");
+
+    m_cup_template_popover = Gtk::make_managed<Gtk::Popover>();
+    m_cup_template_popover->set_has_arrow(true);
+    m_cup_template_popover->set_autohide(false);
+    m_cup_template_popover->add_css_class("sketch-grid-popover");
+    m_cup_template_popover->set_parent(*m_cup_template_button);
+    m_cup_template_popover->set_size_request(sketch_popover_total_width, -1);
+    install_hover_popover(*m_cup_template_button, *m_cup_template_popover, [this] { return !m_primary_button_pressed; },
+                          [this] { return m_right_click_popovers_only; });
+
+    auto root = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 8);
+    root->set_margin_start(12);
+    root->set_margin_end(12);
+    root->set_margin_top(12);
+    root->set_margin_bottom(12);
+    root->set_size_request(sketch_popover_content_width, -1);
+    m_cup_template_popover->set_child(*root);
+
+    auto make_dimension_row = [root](const char *title, Gtk::SpinButton *&spin, int digits = 2) {
+        auto row = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 6);
+        auto label = Gtk::make_managed<Gtk::Label>(title);
+        label->set_hexpand(true);
+        label->set_xalign(0);
+        spin = Gtk::make_managed<Gtk::SpinButton>();
+        spin->set_digits(digits);
+        spin->set_numeric(true);
+        spin->set_width_chars(7);
+        spin->set_halign(Gtk::Align::END);
+        auto unit = Gtk::make_managed<Gtk::Label>("mm");
+        unit->add_css_class("dim-label");
+        row->append(*label);
+        row->append(*spin);
+        row->append(*unit);
+        root->append(*row);
+    };
+
+    make_dimension_row("Height", m_cup_template_height_spin, 2);
+    make_dimension_row("Circumference", m_cup_template_circumference_spin, 2);
+    make_dimension_row("Diameter", m_cup_template_diameter_spin, 2);
+
+    auto segments_row = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 6);
+    auto segments_label = Gtk::make_managed<Gtk::Label>("Segments");
+    segments_label->set_hexpand(true);
+    segments_label->set_xalign(0);
+    m_cup_template_segments_spin = Gtk::make_managed<Gtk::SpinButton>();
+    m_cup_template_segments_spin->set_digits(0);
+    m_cup_template_segments_spin->set_numeric(true);
+    m_cup_template_segments_spin->set_width_chars(4);
+    m_cup_template_segments_spin->set_halign(Gtk::Align::END);
+    segments_row->append(*segments_label);
+    segments_row->append(*m_cup_template_segments_spin);
+    root->append(*segments_row);
+
+    m_cup_template_height_spin->set_range(1.0, 2000.0);
+    m_cup_template_height_spin->set_increments(1.0, 10.0);
+    m_cup_template_circumference_spin->set_range(1.0, 4000.0);
+    m_cup_template_circumference_spin->set_increments(1.0, 10.0);
+    m_cup_template_diameter_spin->set_range(0.1, 1200.0);
+    m_cup_template_diameter_spin->set_increments(0.5, 10.0);
+    m_cup_template_segments_spin->set_range(1, 12);
+    m_cup_template_segments_spin->set_increments(1, 1);
+
+    m_updating_cup_template_popover = true;
+    m_cup_template_height_spin->set_value(m_cup_template_height_mm);
+    m_cup_template_circumference_spin->set_value(m_cup_template_circumference_mm);
+    m_cup_template_diameter_spin->set_value(m_cup_template_circumference_mm / M_PI);
+    m_cup_template_segments_spin->set_value(m_cup_template_segments);
+    m_updating_cup_template_popover = false;
+
+    m_cup_template_height_spin->signal_value_changed().connect([this] {
+        if (m_updating_cup_template_popover)
+            return;
+        m_cup_template_height_mm = std::max(1.0, m_cup_template_height_spin->get_value());
+        canvas_update_keep_selection();
+    });
+
+    m_cup_template_circumference_spin->signal_value_changed().connect([this] {
+        if (m_updating_cup_template_popover)
+            return;
+        m_cup_template_circumference_mm = std::max(1.0, m_cup_template_circumference_spin->get_value());
+        m_updating_cup_template_popover = true;
+        m_cup_template_diameter_spin->set_value(m_cup_template_circumference_mm / M_PI);
+        m_updating_cup_template_popover = false;
+        canvas_update_keep_selection();
+    });
+
+    m_cup_template_diameter_spin->signal_value_changed().connect([this] {
+        if (m_updating_cup_template_popover)
+            return;
+        const auto diameter = std::max(0.1, m_cup_template_diameter_spin->get_value());
+        m_cup_template_circumference_mm = diameter * M_PI;
+        m_updating_cup_template_popover = true;
+        m_cup_template_circumference_spin->set_value(m_cup_template_circumference_mm);
+        m_updating_cup_template_popover = false;
+        canvas_update_keep_selection();
+    });
+
+    m_cup_template_segments_spin->signal_value_changed().connect([this] {
+        if (m_updating_cup_template_popover)
+            return;
+        m_cup_template_segments = std::clamp(static_cast<int>(std::lround(m_cup_template_segments_spin->get_value())), 1, 12);
+        canvas_update_keep_selection();
+    });
+
+    m_cup_template_button->signal_clicked().connect([this] {
+        m_cup_template_enabled = !m_cup_template_enabled;
+        update_sketcher_toolbar_button_states();
+        canvas_update_keep_selection();
+        if (!m_cup_template_popover)
+            return;
+        if (m_cup_template_popover->get_visible()) {
+            m_cup_template_popover->popdown();
+            if (g_active_hover_popover == m_cup_template_popover)
+                g_active_hover_popover = nullptr;
+        }
+        else {
+            m_cup_template_popover->popup();
+            g_active_hover_popover = m_cup_template_popover;
+        }
+    });
+#endif
+}
+
+void Editor::ensure_current_group_layers_initialized()
+{
+#ifdef DUNE_SKETCHER_ONLY
+    if (!m_core.has_documents())
+        return;
+    auto &group = m_core.get_current_document().get_group(m_core.get_current_group());
+    auto *sketch = dynamic_cast<GroupSketch *>(&group);
+    if (!sketch)
+        return;
+    sketch->ensure_default_layers();
+    auto active_layer = get_active_layer_for_current_group();
+    if (!active_layer || !sketch->get_layer_ptr(active_layer)) {
+        active_layer = sketch->get_default_layer_uuid();
+        if (active_layer)
+            m_active_layer_by_group[group.m_uuid] = active_layer;
+    }
+#endif
+}
+
+void Editor::open_layer_edit_popover(const UUID &layer_uu)
+{
+#ifdef DUNE_SKETCHER_ONLY
+    if (!m_layer_edit_popover)
+        return;
+    const bool same_layer = (m_layer_editing_uuid == layer_uu);
+    const bool was_visible = m_layer_edit_popover->get_visible();
+    m_layer_editing_uuid = layer_uu;
+    refresh_layer_edit_popover();
+    if (was_visible && same_layer)
+        m_layer_edit_popover->popdown();
+    else
+        m_layer_edit_popover->popup();
+#else
+    (void)layer_uu;
+#endif
+}
+
+void Editor::refresh_layer_edit_popover()
+{
+#ifdef DUNE_SKETCHER_ONLY
+    if (!m_layer_edit_popover || !m_layer_edit_name_entry || !m_layer_edit_icon_switch || !m_layer_edit_process_label
+        || !m_layer_edit_process_box)
+        return;
+    if (!m_core.has_documents() || !m_layer_editing_uuid) {
+        if (m_layer_edit_popover->get_visible())
+            m_layer_edit_popover->popdown();
+        return;
+    }
+
+    auto &group = m_core.get_current_document().get_group(m_core.get_current_group());
+    auto *sketch = dynamic_cast<GroupSketch *>(&group);
+    if (!sketch) {
+        if (m_layer_edit_popover->get_visible())
+            m_layer_edit_popover->popdown();
+        return;
+    }
+    auto *layer = sketch->get_layer_ptr(m_layer_editing_uuid);
+    if (!layer) {
+        if (m_layer_edit_popover->get_visible())
+            m_layer_edit_popover->popdown();
+        return;
+    }
+
+    m_updating_layer_edit_popover = true;
+    m_layer_edit_name_entry->set_text(layer->m_name);
+    m_layer_edit_icon_switch->set_active(layer->m_show_process_icon);
+    m_layer_edit_process_label->set_visible(layer->m_show_process_icon);
+    m_layer_edit_process_box->set_visible(layer->m_show_process_icon);
+
+    for (const auto &[process, button] : m_layer_edit_process_buttons) {
+        if (layer->m_process == process)
+            button->add_css_class("suggested-action");
+        else
+            button->remove_css_class("suggested-action");
+    }
+
+    for (const auto &[aci, button] : m_layer_edit_color_buttons) {
+        if (layer->m_color == aci)
+            button->add_css_class("suggested-action");
+        else
+            button->remove_css_class("suggested-action");
+    }
+    m_updating_layer_edit_popover = false;
+#endif
+}
+
+void Editor::select_active_layer_for_current_group(const UUID &layer_uu)
+{
+#ifdef DUNE_SKETCHER_ONLY
+    if (!m_core.has_documents())
+        return;
+    auto &group = m_core.get_current_document().get_group(m_core.get_current_group());
+    auto *sketch = dynamic_cast<GroupSketch *>(&group);
+    if (!sketch)
+        return;
+    if (!sketch->get_layer_ptr(layer_uu))
+        return;
+    m_active_layer_by_group[group.m_uuid] = layer_uu;
+#else
+    (void)layer_uu;
+#endif
+}
+
+UUID Editor::get_active_layer_for_current_group() const
+{
+#ifdef DUNE_SKETCHER_ONLY
+    if (!m_core.has_documents())
+        return {};
+    const auto group_uu = m_core.get_current_group();
+    if (const auto it = m_active_layer_by_group.find(group_uu); it != m_active_layer_by_group.end())
+        return it->second;
+    return {};
+#else
+    return {};
+#endif
+}
+
+void Editor::move_selection_to_layer(const UUID &layer_uu)
+{
+#ifdef DUNE_SKETCHER_ONLY
+    if (!m_core.has_documents())
+        return;
+    if (m_core.tool_is_active())
+        return;
+    auto &doc = m_core.get_current_document();
+    auto &group = doc.get_group(m_core.get_current_group());
+    auto *sketch = dynamic_cast<GroupSketch *>(&group);
+    if (!sketch)
+        return;
+    if (!sketch->get_layer_ptr(layer_uu))
+        return;
+
+    bool changed = false;
+    for (const auto &sr : entities_from_selection(get_canvas().get_selection())) {
+        if (sr.type != SelectableRef::Type::ENTITY)
+            continue;
+        auto *en = doc.get_entity_ptr(sr.item);
+        if (!en)
+            continue;
+        if (en->m_group != group.m_uuid)
+            continue;
+        if (en->m_layer == layer_uu)
+            continue;
+        en->m_layer = layer_uu;
+        changed = true;
+    }
+
+    if (!changed)
+        return;
+    m_core.set_needs_save();
+    m_core.rebuild("move entities to sketch layer");
+    canvas_update_keep_selection();
+    update_action_sensitivity();
+#else
+    (void)layer_uu;
+#endif
+}
+
+void Editor::rebuild_layers_popover()
+{
+#ifdef DUNE_SKETCHER_ONLY
+    if (!m_layers_list_box)
+        return;
+
+    while (auto *child = m_layers_list_box->get_first_child())
+        m_layers_list_box->remove(*child);
+
+    if (!m_core.has_documents()) {
+        auto label = Gtk::make_managed<Gtk::Label>("No active document");
+        label->add_css_class("dim-label");
+        label->set_xalign(0);
+        m_layers_list_box->append(*label);
+        refresh_layer_edit_popover();
+        return;
+    }
+
+    auto &group = m_core.get_current_document().get_group(m_core.get_current_group());
+    auto *sketch = dynamic_cast<GroupSketch *>(&group);
+    if (!sketch) {
+        auto label = Gtk::make_managed<Gtk::Label>("Layers are available in sketch groups");
+        label->add_css_class("dim-label");
+        label->set_xalign(0);
+        m_layers_list_box->append(*label);
+        refresh_layer_edit_popover();
+        return;
+    }
+
+    ensure_current_group_layers_initialized();
+    const auto active_layer = get_active_layer_for_current_group();
+
+    for (const auto &layer : sketch->m_layers) {
+        auto row = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 6);
+        row->set_hexpand(true);
+        m_layers_list_box->append(*row);
+
+        auto select_button = Gtk::make_managed<Gtk::Button>();
+        select_button->set_has_frame(true);
+        select_button->set_focusable(false);
+        select_button->set_hexpand(true);
+        select_button->set_halign(Gtk::Align::FILL);
+        select_button->set_tooltip_text(layer.m_show_process_icon ? process_label(layer.m_process) : "Layer");
+
+        auto select_content = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 6);
+        if (layer.m_show_process_icon) {
+            auto process_image = Gtk::make_managed<Gtk::Image>();
+            process_image->set_from_icon_name(process_icon_name(layer.m_process));
+            process_image->set_icon_size(Gtk::IconSize::NORMAL);
+            select_content->append(*process_image);
+        }
+
+        auto layer_name = Gtk::make_managed<Gtk::Label>(layer.m_name);
+        layer_name->set_xalign(0);
+        layer_name->set_hexpand(true);
+        select_content->append(*layer_name);
+
+        auto color_label = Gtk::make_managed<Gtk::Label>();
+        color_label->set_markup("<span foreground=\"" + aci_color_hex(layer.m_color) + "\">■</span>");
+        color_label->set_tooltip_text("Color ACI " + std::to_string(layer.m_color));
+        select_content->append(*color_label);
+
+        select_button->set_child(*select_content);
+        if (m_layers_mode_enabled && layer.m_uuid == active_layer)
+            select_button->add_css_class("suggested-action");
+        row->append(*select_button);
+
+        auto edit_button = Gtk::make_managed<Gtk::Button>();
+        edit_button->set_icon_name("document-edit-symbolic");
+        edit_button->set_has_frame(true);
+        edit_button->set_focusable(false);
+        edit_button->set_tooltip_text("Edit layer");
+        row->append(*edit_button);
+
+        const auto layer_uu = layer.m_uuid;
+        select_button->signal_clicked().connect([this, layer_uu] {
+            select_active_layer_for_current_group(layer_uu);
+            move_selection_to_layer(layer_uu);
+            rebuild_layers_popover();
+        });
+
+        edit_button->signal_clicked().connect([this, layer_uu] { open_layer_edit_popover(layer_uu); });
+    }
+    refresh_layer_edit_popover();
+#endif
+}
+
+void Editor::capture_layer_entities_before_tool()
+{
+#ifdef DUNE_SKETCHER_ONLY
+    m_layers_pre_tool_entities.clear();
+    m_layers_pre_tool_entities_captured = false;
+    m_layer_capture_group = UUID();
+    if (!m_layers_mode_enabled || !m_core.has_documents())
+        return;
+    auto &group = m_core.get_current_document().get_group(m_core.get_current_group());
+    auto *sketch = dynamic_cast<GroupSketch *>(&group);
+    if (!sketch)
+        return;
+    ensure_current_group_layers_initialized();
+    m_layer_capture_group = group.m_uuid;
+    const auto &doc = m_core.get_current_document();
+    for (const auto &[uu, en] : doc.m_entities) {
+        if (en->m_group == group.m_uuid)
+            m_layers_pre_tool_entities.insert(uu);
+    }
+    m_layers_pre_tool_entities_captured = true;
+#endif
+}
+
+void Editor::apply_active_layer_to_new_entities_after_commit()
+{
+#ifdef DUNE_SKETCHER_ONLY
+    if (!m_layers_mode_enabled || !m_core.has_documents())
+        return;
+    if (!m_layers_pre_tool_entities_captured)
+        return;
+    auto &doc = m_core.get_current_document();
+    auto &group = doc.get_group(m_core.get_current_group());
+    auto *sketch = dynamic_cast<GroupSketch *>(&group);
+    if (!sketch)
+        return;
+    if (group.m_uuid != m_layer_capture_group)
+        return;
+    const auto active_layer = get_active_layer_for_current_group();
+    if (!active_layer || !sketch->get_layer_ptr(active_layer))
+        return;
+
+    bool changed = false;
+    for (const auto &[uu, en] : doc.m_entities) {
+        if (en->m_group != group.m_uuid)
+            continue;
+        if (m_layers_pre_tool_entities.contains(uu))
+            continue;
+        if (en->m_kind != ItemKind::USER)
+            continue;
+        if (en->m_layer != active_layer) {
+            en->m_layer = active_layer;
+            changed = true;
+        }
+        m_layers_pre_tool_entities.insert(uu);
+    }
+    if (!changed)
+        return;
+
+    m_core.set_needs_save();
+    m_core.rebuild("assign sketch layer");
+    canvas_update_keep_selection();
+    update_action_sensitivity();
+    rebuild_layers_popover();
 #endif
 }
 
@@ -1588,6 +2468,20 @@ void Editor::update_sketcher_toolbar_button_states()
             m_selection_mode_button->remove_css_class("sketch-toolbar-active");
     }
 
+    if (m_layers_mode_button) {
+        if (m_layers_mode_enabled)
+            m_layers_mode_button->add_css_class("sketch-toolbar-active");
+        else
+            m_layers_mode_button->remove_css_class("sketch-toolbar-active");
+    }
+
+    if (m_cup_template_button) {
+        if (m_cup_template_enabled)
+            m_cup_template_button->add_css_class("sketch-toolbar-active");
+        else
+            m_cup_template_button->remove_css_class("sketch-toolbar-active");
+    }
+
     if (m_grid_menu_button) {
         if (get_canvas().get_grid_enabled())
             m_grid_menu_button->add_css_class("sketch-toolbar-active");
@@ -1625,6 +2519,10 @@ void Editor::update_action_bar_buttons_sensitivity()
 #ifdef DUNE_SKETCHER_ONLY
     if (m_selection_mode_button)
         m_selection_mode_button->set_sensitive(has_docs);
+    if (m_layers_mode_button)
+        m_layers_mode_button->set_sensitive(has_docs);
+    if (m_cup_template_button)
+        m_cup_template_button->set_sensitive(has_docs);
     if (m_grid_menu_button)
         m_grid_menu_button->set_sensitive(has_docs);
     if (m_symmetry_menu_button)
@@ -2294,11 +3192,23 @@ void Editor::init_radial_menu()
         auto mode_label = Gtk::make_managed<Gtk::Label>("Mode");
         mode_label->set_hexpand(true);
         mode_label->set_xalign(0);
-        auto mode_combo = Gtk::make_managed<Gtk::ComboBoxText>();
-        mode_combo->append("h", "Horizontal");
-        mode_combo->append("v", "Vertical");
+        auto mode_prev_button = Gtk::make_managed<Gtk::Button>();
+        mode_prev_button->set_icon_name("go-previous-symbolic");
+        mode_prev_button->set_has_frame(true);
+        mode_prev_button->set_tooltip_text("Previous mode");
+        auto mode_value_label = Gtk::make_managed<Gtk::Label>("Horizontal");
+        mode_value_label->set_hexpand(true);
+        mode_value_label->set_halign(Gtk::Align::CENTER);
+        mode_value_label->set_xalign(.5f);
+        mode_value_label->set_max_width_chars(10);
+        auto mode_next_button = Gtk::make_managed<Gtk::Button>();
+        mode_next_button->set_icon_name("go-next-symbolic");
+        mode_next_button->set_has_frame(true);
+        mode_next_button->set_tooltip_text("Next mode");
         mode_row->append(*mode_label);
-        mode_row->append(*mode_combo);
+        mode_row->append(*mode_prev_button);
+        mode_row->append(*mode_value_label);
+        mode_row->append(*mode_next_button);
         box->append(*mode_row);
 
         auto axes_row = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 8);
@@ -2329,21 +3239,21 @@ void Editor::init_radial_menu()
         rot_row->append(*rot_unit);
         box->append(*rot_row);
 
-        auto set_axis_button = Gtk::make_managed<Gtk::Button>("Set Axis");
-        set_axis_button->set_hexpand(true);
-        box->append(*set_axis_button);
-
-        const auto sync_quick = [this, updating, radial_switch, mode_combo, axes_spin, rot_spin, mode_row, axes_row] {
+        const auto sync_quick =
+                [this, updating, radial_switch, mode_value_label, mode_prev_button, mode_next_button, axes_spin, rot_spin,
+                 mode_row, axes_row] {
             if (!m_symmetry_radial_switch || !m_symmetry_axes_spin || !m_symmetry_rotation_spin)
                 return;
             *updating = true;
             radial_switch->set_active(m_symmetry_radial_switch->get_active());
-            mode_combo->set_active((m_symmetry_mode_selected % 2u) == 0u ? 0 : 1);
+            mode_value_label->set_text((m_symmetry_mode_selected % 2u) == 0u ? "Horizontal" : "Vertical");
             axes_spin->set_value(m_symmetry_axes_spin->get_value());
             rot_spin->set_value(m_symmetry_rotation_spin->get_value());
             const bool radial = radial_switch->get_active();
             mode_row->set_visible(!radial);
             axes_row->set_visible(radial);
+            mode_prev_button->set_sensitive(!radial);
+            mode_next_button->set_sensitive(!radial);
             *updating = false;
         };
         popover->signal_show().connect(sync_quick);
@@ -2358,10 +3268,19 @@ void Editor::init_radial_menu()
                     sync_symmetry_popover_context();
                     apply_symmetry_live_from_popover(false);
                 });
-        mode_combo->signal_changed().connect([this, updating, mode_combo] {
+        mode_prev_button->signal_clicked().connect([this, updating, mode_value_label] {
             if (*updating)
                 return;
-            m_symmetry_mode_selected = (mode_combo->get_active_row_number() == 1) ? 1u : 0u;
+            m_symmetry_mode_selected = (m_symmetry_mode_selected + 1u) % 2u;
+            mode_value_label->set_text((m_symmetry_mode_selected % 2u) == 0u ? "Horizontal" : "Vertical");
+            sync_symmetry_popover_context();
+            apply_symmetry_live_from_popover(false);
+        });
+        mode_next_button->signal_clicked().connect([this, updating, mode_value_label] {
+            if (*updating)
+                return;
+            m_symmetry_mode_selected = (m_symmetry_mode_selected + 1u) % 2u;
+            mode_value_label->set_text((m_symmetry_mode_selected % 2u) == 0u ? "Horizontal" : "Vertical");
             sync_symmetry_popover_context();
             apply_symmetry_live_from_popover(false);
         });
@@ -2375,7 +3294,6 @@ void Editor::init_radial_menu()
                 return;
             m_symmetry_rotation_spin->set_value(rot_spin->get_value());
         });
-        set_axis_button->signal_clicked().connect([this] { apply_symmetry_from_popover(); });
     }
 
     update_radial_menu_button_states();
@@ -4481,6 +5399,34 @@ void Editor::on_trace_image_button()
 #endif
 }
 
+void Editor::open_trace_image_dialog(const std::shared_ptr<const PictureData> &picture)
+{
+#ifdef DUNE_SKETCHER_ONLY
+    if (!picture)
+        return;
+    if (!m_core.has_documents()) {
+        tool_bar_flash("Open or create a sketch first");
+        return;
+    }
+    if (!m_image_trace_dialog) {
+        m_image_trace_dialog = std::make_unique<ImageTraceDialog>();
+        m_image_trace_dialog->set_transient_for(m_win);
+        m_image_trace_dialog->signal_apply().connect(sigc::mem_fun(*this, &Editor::apply_traced_svg));
+    }
+
+    std::string error_message;
+    if (!m_image_trace_dialog->load_picture(picture, error_message)) {
+        tool_bar_flash("Couldn't load image for tracing");
+        if (!error_message.empty())
+            Logger::get().log_warning(error_message, Logger::Domain::EDITOR);
+        return;
+    }
+    m_image_trace_dialog->present();
+#else
+    (void)picture;
+#endif
+}
+
 void Editor::apply_traced_svg(const std::string &svg)
 {
 #ifdef DUNE_SKETCHER_ONLY
@@ -5030,6 +5976,9 @@ void Editor::render_document(const IDocumentInfo &doc)
     if (doc.get_uuid() == m_core.get_current_idocument_info().get_uuid()) {
         renderer.add_constraint_icons(m_constraint_tip_pos, m_constraint_tip_vec, m_constraint_tip_icons);
         renderer.m_overlay_construction_lines = get_symmetry_overlay_lines_world();
+        renderer.m_overlay_construction_lines.insert(renderer.m_overlay_construction_lines.end(),
+                                                     m_selection_snap_overlay_lines_world.begin(),
+                                                     m_selection_snap_overlay_lines_world.end());
     }
 
     try {
@@ -5039,6 +5988,177 @@ void Editor::render_document(const IDocumentInfo &doc)
     catch (const std::exception &ex) {
         Logger::log_critical("exception rendering document " + doc.get_basename(), Logger::Domain::RENDERER, ex.what());
     }
+}
+
+void Editor::draw_cup_template_overlay()
+{
+#ifdef DUNE_SKETCHER_ONLY
+    if (!m_cup_template_enabled || !m_core.has_documents())
+        return;
+    const auto wrkpl_uu = m_core.get_current_workplane();
+    if (!wrkpl_uu)
+        return;
+
+    auto &doc = m_core.get_current_document();
+    const auto *wrkpl = doc.get_entity_ptr<EntityWorkplane>(wrkpl_uu);
+    if (!wrkpl)
+        return;
+
+    const auto width = std::max(1.0, m_cup_template_circumference_mm);
+    const auto height = std::max(1.0, m_cup_template_height_mm);
+    const auto segments = std::clamp(m_cup_template_segments, 1, 12);
+    auto &canvas = get_canvas();
+    canvas.save();
+    canvas.set_chunk(Renderer::get_chunk_from_group(doc.get_group(m_core.get_current_group())));
+    canvas.set_selection_invisible(true);
+    canvas.set_no_points(true);
+    canvas.set_vertex_inactive(false);
+    canvas.set_vertex_hover(false);
+    canvas.set_vertex_constraint(false);
+    canvas.set_vertex_construction(false);
+    canvas.set_line_style(ICanvas::LineStyle::DEFAULT);
+    canvas.set_line_wide(false);
+    canvas.set_line_layer_color_index(0);
+
+    const auto draw_workplane_line = [&canvas, wrkpl](const glm::dvec2 &a, const glm::dvec2 &b) {
+        canvas.draw_line(glm::vec3(wrkpl->transform(a)), glm::vec3(wrkpl->transform(b)));
+    };
+
+    draw_workplane_line({0, 0}, {width, 0});
+    draw_workplane_line({width, 0}, {width, height});
+    draw_workplane_line({width, height}, {0, height});
+    draw_workplane_line({0, height}, {0, 0});
+
+    if (segments > 1) {
+        canvas.set_line_style(ICanvas::LineStyle::THIN);
+        canvas.set_line_wide(true);
+        canvas.set_line_layer_color_index(aci_layer_color_slot(30)); // orange
+        constexpr double dash_mm = 6.0;
+        constexpr double gap_mm = 4.0;
+        for (int i = 1; i < segments; i++) {
+            const auto x = (width * static_cast<double>(i)) / static_cast<double>(segments);
+            for (double y = 0; y < height; y += dash_mm + gap_mm) {
+                const auto y2 = std::min(y + dash_mm, height);
+                draw_workplane_line({x, y}, {x, y2});
+            }
+        }
+    }
+
+    canvas.set_line_layer_color_index(0);
+    canvas.set_line_wide(false);
+    canvas.restore();
+#endif
+}
+
+void Editor::draw_layer_glow_overlay()
+{
+#ifdef DUNE_SKETCHER_ONLY
+    if (!m_layers_mode_enabled || !m_core.has_documents())
+        return;
+
+    auto &doc = m_core.get_current_document();
+    auto &group = doc.get_group(m_core.get_current_group());
+    auto *sketch = dynamic_cast<GroupSketch *>(&group);
+    if (!sketch)
+        return;
+
+    std::map<UUID, uint8_t> color_slots;
+    for (const auto &layer : sketch->m_layers)
+        color_slots[layer.m_uuid] = aci_layer_color_slot(layer.m_color);
+    if (color_slots.empty())
+        return;
+
+    const auto default_layer = sketch->get_default_layer_uuid();
+    auto &canvas = get_canvas();
+    canvas.save();
+    canvas.set_chunk(Renderer::get_chunk_from_group(group));
+    canvas.set_selection_invisible(true);
+    canvas.set_no_points(true);
+    canvas.set_line_style(ICanvas::LineStyle::DEFAULT);
+    canvas.set_line_wide(true);
+    canvas.set_vertex_inactive(false);
+    canvas.set_vertex_hover(false);
+    canvas.set_vertex_constraint(false);
+    canvas.set_vertex_construction(false);
+
+    const auto draw_line_2d = [&canvas](const EntityWorkplane &wrkpl, const glm::dvec2 &a, const glm::dvec2 &b) {
+        canvas.draw_line(glm::vec3(wrkpl.transform(a)), glm::vec3(wrkpl.transform(b)));
+    };
+
+    for (const auto &[uu, en] : doc.m_entities) {
+        if (!en->m_visible || en->m_kind != ItemKind::USER || en->m_group != group.m_uuid)
+            continue;
+
+        auto layer_uu = en->m_layer;
+        if (!layer_uu || !color_slots.contains(layer_uu))
+            layer_uu = default_layer;
+        if (!layer_uu || !color_slots.contains(layer_uu))
+            continue;
+        canvas.set_line_layer_color_index(color_slots.at(layer_uu));
+
+        if (const auto *line = dynamic_cast<const EntityLine2D *>(en.get())) {
+            const auto *wrkpl = doc.get_entity_ptr<EntityWorkplane>(line->m_wrkpl);
+            if (!wrkpl)
+                continue;
+            draw_line_2d(*wrkpl, line->m_p1, line->m_p2);
+            continue;
+        }
+        if (const auto *arc = dynamic_cast<const EntityArc2D *>(en.get())) {
+            const auto *wrkpl = doc.get_entity_ptr<EntityWorkplane>(arc->m_wrkpl);
+            if (!wrkpl)
+                continue;
+            const auto radius = glm::length(arc->m_from - arc->m_center);
+            if (radius < 1e-9)
+                continue;
+            const auto a0 = wrap_angle_0_2pi(std::atan2(arc->m_from.y - arc->m_center.y, arc->m_from.x - arc->m_center.x));
+            const auto a1 = wrap_angle_0_2pi(std::atan2(arc->m_to.y - arc->m_center.y, arc->m_to.x - arc->m_center.x));
+            auto dphi = wrap_angle_0_2pi(a1 - a0);
+            if (dphi < 1e-3)
+                dphi = 2 * M_PI;
+            constexpr int segments = 64;
+            glm::dvec2 prev = arc->m_center + glm::dvec2(std::cos(a0), std::sin(a0)) * radius;
+            for (int i = 1; i <= segments; i++) {
+                const auto phi = a0 + (dphi * static_cast<double>(i)) / static_cast<double>(segments);
+                const auto cur = arc->m_center + glm::dvec2(std::cos(phi), std::sin(phi)) * radius;
+                draw_line_2d(*wrkpl, prev, cur);
+                prev = cur;
+            }
+            continue;
+        }
+        if (const auto *circle = dynamic_cast<const EntityCircle2D *>(en.get())) {
+            const auto *wrkpl = doc.get_entity_ptr<EntityWorkplane>(circle->m_wrkpl);
+            if (!wrkpl || circle->m_radius <= 1e-9)
+                continue;
+            constexpr int segments = 64;
+            glm::dvec2 prev = circle->m_center + glm::dvec2(circle->m_radius, 0);
+            for (int i = 1; i <= segments; i++) {
+                const auto phi = (2 * M_PI * static_cast<double>(i)) / static_cast<double>(segments);
+                const auto cur = circle->m_center + glm::dvec2(std::cos(phi), std::sin(phi)) * circle->m_radius;
+                draw_line_2d(*wrkpl, prev, cur);
+                prev = cur;
+            }
+            continue;
+        }
+        if (const auto *bezier = dynamic_cast<const EntityBezier2D *>(en.get())) {
+            const auto *wrkpl = doc.get_entity_ptr<EntityWorkplane>(bezier->m_wrkpl);
+            if (!wrkpl)
+                continue;
+            constexpr int segments = 48;
+            auto prev = bezier->get_interpolated(0);
+            for (int i = 1; i <= segments; i++) {
+                const auto t = static_cast<double>(i) / static_cast<double>(segments);
+                const auto cur = bezier->get_interpolated(t);
+                draw_line_2d(*wrkpl, prev, cur);
+                prev = cur;
+            }
+            continue;
+        }
+    }
+
+    canvas.set_line_layer_color_index(0);
+    canvas.set_line_wide(false);
+    canvas.restore();
+#endif
 }
 
 void Editor::draw_selection_transform_overlay(const std::set<SelectableRef> &selection)
@@ -5204,8 +6324,15 @@ void Editor::canvas_update()
                 Renderer::get_chunk_from_group(m_core.get_current_document().get_group(m_update_groups_after)));
     }
 
-    if (m_core.has_documents())
+    if (m_core.has_documents()) {
+#ifdef DUNE_SKETCHER_ONLY
+        draw_layer_glow_overlay();
+#endif
         render_document(m_core.get_current_idocument_info());
+#ifdef DUNE_SKETCHER_ONLY
+        draw_cup_template_overlay();
+#endif
+    }
 
 #ifdef DUNE_SKETCHER_ONLY
     const auto &overlay_selection = m_selection_transform_overlay_selection_cache.empty()
@@ -5897,6 +7024,8 @@ void Editor::set_current_group(const UUID &uu_group)
     CanvasUpdater canvas_updater{*this};
 
     m_core.set_current_group(uu_group);
+    ensure_current_group_layers_initialized();
+    rebuild_layers_popover();
     m_workspace_browser->update_current_group(get_current_document_views());
     update_workplane_label();
     if (m_constraints_box)
@@ -5926,6 +7055,35 @@ void Editor::tool_bar_flash_replace(const std::string &s)
 bool Editor::get_use_workplane() const
 {
     return m_win.get_workplane_checkbutton().get_active();
+}
+
+bool Editor::get_selection_snap_enabled() const
+{
+    return m_selection_snap_enabled;
+}
+
+std::optional<SelectionSnapTemplateInfo> Editor::get_selection_snap_template_info() const
+{
+#ifdef DUNE_SKETCHER_ONLY
+    if (!m_cup_template_enabled || !m_core.has_documents())
+        return {};
+    const auto wrkpl_uu = m_core.get_current_workplane();
+    if (!wrkpl_uu)
+        return {};
+    SelectionSnapTemplateInfo info;
+    info.workplane = wrkpl_uu;
+    info.width = std::max(1.0, m_cup_template_circumference_mm);
+    info.height = std::max(1.0, m_cup_template_height_mm);
+    info.segments = std::clamp(m_cup_template_segments, 1, 12);
+    return info;
+#else
+    return {};
+#endif
+}
+
+void Editor::set_selection_snap_overlay_lines(const std::vector<std::pair<glm::dvec3, glm::dvec3>> &lines_world)
+{
+    m_selection_snap_overlay_lines_world = lines_world;
 }
 
 void Editor::set_constraint_icons(glm::vec3 p, glm::vec3 v, const std::vector<ConstraintType> &constraints)

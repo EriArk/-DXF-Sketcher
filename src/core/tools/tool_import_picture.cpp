@@ -4,6 +4,7 @@
 #include "document/entity/entity_workplane.hpp"
 #include "editor/editor_interface.hpp"
 #include "dialogs/dialogs.hpp"
+#include "dialogs/image_import_dialog.hpp"
 #include <gtkmm.h>
 #include "util/fs_util.hpp"
 #include "util/picture_util.hpp"
@@ -35,6 +36,17 @@ public:
     {
     }
     Glib::RefPtr<Gdk::Texture> texture;
+};
+
+class ToolDataImportPrepared : public ToolData {
+public:
+    enum class Action { APPLY, TRACE, CANCEL };
+    ToolDataImportPrepared(Action action, ImageImportPreparedData payload)
+        : m_action(action), m_payload(std::move(payload))
+    {
+    }
+    Action m_action = Action::CANCEL;
+    ImageImportPreparedData m_payload;
 };
 
 bool has_svg_extension(const std::filesystem::path &path)
@@ -340,10 +352,66 @@ ToolResponse ToolImportPicture::update(const ToolArgs &args)
                     return ToolResponse::commit();
                 }
 
-                auto pic_data = picture_data_from_file(data->path);
-                add_picture(pic_data);
+                if (!m_image_import_dialog) {
+                    m_image_import_dialog = std::make_unique<ImageImportDialog>();
+                    m_image_import_dialog->set_transient_for(m_intf.get_dialogs().get_parent());
+                    auto handled = std::make_shared<bool>(false);
+                    m_image_import_dialog->signal_apply().connect([this, handled](const ImageImportPreparedData &prepared) {
+                        *handled = true;
+                        m_intf.tool_update_data(
+                                std::make_unique<ToolDataImportPrepared>(ToolDataImportPrepared::Action::APPLY, prepared));
+                        if (m_image_import_dialog)
+                            m_image_import_dialog->hide();
+                    });
+                    m_image_import_dialog->signal_trace().connect([this, handled](const ImageImportPreparedData &prepared) {
+                        *handled = true;
+                        m_intf.tool_update_data(
+                                std::make_unique<ToolDataImportPrepared>(ToolDataImportPrepared::Action::TRACE, prepared));
+                        if (m_image_import_dialog)
+                            m_image_import_dialog->hide();
+                    });
+                    m_image_import_dialog->signal_hide().connect([this, handled] {
+                        if (!*handled) {
+                            m_intf.tool_update_data(std::make_unique<ToolDataImportPrepared>(
+                                    ToolDataImportPrepared::Action::CANCEL, ImageImportPreparedData{}));
+                        }
+                        m_image_import_dialog.reset();
+                    });
+                }
+                std::string error_message;
+                if (!m_image_import_dialog->load_image(data->path, error_message)) {
+                    m_intf.tool_bar_flash("Couldn't load image for import");
+                    if (!error_message.empty())
+                        Logger::get().log_warning(error_message, Logger::Domain::EDITOR);
+                    m_image_import_dialog.reset();
+                    return ToolResponse::end();
+                }
+                m_image_import_dialog->present();
             }
             else {
+                return ToolResponse::end();
+            }
+        }
+        else if (auto prepared = dynamic_cast<const ToolDataImportPrepared *>(args.data.get())) {
+            switch (prepared->m_action) {
+            case ToolDataImportPrepared::Action::APPLY:
+                if (!prepared->m_payload.picture) {
+                    m_intf.tool_bar_flash("No processed image to import");
+                    return ToolResponse::end();
+                }
+                add_picture(prepared->m_payload.picture);
+                if (prepared->m_payload.use_target_size && prepared->m_payload.target_width > 1e-9
+                    && prepared->m_payload.target_height > 1e-9) {
+                    m_pic->m_scale_x = prepared->m_payload.target_width / std::max(1.0, m_pic->m_width);
+                    m_pic->m_scale_y = prepared->m_payload.target_height / std::max(1.0, m_pic->m_height);
+                    m_pic->update_builtin_anchors();
+                }
+                break;
+            case ToolDataImportPrepared::Action::TRACE:
+                if (prepared->m_payload.picture)
+                    m_intf.open_trace_image_dialog(prepared->m_payload.picture);
+                return ToolResponse::end();
+            case ToolDataImportPrepared::Action::CANCEL:
                 return ToolResponse::end();
             }
         }

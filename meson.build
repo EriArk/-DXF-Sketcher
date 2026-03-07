@@ -1,5 +1,5 @@
 project('dune3d', ['cpp', 'c'],
-  version: '1.4.5',
+  version: '1.4.8',
   meson_version: '>=1.3.0',
   default_options: ['cpp_std=c++20', 'warning_level=1'],
 )
@@ -305,6 +305,7 @@ src_gui = files(
   'src/dialogs/tool_window.cpp',
   'src/dialogs/enter_text_window.cpp',
   'src/dialogs/image_trace_dialog.cpp',
+  'src/dialogs/image_import_dialog.cpp',
   'src/widgets/spin_button_dim.cpp',
   'src/widgets/spin_button_angle.cpp',
   'src/util/gtk_util.cpp',

@@ -64,6 +64,7 @@ void Editor::tool_begin(ToolID id /*bool override_selection, const std::set<Sele
     //   else
     args.selection = get_canvas().get_selection();
     capture_symmetry_entities_before_tool(id);
+    capture_layer_entities_before_tool();
     m_last_selection_mode = get_canvas().get_selection_mode();
     get_canvas().set_selection_mode(SelectionMode::NONE);
     ToolResponse r = m_core.tool_begin(id, args);
@@ -88,14 +89,18 @@ void Editor::tool_process(ToolResponse &resp)
     sync_symmetry_for_move_selection();
     update_symmetry_live_preview_entities();
     tool_process_one();
-    if (resp.result == ToolResponse::Result::COMMIT || resp.result == ToolResponse::Result::END)
+    if (resp.result == ToolResponse::Result::COMMIT || resp.result == ToolResponse::Result::END) {
         apply_symmetry_to_new_entities_after_commit();
+        apply_active_layer_to_new_entities_after_commit();
+    }
     while (auto args = m_core.get_pending_tool_args()) {
         auto r = tool_update_with_symmetry(*args);
         sync_symmetry_for_move_selection();
         update_symmetry_live_preview_entities();
-        if (r.result == ToolResponse::Result::COMMIT || r.result == ToolResponse::Result::END)
+        if (r.result == ToolResponse::Result::COMMIT || r.result == ToolResponse::Result::END) {
             apply_symmetry_to_new_entities_after_commit();
+            apply_active_layer_to_new_entities_after_commit();
+        }
 
         tool_process_one();
     }
@@ -119,6 +124,9 @@ void Editor::tool_process_one()
         m_no_canvas_update = false;
         m_constraint_tip_icons.clear();
         m_solid_model_edge_select_mode = false;
+#ifdef DUNE_SKETCHER_ONLY
+        m_selection_snap_overlay_lines_world.clear();
+#endif
     }
     if (!m_no_canvas_update)
         canvas_update();

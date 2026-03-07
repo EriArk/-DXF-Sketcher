@@ -4,9 +4,11 @@
 #include <string>
 #include <memory>
 #include <optional>
+#include <utility>
 #include <pangomm.h>
 #include "canvas/selectable_ref.hpp"
 #include "core/tool_data.hpp"
+#include "util/uuid.hpp"
 
 namespace dune3d {
 
@@ -16,6 +18,14 @@ enum class SelectionMode;
 enum class ConstraintType;
 struct ItemsToDelete;
 class Buffer;
+class PictureData;
+
+struct SelectionSnapTemplateInfo {
+    UUID workplane;
+    double width = 0;
+    double height = 0;
+    int segments = 1;
+};
 
 class EditorInterface {
 public:
@@ -38,6 +48,11 @@ public:
     virtual void set_solid_model_edge_select_mode(bool v) = 0;
 
     virtual bool get_use_workplane() const = 0;
+    virtual bool get_selection_snap_enabled() const = 0;
+    virtual std::optional<SelectionSnapTemplateInfo> get_selection_snap_template_info() const = 0;
+    virtual void open_trace_image_dialog(const std::shared_ptr<const PictureData> &picture) = 0;
+    virtual void set_selection_snap_overlay_lines(
+            const std::vector<std::pair<glm::dvec3, glm::dvec3>> &lines_world) = 0;
 
     virtual void set_constraint_icons(glm::vec3 p, glm::vec3 v, const std::vector<ConstraintType> &constraints) = 0;
 

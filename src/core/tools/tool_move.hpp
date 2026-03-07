@@ -1,6 +1,8 @@
 #include "tool_common.hpp"
 #include "in_tool_action/in_tool_action.hpp"
 #include <map>
+#include <array>
+#include <vector>
 
 namespace dune3d {
 
@@ -34,6 +36,16 @@ public:
 
 
 private:
+    struct SnapData2D {
+        std::array<double, 3> source_x{};
+        std::array<double, 3> source_y{};
+        std::vector<double> targets_x;
+        std::vector<double> targets_y;
+    };
+
+    std::map<UUID, SnapData2D> m_snap_data_by_workplane;
+    bool m_selection_snap_enabled = false;
+
     glm::dvec3 m_inital_pos;
     std::map<UUID, glm::dvec2> m_inital_pos_wrkpl;
     std::map<UUID, glm::dvec3> m_inital_pos_angle_constraint;

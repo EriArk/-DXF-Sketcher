@@ -387,6 +387,18 @@ bool ImageTraceDialog::load_image(const std::filesystem::path &path, std::string
         return false;
     }
 
+    return load_picture(m_picture_data, error_message);
+}
+
+bool ImageTraceDialog::load_picture(const std::shared_ptr<const PictureData> &picture, std::string &error_message)
+{
+    error_message.clear();
+    m_picture_data = picture;
+    if (!m_picture_data) {
+        error_message = "Failed to load image";
+        return false;
+    }
+
     if (m_original_aspect_frame && m_traced_aspect_frame && m_picture_data->m_width > 0 && m_picture_data->m_height > 0) {
         const auto ratio = static_cast<float>(m_picture_data->m_width) / static_cast<float>(m_picture_data->m_height);
         m_original_aspect_frame->set_ratio(ratio);

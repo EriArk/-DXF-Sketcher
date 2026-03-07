@@ -8,6 +8,7 @@
 #include "dialogs/dialogs.hpp"
 #include "util/action_label.hpp"
 #include "document/group/group.hpp"
+#include "document/group/group_sketch.hpp"
 #include "selection_menu_creator.hpp"
 #include "idocument_view_provider.hpp"
 #include "core/tool_id.hpp"
@@ -29,6 +30,7 @@ class ClippingPlaneWindow;
 class SelectionFilterWindow;
 class ImageTraceDialog;
 class Buffer;
+class PictureData;
 class Entity;
 enum class SelectionMode;
 enum class CommitMode;
@@ -64,6 +66,10 @@ public:
     }
 
     bool get_use_workplane() const override;
+    bool get_selection_snap_enabled() const override;
+    std::optional<SelectionSnapTemplateInfo> get_selection_snap_template_info() const override;
+    void open_trace_image_dialog(const std::shared_ptr<const PictureData> &picture) override;
+    void set_selection_snap_overlay_lines(const std::vector<std::pair<glm::dvec3, glm::dvec3>> &lines_world) override;
 
     void set_canvas_selection_mode(SelectionMode mode) override;
 
@@ -99,6 +105,19 @@ private:
     void sync_draw_text_popover_from_font_desc();
     void sync_draw_text_popover_from_selection(bool show_popover);
     void apply_draw_text_popover_change(bool apply_to_selected_text);
+    void init_layers_popover();
+    void rebuild_layers_popover();
+    void ensure_current_group_layers_initialized();
+    void select_active_layer_for_current_group(const UUID &layer_uu);
+    UUID get_active_layer_for_current_group() const;
+    void move_selection_to_layer(const UUID &layer_uu);
+    void capture_layer_entities_before_tool();
+    void apply_active_layer_to_new_entities_after_commit();
+    void init_cup_template_popover();
+    void draw_cup_template_overlay();
+    void open_layer_edit_popover(const UUID &layer_uu);
+    void refresh_layer_edit_popover();
+    void draw_layer_glow_overlay();
     void draw_selection_transform_overlay(const std::set<SelectableRef> &selection);
     bool begin_selection_transform_drag(const SelectableRef &handle);
     void update_selection_transform_drag();
@@ -267,8 +286,26 @@ private:
     std::map<ActionToolID, Gtk::Button *> m_action_bar_buttons;
     Gtk::Button *m_selection_mode_button = nullptr;
     Gtk::Popover *m_selection_mode_popover = nullptr;
+    Gtk::Button *m_layers_mode_button = nullptr;
+    Gtk::Popover *m_layers_popover = nullptr;
+    Gtk::Box *m_layers_list_box = nullptr;
+    Gtk::Button *m_cup_template_button = nullptr;
+    Gtk::Popover *m_cup_template_popover = nullptr;
+    Gtk::SpinButton *m_cup_template_height_spin = nullptr;
+    Gtk::SpinButton *m_cup_template_circumference_spin = nullptr;
+    Gtk::SpinButton *m_cup_template_diameter_spin = nullptr;
+    Gtk::SpinButton *m_cup_template_segments_spin = nullptr;
+    Gtk::Popover *m_layer_edit_popover = nullptr;
+    Gtk::Entry *m_layer_edit_name_entry = nullptr;
+    Gtk::Switch *m_layer_edit_icon_switch = nullptr;
+    Gtk::Label *m_layer_edit_process_label = nullptr;
+    Gtk::Box *m_layer_edit_process_box = nullptr;
+    std::map<GroupSketch::SketchLayerProcess, Gtk::Button *> m_layer_edit_process_buttons;
+    std::map<int, Gtk::Button *> m_layer_edit_color_buttons;
+    UUID m_layer_editing_uuid;
     Gtk::Switch *m_selection_transform_switch = nullptr;
     Gtk::Switch *m_selection_markers_switch = nullptr;
+    Gtk::Switch *m_selection_snap_switch = nullptr;
     Gtk::Popover *m_draw_text_popover = nullptr;
     Gtk::Button *m_draw_text_font_button = nullptr;
     Gtk::Switch *m_draw_text_bold_switch = nullptr;
@@ -280,6 +317,8 @@ private:
     bool m_updating_selection_mode_popover = false;
     bool m_selection_transform_enabled = false;
     bool m_show_technical_markers = true;
+    bool m_selection_snap_enabled = false;
+    std::vector<std::pair<glm::dvec3, glm::dvec3>> m_selection_snap_overlay_lines_world;
     enum class SelectionTransformDragMode { NONE, ROTATE, SCALE };
     SelectionTransformDragMode m_selection_transform_drag_mode = SelectionTransformDragMode::NONE;
     bool m_selection_transform_drag_active = false;
@@ -310,6 +349,17 @@ private:
     bool m_selection_transform_overlay_valid = false;
     bool m_primary_button_pressed = false;
     ToolID m_sticky_draw_tool = ToolID::NONE;
+    bool m_layers_mode_enabled = false;
+    bool m_cup_template_enabled = false;
+    bool m_updating_cup_template_popover = false;
+    double m_cup_template_height_mm = 110;
+    double m_cup_template_circumference_mm = 260;
+    int m_cup_template_segments = 4;
+    bool m_updating_layer_edit_popover = false;
+    std::map<UUID, UUID> m_active_layer_by_group;
+    std::set<UUID> m_layers_pre_tool_entities;
+    bool m_layers_pre_tool_entities_captured = false;
+    UUID m_layer_capture_group;
     bool m_restarting_sticky_tool = false;
     sigc::connection m_sticky_tool_restart_connection;
     void update_action_bar_buttons_sensitivity();

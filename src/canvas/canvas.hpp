@@ -22,6 +22,7 @@
 #include "chunk.hpp"
 #include <glm/glm.hpp>
 #include <filesystem>
+#include <cstdint>
 
 namespace dune3d {
 
@@ -82,6 +83,14 @@ public:
     void set_line_style(LineStyle style) override
     {
         m_state.line_style = style;
+    }
+    void set_line_wide(bool wide) override
+    {
+        m_state.line_wide = wide;
+    }
+    void set_line_layer_color_index(uint8_t index) override
+    {
+        m_state.line_layer_color_index = index;
     }
 
     void save() override;
@@ -502,6 +511,8 @@ private:
         bool vertex_construction = false;
         bool no_points = false;
         LineStyle line_style = LineStyle::DEFAULT;
+        bool line_wide = false;
+        uint8_t line_layer_color_index = 0;
     };
 
     State m_state;

@@ -134,6 +134,8 @@ Entity::Entity(const UUID &uu, const json &j)
 {
     if (j.contains("group"))
         j.at("group").get_to(m_group);
+    if (j.contains("layer"))
+        j.at("layer").get_to(m_layer);
 }
 
 NLOHMANN_JSON_SERIALIZE_ENUM(Entity::Type, {
@@ -162,7 +164,13 @@ json Entity::serialize_type(Type type)
 
 json Entity::serialize() const
 {
-    return json{{"type", get_type()}, {"group", m_group}, {"construction", m_construction}, {"name", m_name}};
+    return json{
+            {"type", get_type()},
+            {"group", m_group},
+            {"layer", m_layer},
+            {"construction", m_construction},
+            {"name", m_name},
+    };
 }
 
 std::unique_ptr<Entity> Entity::new_from_json(const UUID &uu, const json &j,

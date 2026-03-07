@@ -18,6 +18,7 @@ public:
     ImageTraceDialog();
 
     bool load_image(const std::filesystem::path &path, std::string &error_message);
+    bool load_picture(const std::shared_ptr<const PictureData> &picture, std::string &error_message);
 
     using type_signal_apply = sigc::signal<void(const std::string &)>;
     type_signal_apply &signal_apply();

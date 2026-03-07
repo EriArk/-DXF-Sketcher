@@ -13,6 +13,7 @@ flat out uint pick_to_frag;
 flat out vec3 color_to_frag;
 flat out float depth_shift_to_frag;
 flat out float select_alpha_to_frag;
+flat out float alpha_to_frag;
 
 ##ubo
 
@@ -20,6 +21,7 @@ void main() {
 	color_to_frag = get_color(flags_to_geom[0]);
 	depth_shift_to_frag = get_depth_shift(flags_to_geom[0]);
 	select_alpha_to_frag = get_select_alpha(flags_to_geom[0]);
+	alpha_to_frag = get_line_alpha(flags_to_geom[0]);
 	if(test_peel(pick_to_geom[0]))
 		return;
 	
@@ -33,6 +35,8 @@ void main() {
 	o2 *= line_width/2;
 	if(FLAG_IS_SET(flags_to_geom[0], VERTEX_FLAG_LINE_THIN))
 		o2 *= .5;
+	if(FLAG_IS_SET(flags_to_geom[0], VERTEX_FLAG_LINE_WIDE))
+		o2 *= 3.6;
 	
 	vec4 o = vec4((screen*vec3(o2,0)).xy, 0, 0);
 	

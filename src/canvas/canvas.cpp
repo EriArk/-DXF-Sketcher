@@ -1537,6 +1537,13 @@ void Canvas::apply_line_flags(VertexFlags &flags)
 {
     if (m_state.line_style == LineStyle::THIN)
         flags |= VertexFlags::LINE_THIN;
+    if (m_state.line_wide)
+        flags |= VertexFlags::LINE_WIDE;
+    if (m_state.line_layer_color_index > 0) {
+        const auto layer_bits =
+                static_cast<uint32_t>(m_state.line_layer_color_index) << static_cast<uint32_t>(VertexFlags::LAYER_COLOR_SHIFT);
+        flags |= static_cast<VertexFlags>(layer_bits);
+    }
 }
 
 static const float char_space = 1;
