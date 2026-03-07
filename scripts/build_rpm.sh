@@ -59,7 +59,6 @@ License:        GPL-3.0-or-later
 URL:            https://github.com/EriArk/-DXF-Sketcher
 Source0:        $SOURCE_TARBALL
 BuildArch:      $ARCH
-AutoReqProv:    no
 
 %description
 Practical 2D DXF sketch editor with parametric constraints and direct editing workflow.

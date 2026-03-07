@@ -17,7 +17,7 @@ BUNDLE_FILE="$OUT_DIR/${APP_ID}-${VERSION}-${BRANCH}.flatpak"
 
 cd "$ROOT_DIR"
 
-for cmd in flatpak flatpak-builder meson; do
+for cmd in flatpak flatpak-builder meson ldconfig; do
     if ! command -v "$cmd" >/dev/null 2>&1; then
         echo "Required command not found: $cmd"
         exit 1
@@ -41,6 +41,55 @@ if [ ! -x "$STAGE_DIR/app/bin/dxfsketcher" ]; then
     echo "Expected flatpak payload binary not found: $STAGE_DIR/app/bin/dxfsketcher"
     exit 1
 fi
+
+VENDORED_LIB_DIR="$STAGE_DIR/app/lib"
+mkdir -p "$VENDORED_LIB_DIR"
+
+resolve_library_path() {
+    local soname="$1"
+    ldconfig -p | awk -v name="$soname" '
+        $1 == name && !found { print $NF; found=1 }
+        END { if (!found) exit 1 }
+    '
+}
+
+copy_library_with_soname() {
+    local soname="$1"
+    local lib_path
+    local real_path
+    local soname_file
+    local real_file
+
+    lib_path="$(resolve_library_path "$soname")"
+    if [ -z "$lib_path" ]; then
+        echo "Unable to resolve shared library: $soname"
+        exit 1
+    fi
+
+    real_path="$(readlink -f "$lib_path")"
+    soname_file="$(basename "$lib_path")"
+    real_file="$(basename "$real_path")"
+
+    cp -f "$real_path" "$VENDORED_LIB_DIR/$real_file"
+    if [ "$soname_file" != "$real_file" ]; then
+        ln -sf "$real_file" "$VENDORED_LIB_DIR/$soname_file"
+    fi
+}
+
+# GNOME runtime does not ship gtkmm/cairomm/sigc++ stack required by dxfsketcher.
+for lib in \
+    libgtkmm-4.0.so.0 \
+    libgiomm-2.68.so.1 \
+    libglibmm-2.68.so.1 \
+    libcairomm-1.16.so.1 \
+    libpangomm-2.48.so.1 \
+    libsigc-3.0.so.0 \
+    libspnav.so.0 \
+    libstdc++.so.6 \
+    libgcc_s.so.1
+do
+    copy_library_with_soname "$lib"
+done
 
 cat > "$MANIFEST" <<EOF
 {
