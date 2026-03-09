@@ -4,7 +4,6 @@ DXF Sketcher is a practical 2D DXF editor for fast sketching, cleanup, and fabri
 
 It keeps the parametric core from [dune3d](https://github.com/dune3d/dune3d), but reshapes the workflow around everyday DXF work: faster drawing, faster selection, and built-in helpers for boxes, gears, raster tracing, and edge-based fabrication features.
 
-Repository: <https://github.com/EriArk/-DXF-Sketcher>
 
 <p align="center">
   <img src="screenshots/main.png" alt="DXF Sketcher editor" width="900">
