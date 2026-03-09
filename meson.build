@@ -1,5 +1,5 @@
 project('dune3d', ['cpp', 'c'],
-  version: '1.4.8',
+  version: '1.5.0',
   meson_version: '>=1.3.0',
   default_options: ['cpp_std=c++20', 'warning_level=1'],
 )
@@ -471,11 +471,17 @@ else
 endif
 
 datadir = get_option('datadir')
+pkgdatadir = datadir / 'dxfsketcher'
+source_root_escaped = meson.project_source_root().replace('\\', '\\\\').replace('"', '\\"')
+pkgdatadir_abs_escaped = (get_option('prefix') / pkgdatadir).replace('\\', '\\\\').replace('"', '\\"')
+cpp_args += '-DDUNE_SOURCE_ROOT="' + source_root_escaped + '"'
+cpp_args += '-DDUNE_PKGDATADIR="' + pkgdatadir_abs_escaped + '"'
 install_data('io.github.eriark.dxfsketcher.desktop', install_dir:datadir / 'applications')
 install_data('io.github.eriark.dxfsketcher.metainfo.xml', install_dir:datadir / 'metainfo')
 icondir = datadir / 'icons/hicolor'
 
 install_data('src/icons/scalable/apps/dxfsketcher.png', install_dir: icondir /  'scalable/apps')
+install_subdir('3rd_party/pyvendor', install_dir: pkgdatadir)
 
 
 dune3d = executable('dxfsketcher',

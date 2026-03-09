@@ -54,6 +54,9 @@ void Editor::tool_begin(ToolID id /*bool override_selection, const std::set<Sele
         Logger::log_critical("can't begin tool while tool is active", Logger::Domain::EDITOR);
         return;
     }
+#ifdef DUNE_SKETCHER_ONLY
+    remember_last_draw_tool(id);
+#endif
     m_win.hide_delete_items_popup();
 
     ToolArgs args;
@@ -194,6 +197,7 @@ void Editor::handle_tool_change()
     tool_bar_clear_actions();
     update_action_bar_visibility();
 #ifdef DUNE_SKETCHER_ONLY
+    update_joints_quick_popover();
     update_sketcher_toolbar_button_states();
 #endif
 }

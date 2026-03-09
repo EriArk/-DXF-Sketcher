@@ -10,6 +10,7 @@
   <description>
     <p>DXF Sketcher is a practical 2D DXF editor focused on fast everyday sketch workflows.</p>
     <p>It keeps parametric constraints and dimensions while also supporting direct object-style editing for quick operations.</p>
+    <p>It includes built-in helpers for boxes, gears, raster tracing, and fabrication-oriented edge features.</p>
   </description>
 
   <launchable type="desktop-id">io.github.eriark.dxfsketcher.desktop</launchable>
@@ -30,6 +31,14 @@
   <provides>
     <binary>dxfsketcher</binary>
   </provides>
+
+  <releases>
+    <release version="1.5.0" date="2026-03-10">
+      <description>
+        <p>Prerelease with self-contained Boxes integration, the new Edge Features workflow, raster tracing improvements, and release packaging updates.</p>
+      </description>
+    </release>
+  </releases>
 
   <content_rating type="oars-1.0"/>
 </component>

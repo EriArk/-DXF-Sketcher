@@ -1,3 +1,25 @@
+# Version 1.5.0
+
+## New Features
+
+ - self-contained Boxes integration with bundled `boxes.py` runtime
+ - full Boxes catalog with categories, favorites, gallery view, sample-photo previews, and template-specific settings
+ - Edge Features tool with family-based edge operations powered by bundled `boxes.py`
+ - image import preprocessing and Trace Image workflow for raster-to-vector conversion
+ - gear generator for sketch-based involute gear geometry
+
+## Enhancements
+
+ - Boxes previews now use native `boxes.py` parameters and SVG layer colors
+ - AppImage and Flatpak packaging can bundle the Python runtime used by Boxes
+ - Edge Features popovers now use arrow-based switching instead of fragile dropdowns
+ - middle mouse selection toggle restores the last drawing tool and ignores pan drags
+ - theme variants and sketch workflow polish for day-to-day DXF editing
+
+## Notes
+
+ - Edge Tool WOP (продолжаю разработку)
+
 # Version 1.4.0
 
 ## New Features

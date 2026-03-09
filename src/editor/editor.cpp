@@ -24,8 +24,10 @@
 #include "document/entity/entity_cluster.hpp"
 #include "document/entity/entity_text.hpp"
 #include "document/entity/ientity_in_workplane.hpp"
+#include "document/entity/ientity_in_workplane_set.hpp"
 #include "logger/logger.hpp"
 #include "document/constraint/constraint.hpp"
+#include "document/constraint/constraint_points_coincident.hpp"
 #include "util/fs_util.hpp"
 #include "util/util.hpp"
 #include "selection_editor.hpp"
@@ -47,10 +49,12 @@
 #include "logger/log_util.hpp"
 #include "util/text_render.hpp"
 #include "util/uuid.hpp"
+#include "nanosvg.h"
 #include "nlohmann/json.hpp"
 #include "buffer.hpp"
 #include "icon_texture_id.hpp"
 #include <iostream>
+#include <cstdlib>
 #include <cctype>
 #include <algorithm>
 #include <vector>
@@ -65,7 +69,19 @@
 #include <memory>
 #include <fstream>
 #include <cstdint>
+#include <chrono>
+#include <sys/wait.h>
+#include <glib.h>
 #include <glm/gtx/quaternion.hpp>
+
+#ifdef _WIN32
+#include <windows.h>
+#else
+#include <unistd.h>
+#if defined(__APPLE__)
+#include <mach-o/dyld.h>
+#endif
+#endif
 
 namespace dune3d {
 namespace {
@@ -196,12 +212,173 @@ std::vector<UUID> selected_line_entities_in_group(const Document &doc, const std
     return lines;
 }
 
+struct LoopEndpointKey {
+    long long x = 0;
+    long long y = 0;
+    auto operator<=>(const LoopEndpointKey &) const = default;
+};
+
+LoopEndpointKey make_loop_endpoint_key(const glm::dvec2 &p)
+{
+    constexpr double eps = 1e-4;
+    return {static_cast<long long>(std::llround(p.x / eps)), static_cast<long long>(std::llround(p.y / eps))};
+}
+
+bool get_loop_edge_endpoints(const Entity &en, UUID &wrkpl, glm::dvec2 &p1, glm::dvec2 &p2)
+{
+    if (const auto *line = dynamic_cast<const EntityLine2D *>(&en)) {
+        wrkpl = line->m_wrkpl;
+        p1 = line->m_p1;
+        p2 = line->m_p2;
+        return true;
+    }
+    if (const auto *arc = dynamic_cast<const EntityArc2D *>(&en)) {
+        wrkpl = arc->m_wrkpl;
+        p1 = arc->m_from;
+        p2 = arc->m_to;
+        return true;
+    }
+    if (const auto *bez = dynamic_cast<const EntityBezier2D *>(&en)) {
+        wrkpl = bez->m_wrkpl;
+        p1 = bez->m_p1;
+        p2 = bez->m_p2;
+        return true;
+    }
+    return false;
+}
+
+bool collect_closed_loop_component(const Document &doc, const UUID &group_uu, const UUID &wrkpl_uu, const UUID &seed_edge_uu,
+                                   std::set<UUID> &out_edges)
+{
+    struct Edge {
+        UUID uu;
+        LoopEndpointKey a;
+        LoopEndpointKey b;
+    };
+
+    std::vector<Edge> edges;
+    std::map<UUID, size_t> index_by_uuid;
+    std::map<LoopEndpointKey, std::vector<size_t>> node_to_edges;
+
+    for (const auto &[uu, en] : doc.m_entities) {
+        if (en->m_group != group_uu || en->m_kind != ItemKind::USER)
+            continue;
+        UUID en_wrkpl;
+        glm::dvec2 p1, p2;
+        if (!get_loop_edge_endpoints(*en, en_wrkpl, p1, p2))
+            continue;
+        if (en_wrkpl != wrkpl_uu)
+            continue;
+
+        const auto k1 = make_loop_endpoint_key(p1);
+        const auto k2 = make_loop_endpoint_key(p2);
+        if (k1 == k2)
+            continue;
+        const auto idx = edges.size();
+        edges.push_back({uu, k1, k2});
+        index_by_uuid.emplace(uu, idx);
+        node_to_edges[k1].push_back(idx);
+        node_to_edges[k2].push_back(idx);
+    }
+
+    if (!index_by_uuid.contains(seed_edge_uu))
+        return false;
+
+    std::set<size_t> component_edges;
+    std::vector<size_t> stack = {index_by_uuid.at(seed_edge_uu)};
+    while (!stack.empty()) {
+        const auto idx = stack.back();
+        stack.pop_back();
+        if (!component_edges.insert(idx).second)
+            continue;
+        const auto &e = edges.at(idx);
+        for (const auto &k : {e.a, e.b}) {
+            if (!node_to_edges.contains(k))
+                continue;
+            for (const auto nidx : node_to_edges.at(k)) {
+                if (!component_edges.contains(nidx))
+                    stack.push_back(nidx);
+            }
+        }
+    }
+
+    std::map<LoopEndpointKey, int> degree;
+    for (const auto idx : component_edges) {
+        const auto &e = edges.at(idx);
+        degree[e.a]++;
+        degree[e.b]++;
+    }
+
+    if (degree.empty())
+        return false;
+    for (const auto &[k, d] : degree) {
+        (void)k;
+        if (d < 2)
+            return false;
+    }
+
+    for (const auto idx : component_edges)
+        out_edges.insert(edges.at(idx).uu);
+    return true;
+}
+
+std::optional<double> infer_line_side_toward_closed_loop_center(const Document &doc, const UUID &group_uu, const UUID &wrkpl_uu,
+                                                                const UUID &seed_edge_uu, const glm::dvec2 &p1,
+                                                                const glm::dvec2 &p2)
+{
+    std::set<UUID> loop_edges;
+    if (!collect_closed_loop_component(doc, group_uu, wrkpl_uu, seed_edge_uu, loop_edges))
+        return {};
+
+    glm::dvec2 sum{0, 0};
+    size_t count = 0;
+    for (const auto &uu : loop_edges) {
+        const auto *en = doc.get_entity_ptr(uu);
+        if (!en)
+            continue;
+        UUID en_wrkpl;
+        glm::dvec2 a, b;
+        if (!get_loop_edge_endpoints(*en, en_wrkpl, a, b) || en_wrkpl != wrkpl_uu)
+            continue;
+        sum += a;
+        sum += b;
+        count += 2;
+    }
+    if (count == 0)
+        return {};
+
+    const auto center = sum / static_cast<double>(count);
+    const auto delta = p2 - p1;
+    const auto len = glm::length(delta);
+    if (len < 1e-6)
+        return {};
+    const auto tangent = delta / len;
+    const auto raw_normal = glm::dvec2{-tangent.y, tangent.x};
+    const auto raw_normal_len = glm::length(raw_normal);
+    if (raw_normal_len < 1e-9)
+        return {};
+    const auto normal = raw_normal / raw_normal_len;
+    const auto midpoint = (p1 + p2) * 0.5;
+    return glm::dot(normal, center - midpoint) >= 0 ? 1.0 : -1.0;
+}
+
 glm::dvec2 normalize_dir(const glm::dvec2 &v)
 {
     const auto len = glm::length(v);
     if (len < 1e-9)
         return {1, 0};
     return v / len;
+}
+
+std::pair<glm::dvec2, glm::dvec2> center_trim_segment(const glm::dvec2 &p1, const glm::dvec2 &p2, double target_length)
+{
+    const auto delta = p2 - p1;
+    const auto len = glm::length(delta);
+    if (len < 1e-9 || target_length <= 1e-9 || target_length >= len)
+        return {p1, p2};
+    const auto dir = delta / len;
+    const auto trim = (len - target_length) * 0.5;
+    return {p1 + dir * trim, p2 - dir * trim};
 }
 
 glm::dvec2 reflect_point_2d(const glm::dvec2 &p, const glm::dvec2 &axis_point, const glm::dvec2 &axis_dir)
@@ -234,6 +411,8 @@ double radial_rotation_deg_to_rad(double deg)
 
 constexpr int sketch_popover_content_width = 193;
 constexpr int sketch_popover_total_width = sketch_popover_content_width + 24;
+constexpr int edge_features_popover_content_width = 145;
+constexpr int edge_features_popover_total_width = edge_features_popover_content_width + 24;
 
 std::string format_text_font_label(const Pango::FontDescription &desc)
 {
@@ -315,6 +494,2783 @@ double wrap_angle_0_2pi(double value)
     while (value >= 2 * M_PI)
         value -= 2 * M_PI;
     return value;
+}
+
+struct GearGeneratorParams {
+    double module = 2.0;
+    int teeth = 24;
+    double pressure_angle_deg = 20.0;
+    double backlash_mm = 0.0;
+    int involute_segments = 12;
+    double bore_diameter_mm = 5.0;
+};
+
+struct JointGeneratorParams {
+    double finger_width_mm = 6.0;
+    double space_width_mm = 6.0;
+    double hole_width_mm = 3.0;
+    double edge_width_mm = 3.0;
+    double surroundingspaces = 2.0;
+    double play_mm = 0.0;
+    double extra_length_mm = 0.0;
+    double thickness_mm = 3.0;
+    double burn_mm = 0.1;
+};
+
+enum class JointFamilyPreset {
+    FINGER = 0,
+};
+
+enum class JointFingerVariantPreset {
+    RECTANGULAR = 0,
+    SPRINGS = 1,
+    BARBS = 2,
+    SNAP = 3,
+};
+
+enum class JointRolePreset {
+    EDGE = 0,
+    COUNTERPART = 1,
+    HOLES = 2,
+    PAIR_EDGE_COUNTERPART = 3,
+    PAIR_COUNTERPART_EDGE = 4,
+    PAIR_EDGE_HOLES = 5,
+    PAIR_HOLES_EDGE = 6,
+    LEGACY_INTERLOCK = 7,
+};
+
+const char *joint_family_label(JointFamilyPreset family)
+{
+    switch (family) {
+    case JointFamilyPreset::FINGER:
+    default:
+        return "Finger";
+    }
+}
+
+const char *joint_finger_variant_label(JointFingerVariantPreset variant)
+{
+    switch (variant) {
+    case JointFingerVariantPreset::SPRINGS:
+        return "Springs";
+    case JointFingerVariantPreset::BARBS:
+        return "Barbs";
+    case JointFingerVariantPreset::SNAP:
+        return "Snap";
+    case JointFingerVariantPreset::RECTANGULAR:
+    default:
+        return "Rectangular";
+    }
+}
+
+const char *joint_role_label(JointRolePreset role)
+{
+    switch (role) {
+    case JointRolePreset::COUNTERPART:
+        return "Counterpart";
+    case JointRolePreset::HOLES:
+        return "Holes";
+    case JointRolePreset::PAIR_EDGE_COUNTERPART:
+        return "Pair: Edge / Counterpart";
+    case JointRolePreset::PAIR_COUNTERPART_EDGE:
+        return "Pair: Counterpart / Edge";
+    case JointRolePreset::PAIR_EDGE_HOLES:
+        return "Pair: Edge / Holes";
+    case JointRolePreset::PAIR_HOLES_EDGE:
+        return "Pair: Holes / Edge";
+    case JointRolePreset::LEGACY_INTERLOCK:
+        return "Pair: Legacy Interlock";
+    case JointRolePreset::EDGE:
+    default:
+        return "Edge";
+    }
+}
+
+JointFamilyPreset joint_family_from_index(unsigned int idx)
+{
+    switch (idx) {
+    case 0:
+    default:
+        return JointFamilyPreset::FINGER;
+    }
+}
+
+JointFingerVariantPreset joint_finger_variant_from_index(unsigned int idx)
+{
+    switch (idx) {
+    case 1:
+        return JointFingerVariantPreset::SPRINGS;
+    case 2:
+        return JointFingerVariantPreset::BARBS;
+    case 3:
+        return JointFingerVariantPreset::SNAP;
+    case 0:
+    default:
+        return JointFingerVariantPreset::RECTANGULAR;
+    }
+}
+
+JointRolePreset joint_role_from_index(unsigned int idx)
+{
+    switch (idx) {
+    case 1:
+        return JointRolePreset::COUNTERPART;
+    case 2:
+        return JointRolePreset::HOLES;
+    case 3:
+        return JointRolePreset::PAIR_EDGE_COUNTERPART;
+    case 4:
+        return JointRolePreset::PAIR_COUNTERPART_EDGE;
+    case 5:
+        return JointRolePreset::PAIR_EDGE_HOLES;
+    case 6:
+        return JointRolePreset::PAIR_HOLES_EDGE;
+    case 7:
+        return JointRolePreset::LEGACY_INTERLOCK;
+    case 0:
+    default:
+        return JointRolePreset::EDGE;
+    }
+}
+
+bool joint_role_requires_pair(JointRolePreset role)
+{
+    switch (role) {
+    case JointRolePreset::PAIR_EDGE_COUNTERPART:
+    case JointRolePreset::PAIR_COUNTERPART_EDGE:
+    case JointRolePreset::PAIR_EDGE_HOLES:
+    case JointRolePreset::PAIR_HOLES_EDGE:
+    case JointRolePreset::LEGACY_INTERLOCK:
+        return true;
+    case JointRolePreset::EDGE:
+    case JointRolePreset::COUNTERPART:
+    case JointRolePreset::HOLES:
+    default:
+        return false;
+    }
+}
+
+bool joint_role_uses_holes(JointRolePreset role)
+{
+    switch (role) {
+    case JointRolePreset::HOLES:
+    case JointRolePreset::PAIR_EDGE_HOLES:
+    case JointRolePreset::PAIR_HOLES_EDGE:
+        return true;
+    default:
+        return false;
+    }
+}
+
+JointGeneratorParams resolve_joint_generator_params(double thickness_mm, double burn_mm, double finger_mm, double space_mm,
+                                                    double hole_width_mm, double edge_width_mm, double surroundingspaces,
+                                                    double play_mm, double extra_length_mm, bool auto_size)
+{
+    JointGeneratorParams params;
+    params.thickness_mm = std::max(0.1, thickness_mm);
+    params.burn_mm = std::max(0.0, burn_mm);
+    params.extra_length_mm = std::max(0.0, extra_length_mm);
+
+    if (auto_size) {
+        const auto base = params.thickness_mm * 2.0;
+        params.finger_width_mm = std::max(0.1, base);
+        params.space_width_mm = std::max(0.0, base);
+        params.hole_width_mm = std::max(0.1, params.thickness_mm);
+        params.edge_width_mm = std::max(0.0, params.thickness_mm);
+        params.surroundingspaces = 2.0;
+        params.play_mm = 0.0;
+    }
+    else {
+        params.finger_width_mm = std::max(0.1, finger_mm);
+        params.space_width_mm = std::max(0.0, space_mm);
+        params.hole_width_mm = std::max(0.1, hole_width_mm);
+        params.edge_width_mm = std::max(0.0, edge_width_mm);
+        params.surroundingspaces = std::max(0.0, surroundingspaces);
+        params.play_mm = std::max(0.0, play_mm);
+    }
+
+    return params;
+}
+
+struct GearProfileSource {
+    enum class Kind {
+        CIRCLE,
+        ARC,
+        BEZIER_CHAIN,
+    };
+
+    Kind kind = Kind::CIRCLE;
+    UUID layer;
+    UUID wrkpl;
+    std::vector<UUID> source_entities;
+    glm::dvec2 center = {0, 0};
+    double radius = 0.0;
+    double start_angle = 0.0;
+    double sweep_angle = 0.0;
+    std::vector<glm::dvec2> polyline;
+    bool closed = false;
+};
+
+struct PolylineSample {
+    std::vector<glm::dvec2> points;
+    std::vector<double> acc;
+    bool closed = false;
+    double total = 0.0;
+};
+
+struct BoxesTemplateDef {
+    enum class ArgKind {
+        FLOAT,
+        INT,
+        BOOL,
+        CHOICE,
+        STRING,
+    };
+
+    struct ArgDef {
+        std::string dest;
+        std::string option;
+        std::string label;
+        std::string help;
+        std::string group;
+        ArgKind kind = ArgKind::STRING;
+        std::string default_string;
+        double default_float = 0.0;
+        int default_int = 0;
+        bool default_bool = false;
+        std::vector<std::string> choices;
+    };
+
+    struct ArgGroupDef {
+        std::string title;
+        std::vector<std::string> args;
+    };
+
+    std::string id;
+    std::string label;
+    std::string generator;
+    std::string category;
+    std::string short_description;
+    std::string description;
+    std::string sample_image;
+    std::string sample_thumbnail;
+    std::vector<ArgDef> args;
+    std::vector<ArgGroupDef> arg_groups;
+};
+
+struct BoxesCategoryDef {
+    std::string id;
+    std::string title;
+    std::string description;
+    std::string sample_image;
+    std::string sample_thumbnail;
+};
+
+using SettingsArgKind = BoxesTemplateDef::ArgKind;
+using SettingsArgDef = BoxesTemplateDef::ArgDef;
+using SettingsArgGroupDef = BoxesTemplateDef::ArgGroupDef;
+
+struct JointEdgeDef {
+    std::string id;
+    std::string label;
+    std::string side_mode;
+    std::vector<SettingsArgDef> extra_args;
+};
+
+struct JointRoleDef {
+    std::string id;
+    std::string label;
+    bool pair = false;
+    std::string line0_edge;
+    std::string line1_edge;
+};
+
+struct JointFamilyDef {
+    std::string id;
+    std::string label;
+    std::string description;
+    std::vector<SettingsArgDef> args;
+    std::vector<SettingsArgGroupDef> arg_groups;
+    std::vector<JointEdgeDef> edges;
+    std::vector<JointRoleDef> roles;
+};
+
+struct JointUiCategoryDef {
+    std::string id;
+    std::string label;
+    std::string description;
+    bool quick_popover_supported = true;
+};
+
+std::vector<BoxesTemplateDef> g_boxes_templates;
+std::vector<BoxesCategoryDef> g_boxes_categories;
+std::vector<JointFamilyDef> g_joint_families;
+const JointEdgeDef *find_joint_edge(const JointFamilyDef &family, const std::string &edge_id);
+
+const std::vector<JointUiCategoryDef> &joint_ui_categories()
+{
+    static const std::vector<JointUiCategoryDef> categories = {
+            {"joinery", "Joinery", "Finger joints, dovetails, grooves, click joints, and stackable edges.", true},
+            {"motion", "Motion", "Hinges and sliding lid features that usually need guided edge pairing.", false},
+            {"utility", "Utility", "Functional cuts such as mounting slots and flex patterns.", true},
+            {"shape", "Shape", "Handle and profile features for selected edges.", true},
+    };
+    return categories;
+}
+
+const JointUiCategoryDef &joint_ui_category_for_family_id(const std::string &family_id)
+{
+    const auto &categories = joint_ui_categories();
+    const auto pick = [&](size_t idx) -> const JointUiCategoryDef & { return categories.at(std::min(idx, categories.size() - 1)); };
+
+    if (family_id == "finger" || family_id == "stackable" || family_id == "click" || family_id == "dovetail"
+        || family_id == "grooved")
+        return pick(0);
+    if (family_id == "hinge" || family_id == "chest_hinge" || family_id == "cabinet_hinge" || family_id == "slide_on_lid")
+        return pick(1);
+    if (family_id == "mounting" || family_id == "flex")
+        return pick(2);
+    if (family_id == "rounded_triangle" || family_id == "handle")
+        return pick(3);
+    return pick(0);
+}
+
+const JointFamilyDef *get_selected_joint_family(const Gtk::DropDown *family_dropdown, const std::vector<unsigned int> &visible_family_indices)
+{
+    if (!family_dropdown || visible_family_indices.empty() || g_joint_families.empty())
+        return nullptr;
+    const auto idx =
+            static_cast<size_t>(std::min<unsigned int>(family_dropdown->get_selected(), visible_family_indices.size() - 1));
+    return &g_joint_families.at(visible_family_indices.at(idx));
+}
+
+const JointRoleDef *get_selected_joint_role(const JointFamilyDef &family, const Gtk::DropDown *role_dropdown)
+{
+    if (family.roles.empty())
+        return nullptr;
+    const auto idx =
+            static_cast<size_t>(std::min<unsigned int>(role_dropdown ? role_dropdown->get_selected() : 0, family.roles.size() - 1));
+    return &family.roles.at(idx);
+}
+
+bool joint_family_quick_popover_supported(const JointFamilyDef &family)
+{
+    return joint_ui_category_for_family_id(family.id).quick_popover_supported;
+}
+
+enum class JointSideMode {
+    AUTO = 0,
+    INSIDE = 1,
+    OUTSIDE = 2,
+};
+
+JointSideMode joint_side_mode_from_index(unsigned int index)
+{
+    switch (index) {
+    case 1:
+        return JointSideMode::INSIDE;
+    case 2:
+        return JointSideMode::OUTSIDE;
+    case 0:
+    default:
+        return JointSideMode::AUTO;
+    }
+}
+
+const char *joint_side_mode_label(JointSideMode mode)
+{
+    switch (mode) {
+    case JointSideMode::INSIDE:
+        return "Inside";
+    case JointSideMode::OUTSIDE:
+        return "Outside";
+    case JointSideMode::AUTO:
+    default:
+        return "Auto";
+    }
+}
+
+const JointRoleDef *find_swapped_joint_role(const JointFamilyDef &family, const JointRoleDef &role)
+{
+    if (!role.pair)
+        return nullptr;
+    const auto it = std::find_if(family.roles.begin(), family.roles.end(), [&](const auto &candidate) {
+        return candidate.pair && candidate.line0_edge == role.line1_edge && candidate.line1_edge == role.line0_edge;
+    });
+    return it != family.roles.end() ? &*it : nullptr;
+}
+
+std::string joint_selection_hint(const JointFamilyDef &family, const JointRoleDef &role)
+{
+    const auto *edge0 = find_joint_edge(family, role.line0_edge);
+    const auto *edge1 = role.pair ? find_joint_edge(family, role.line1_edge) : nullptr;
+    const auto edge0_label = edge0 ? edge0->label : role.label;
+    const auto edge1_label = edge1 ? edge1->label : std::string{};
+
+    if (role.pair) {
+        return "Select 2 lines in order on the same workplane. The first edge becomes " + edge0_label
+               + ", the second becomes " + edge1_label + ". Use Swap roles to flip them.";
+    }
+
+    return "Select one or more lines. " + edge0_label + " is applied to each selected edge independently.";
+}
+
+struct JointSelectionState {
+    bool ready = false;
+    std::string text;
+};
+
+JointSelectionState evaluate_joint_selection_state(const Document &doc, const UUID &group_uu, const std::set<SelectableRef> &selection,
+                                                   const JointFamilyDef &family, const JointRoleDef &role)
+{
+    const auto lines = selected_line_entities_in_group(doc, selection, group_uu);
+    if (role.pair) {
+        if (lines.empty())
+            return {false, "Select the first edge."};
+        if (lines.size() == 1)
+            return {false, "Select the matching second edge."};
+        if (lines.size() != 2)
+            return {false, "Select exactly 2 lines for this operation."};
+        const auto *line0 = doc.get_entity_ptr<EntityLine2D>(lines.at(0));
+        const auto *line1 = doc.get_entity_ptr<EntityLine2D>(lines.at(1));
+        if (!line0 || !line1)
+            return {false, "Selection must contain 2 line entities."};
+        if (line0->m_wrkpl != line1->m_wrkpl)
+            return {false, "Both edges must be on the same workplane."};
+        const auto len0 = glm::length(line0->m_p2 - line0->m_p1);
+        const auto len1 = glm::length(line1->m_p2 - line1->m_p1);
+        if (len0 < 1e-6 || len1 < 1e-6)
+            return {false, "Selected edges are too short."};
+        return {true, "Ready: edge pair selected."};
+    }
+
+    if (lines.empty())
+        return {false, "Select one or more lines."};
+    return {true, "Ready: " + std::to_string(lines.size()) + " edge(s) selected."};
+}
+
+const BoxesTemplateDef &get_boxes_template(int index)
+{
+    return g_boxes_templates.at(static_cast<size_t>(std::clamp(index, 0, static_cast<int>(g_boxes_templates.size()) - 1)));
+}
+
+const JointFamilyDef &get_joint_family(unsigned int index)
+{
+    return g_joint_families.at(static_cast<size_t>(std::clamp(index, 0u, static_cast<unsigned int>(g_joint_families.size() - 1))));
+}
+
+const JointEdgeDef *find_joint_edge(const JointFamilyDef &family, const std::string &edge_id)
+{
+    const auto it = std::find_if(family.edges.begin(), family.edges.end(),
+                                 [&edge_id](const auto &edge) { return edge.id == edge_id; });
+    return it != family.edges.end() ? &*it : nullptr;
+}
+
+const JointRoleDef *find_joint_role(const JointFamilyDef &family, const std::string &role_id)
+{
+    const auto it = std::find_if(family.roles.begin(), family.roles.end(),
+                                 [&role_id](const auto &role) { return role.id == role_id; });
+    return it != family.roles.end() ? &*it : nullptr;
+}
+
+constexpr double kJointMinEdgeStubMm = 2.0;
+
+glm::dvec2 polar_2d(double r, double angle)
+{
+    return {r * std::cos(angle), r * std::sin(angle)};
+}
+
+void append_point_if_new(std::vector<glm::dvec2> &points, const glm::dvec2 &p);
+std::vector<std::filesystem::path> get_boxes_runner_candidates();
+std::vector<std::string> get_boxes_python_candidates(const std::filesystem::path &runner_path);
+bool ensure_boxes_catalog_loaded(std::string &error);
+bool ensure_joint_families_loaded(std::string &error);
+std::vector<std::filesystem::path> get_boxes_sample_candidates(const std::string &sample_image);
+std::optional<std::filesystem::path> get_boxes_sample_path(const BoxesTemplateDef &template_def);
+std::optional<std::filesystem::path> get_boxes_sample_path(const std::string &sample_image);
+
+int normalize_gear_hole_mode_index(int idx)
+{
+    constexpr int kCount = 3;
+    idx %= kCount;
+    if (idx < 0)
+        idx += kCount;
+    return idx;
+}
+
+const char *gear_hole_mode_name_by_index(int idx)
+{
+    switch (normalize_gear_hole_mode_index(idx)) {
+    case 1:
+        return "Cross";
+    case 2:
+        return "Slot";
+    case 0:
+    default:
+        return "Circle";
+    }
+}
+
+void append_closed_polyline(std::vector<std::vector<glm::dvec2>> &polylines, std::vector<glm::dvec2> pts)
+{
+    if (pts.size() < 3)
+        return;
+    if (glm::length(pts.front() - pts.back()) < 1e-6)
+        pts.pop_back();
+    if (pts.size() < 3)
+        return;
+    polylines.push_back(std::move(pts));
+}
+
+void append_gear_hole_polylines(std::vector<std::vector<glm::dvec2>> &polylines, int hole_mode_index, double bore_diameter,
+                                double material_thickness, const glm::dvec2 &center, double rotation_rad, int circle_segments)
+{
+    const auto bore = std::max(0.0, bore_diameter);
+    if (bore <= 1e-6)
+        return;
+
+    const auto thick = std::clamp(material_thickness, 0.1, std::max(0.1, bore));
+    const auto mode = normalize_gear_hole_mode_index(hole_mode_index);
+    auto rot = [&](const glm::dvec2 &p) { return rotate_point_2d(p, {0, 0}, rotation_rad) + center; };
+
+    if (mode == 0) {
+        const auto r = bore * 0.5;
+        const auto segs = std::max(24, circle_segments);
+        std::vector<glm::dvec2> hole;
+        hole.reserve(static_cast<size_t>(segs));
+        for (int i = 0; i < segs; i++) {
+            const auto a = 2.0 * M_PI * static_cast<double>(i) / static_cast<double>(segs);
+            hole.push_back(rot(polar_2d(r, a)));
+        }
+        append_closed_polyline(polylines, std::move(hole));
+        return;
+    }
+
+    const auto half_l = bore * 0.5;
+    const auto half_w = thick * 0.5;
+
+    if (mode == 2) {
+        std::vector<glm::dvec2> slot = {
+                rot({-half_l, -half_w}),
+                rot({half_l, -half_w}),
+                rot({half_l, half_w}),
+                rot({-half_l, half_w}),
+        };
+        append_closed_polyline(polylines, std::move(slot));
+        return;
+    }
+
+    std::vector<glm::dvec2> cross = {
+            rot({-half_w, -half_l}),
+            rot({half_w, -half_l}),
+            rot({half_w, -half_w}),
+            rot({half_l, -half_w}),
+            rot({half_l, half_w}),
+            rot({half_w, half_w}),
+            rot({half_w, half_l}),
+            rot({-half_w, half_l}),
+            rot({-half_w, half_w}),
+            rot({-half_l, half_w}),
+            rot({-half_l, -half_w}),
+            rot({-half_w, -half_w}),
+    };
+    append_closed_polyline(polylines, std::move(cross));
+}
+
+double signed_area_polyline(const std::vector<glm::dvec2> &pts)
+{
+    if (pts.size() < 3)
+        return 0.0;
+    double area2 = 0.0;
+    for (size_t i = 0; i < pts.size(); i++) {
+        const auto &a = pts.at(i);
+        const auto &b = pts.at((i + 1) % pts.size());
+        area2 += a.x * b.y - b.x * a.y;
+    }
+    return area2 * 0.5;
+}
+
+std::vector<UUID> selected_entities_in_group_unique(const Document &doc, const std::set<SelectableRef> &sel, const UUID &group_uu)
+{
+    std::vector<UUID> out;
+    for (const auto &sr : entities_from_selection(sel)) {
+        if (sr.type != SelectableRef::Type::ENTITY || sr.point != 0)
+            continue;
+        const auto *en = doc.get_entity_ptr(sr.item);
+        if (!en || en->m_group != group_uu)
+            continue;
+        if (std::find(out.begin(), out.end(), sr.item) == out.end())
+            out.push_back(sr.item);
+    }
+    return out;
+}
+
+void sample_bezier_points(const EntityBezier2D &bez, bool reversed, int steps, std::vector<glm::dvec2> &out)
+{
+    if (steps < 1)
+        steps = 1;
+    for (int i = 0; i <= steps; i++) {
+        const auto t = static_cast<double>(i) / static_cast<double>(steps);
+        const auto u = reversed ? (1.0 - t) : t;
+        const auto p = bez.get_interpolated(u);
+        if (out.empty() || glm::length(out.back() - p) > 1e-6)
+            out.push_back(p);
+    }
+}
+
+bool build_polyline_sample(const std::vector<glm::dvec2> &path, bool closed, PolylineSample &sample)
+{
+    sample = {};
+    sample.points = path;
+    sample.closed = closed;
+    if (sample.points.size() < 2)
+        return false;
+    if (sample.closed && glm::length(sample.points.front() - sample.points.back()) < 1e-6)
+        sample.points.pop_back();
+    if (sample.points.size() < 2)
+        return false;
+
+    const auto seg_count = sample.points.size() - 1 + (sample.closed ? 1 : 0);
+    if (seg_count == 0)
+        return false;
+
+    sample.acc.clear();
+    sample.acc.reserve(seg_count + 1);
+    sample.acc.push_back(0.0);
+    double total = 0.0;
+    for (size_t i = 0; i < seg_count; i++) {
+        const auto &a = sample.points.at(i);
+        const auto &b = sample.points.at((i + 1) % sample.points.size());
+        const auto len = glm::length(b - a);
+        if (len <= 1e-9)
+            continue;
+        total += len;
+        sample.acc.push_back(total);
+    }
+
+    sample.total = total;
+    return sample.total > 1e-6 && sample.acc.size() >= 2;
+}
+
+bool polyline_eval(const PolylineSample &sample, double s, glm::dvec2 &p, glm::dvec2 &tangent)
+{
+    if (sample.points.size() < 2 || sample.acc.size() < 2 || sample.total <= 1e-6)
+        return false;
+    s = std::clamp(s, 0.0, sample.total);
+
+    auto it = std::upper_bound(sample.acc.begin(), sample.acc.end(), s);
+    size_t seg_idx = 0;
+    if (it == sample.acc.begin())
+        seg_idx = 0;
+    else if (it == sample.acc.end())
+        seg_idx = sample.acc.size() - 2;
+    else
+        seg_idx = static_cast<size_t>(std::distance(sample.acc.begin(), it) - 1);
+
+    const auto seg_start = sample.acc.at(seg_idx);
+    const auto seg_end = sample.acc.at(seg_idx + 1);
+    const auto seg_len = std::max(1e-9, seg_end - seg_start);
+    const auto u = std::clamp((s - seg_start) / seg_len, 0.0, 1.0);
+
+    const auto i0 = seg_idx % sample.points.size();
+    const auto i1 = (seg_idx + 1) % sample.points.size();
+    const auto &a = sample.points.at(i0);
+    const auto &b = sample.points.at(i1);
+    p = a + (b - a) * u;
+    tangent = normalize_dir(b - a);
+    return true;
+}
+
+std::vector<glm::dvec2> build_radial_teeth_profile(const glm::dvec2 &center, double radius, double start_angle, double sweep_angle,
+                                                   bool closed, double module_mm, bool inward)
+{
+    std::vector<glm::dvec2> profile;
+    if (radius <= 1e-6)
+        return profile;
+
+    const auto arc_len = std::abs(sweep_angle) * radius;
+    const auto pitch = std::max(0.1, M_PI * std::max(0.05, module_mm));
+    int tooth_count = 0;
+    if (closed)
+        tooth_count = std::max(3, static_cast<int>(std::lround(arc_len / pitch)));
+    else
+        tooth_count = std::max(1, static_cast<int>(std::floor((arc_len + pitch * 0.5) / pitch)));
+    tooth_count = std::clamp(tooth_count, 1, 2000);
+
+    const auto cell = sweep_angle / static_cast<double>(tooth_count);
+    const auto depth = std::max(0.1, module_mm);
+    const auto root_r = radius;
+    const auto tip_r = inward ? std::max(0.05, radius - depth) : (radius + depth);
+
+    auto point_at = [&](double r, double a) { return center + glm::dvec2(std::cos(a) * r, std::sin(a) * r); };
+
+    profile.reserve(static_cast<size_t>(tooth_count) * 8 + 2);
+    profile.push_back(point_at(root_r, start_angle));
+    for (int i = 0; i < tooth_count; i++) {
+        const auto a0 = start_angle + cell * static_cast<double>(i);
+        const auto a_root_start = a0 + cell * 0.14;
+        const auto a_flank_in = a0 + cell * 0.26;
+        const auto a_tooth_start = a0 + cell * 0.36;
+        const auto a_tooth_end = a0 + cell * 0.64;
+        const auto a_flank_out = a0 + cell * 0.74;
+        const auto a_root_end = a0 + cell * 0.86;
+        const auto a1 = a0 + cell;
+        const auto mid_r = root_r + (tip_r - root_r) * 0.55;
+
+        append_point_if_new(profile, point_at(root_r, a_root_start));
+        append_point_if_new(profile, point_at(mid_r, a_flank_in));
+        append_point_if_new(profile, point_at(tip_r, a_tooth_start));
+        append_point_if_new(profile, point_at(tip_r, a_tooth_end));
+        append_point_if_new(profile, point_at(mid_r, a_flank_out));
+        append_point_if_new(profile, point_at(root_r, a_root_end));
+        append_point_if_new(profile, point_at(root_r, a1));
+    }
+
+    if (!closed)
+        append_point_if_new(profile, point_at(root_r, start_angle + sweep_angle));
+    return profile;
+}
+
+std::vector<glm::dvec2> build_polyline_teeth_profile(const std::vector<glm::dvec2> &path, bool closed, double module_mm, bool inward)
+{
+    std::vector<glm::dvec2> profile;
+    PolylineSample sample;
+    if (!build_polyline_sample(path, closed, sample))
+        return profile;
+
+    const auto pitch = std::max(0.1, M_PI * std::max(0.05, module_mm));
+    const auto tooth_w = pitch * 0.5;
+    const auto depth = std::max(0.1, module_mm);
+    const auto area = signed_area_polyline(sample.points);
+    const auto outside_sign = (area >= 0.0) ? -1.0 : 1.0;
+    const auto side_sign = closed ? (inward ? -outside_sign : outside_sign) : (inward ? -1.0 : 1.0);
+
+    auto normal_at = [&](const glm::dvec2 &tan) { return normalize_dir(glm::dvec2(-tan.y, tan.x)) * side_sign; };
+    auto point_at = [&](double s) {
+        glm::dvec2 p{0, 0};
+        glm::dvec2 t{1, 0};
+        polyline_eval(sample, s, p, t);
+        return std::pair<glm::dvec2, glm::dvec2>{p, t};
+    };
+    auto point_with_offset = [&](double s, double offset) {
+        const auto [p, t] = point_at(s);
+        return p + normal_at(t) * offset;
+    };
+    auto emit_flat = [&](double s0, double s1) {
+        if (s1 <= s0 + 1e-6)
+            return;
+        const auto [p0, t0] = point_at(s0);
+        const auto [p1, t1] = point_at(s1);
+        if (profile.empty())
+            profile.push_back(p0);
+        else
+            append_point_if_new(profile, p0);
+        append_point_if_new(profile, p1);
+    };
+    auto emit_tooth = [&](double s0, double s1) {
+        if (s1 <= s0 + 1e-6)
+            return;
+        const auto len = s1 - s0;
+        const auto s_root_start = s0 + len * 0.14;
+        const auto s_flank_in = s0 + len * 0.26;
+        const auto s_tooth_start = s0 + len * 0.36;
+        const auto s_tooth_end = s0 + len * 0.64;
+        const auto s_flank_out = s0 + len * 0.74;
+        const auto s_root_end = s0 + len * 0.86;
+        emit_flat(s0, s_root_start);
+        append_point_if_new(profile, point_with_offset(s_flank_in, depth * 0.55));
+        append_point_if_new(profile, point_with_offset(s_tooth_start, depth));
+        append_point_if_new(profile, point_with_offset(s_tooth_end, depth));
+        append_point_if_new(profile, point_with_offset(s_flank_out, depth * 0.55));
+        append_point_if_new(profile, point_with_offset(s_root_end, 0.0));
+        emit_flat(s_root_end, s1);
+    };
+
+    if (closed) {
+        int tooth_count = std::max(3, static_cast<int>(std::lround(sample.total / pitch)));
+        tooth_count = std::clamp(tooth_count, 3, 2000);
+        const auto cell = sample.total / static_cast<double>(tooth_count);
+        for (int i = 0; i < tooth_count; i++) {
+            const auto s0 = cell * static_cast<double>(i);
+            const auto s1 = s0 + cell;
+            emit_tooth(s0, s1);
+        }
+    }
+    else {
+        int teeth = std::max(1, static_cast<int>(std::floor((sample.total + tooth_w) / (2.0 * tooth_w))));
+        teeth = std::clamp(teeth, 1, 2000);
+        const auto gaps = std::max(0, teeth - 1);
+        std::vector<double> gap_widths(static_cast<size_t>(gaps), tooth_w);
+        const auto used = tooth_w * static_cast<double>(std::max(1, 2 * teeth - 1));
+        auto remainder = std::max(0.0, sample.total - used);
+        if (gaps > 0 && remainder > 1e-9) {
+            if ((gaps % 2) == 1) {
+                gap_widths.at(static_cast<size_t>(gaps / 2)) += remainder;
+            }
+            else {
+                const auto mid_right = static_cast<size_t>(gaps / 2);
+                const auto mid_left = mid_right - 1;
+                gap_widths.at(mid_left) += remainder * 0.5;
+                gap_widths.at(mid_right) += remainder * 0.5;
+            }
+        }
+        double cursor = 0.0;
+        for (int i = 0; i < teeth; i++) {
+            const auto tooth_end = std::min(sample.total, cursor + tooth_w);
+            if (inward)
+                emit_flat(cursor, tooth_end);
+            else
+                emit_tooth(cursor, tooth_end);
+            cursor = tooth_end;
+            if (i + 1 < teeth) {
+                const auto gap_end = std::min(sample.total, cursor + gap_widths.at(static_cast<size_t>(i)));
+                if (inward)
+                    emit_tooth(cursor, gap_end);
+                else
+                    emit_flat(cursor, gap_end);
+                cursor = gap_end;
+            }
+        }
+        emit_flat(cursor, sample.total);
+    }
+
+    if (closed && !profile.empty() && glm::length(profile.front() - profile.back()) < 1e-6)
+        profile.pop_back();
+    return profile;
+}
+
+bool collect_selected_gear_profile_source(const Document &doc, const std::set<SelectableRef> &sel, const UUID &group_uu,
+                                          GearProfileSource &out, std::string *error = nullptr)
+{
+    const auto selected = selected_entities_in_group_unique(doc, sel, group_uu);
+    if (selected.empty()) {
+        if (error)
+            *error = "Select a circle, arc, or oval (Bezier chain)";
+        return false;
+    }
+
+    if (selected.size() == 1) {
+        const auto uu = selected.front();
+        if (const auto *circle = doc.get_entity_ptr<EntityCircle2D>(uu)) {
+            out = {};
+            out.kind = GearProfileSource::Kind::CIRCLE;
+            out.layer = circle->m_layer;
+            out.wrkpl = circle->m_wrkpl;
+            out.source_entities = {uu};
+            out.center = circle->m_center;
+            out.radius = std::max(0.0, circle->m_radius);
+            out.start_angle = 0.0;
+            out.sweep_angle = 2.0 * M_PI;
+            out.closed = true;
+            return out.radius > 1e-6;
+        }
+        if (const auto *arc = doc.get_entity_ptr<EntityArc2D>(uu)) {
+            out = {};
+            out.kind = GearProfileSource::Kind::ARC;
+            out.layer = arc->m_layer;
+            out.wrkpl = arc->m_wrkpl;
+            out.source_entities = {uu};
+            out.center = arc->m_center;
+            out.radius = glm::length(arc->m_from - arc->m_center);
+            out.start_angle = std::atan2(arc->m_from.y - arc->m_center.y, arc->m_from.x - arc->m_center.x);
+            auto a1 = std::atan2(arc->m_to.y - arc->m_center.y, arc->m_to.x - arc->m_center.x);
+            out.sweep_angle = a1 - out.start_angle;
+            while (out.sweep_angle <= 0)
+                out.sweep_angle += 2.0 * M_PI;
+            out.closed = false;
+            return out.radius > 1e-6 && out.sweep_angle > 1e-6;
+        }
+    }
+
+    std::vector<const EntityBezier2D *> beziers;
+    beziers.reserve(selected.size());
+    UUID layer;
+    UUID wrkpl;
+    bool first = true;
+    for (const auto &uu : selected) {
+        const auto *bez = doc.get_entity_ptr<EntityBezier2D>(uu);
+        if (!bez) {
+            if (error)
+                *error = "Gears quick mode supports circle, arc, or Bezier-only selection";
+            return false;
+        }
+        if (first) {
+            layer = bez->m_layer;
+            wrkpl = bez->m_wrkpl;
+            first = false;
+        }
+        else if (bez->m_wrkpl != wrkpl) {
+            if (error)
+                *error = "Selected Beziers must be on the same workplane";
+            return false;
+        }
+        beziers.push_back(bez);
+    }
+    if (beziers.empty())
+        return false;
+
+    struct ChainItem {
+        const EntityBezier2D *bez = nullptr;
+        UUID uu;
+        bool used = false;
+    };
+    std::vector<ChainItem> chain;
+    chain.reserve(beziers.size());
+    for (size_t i = 0; i < selected.size(); i++)
+        chain.push_back({beziers.at(i), selected.at(i), false});
+
+    std::vector<glm::dvec2> path;
+    constexpr int bez_steps = 24;
+    chain.front().used = true;
+    sample_bezier_points(*chain.front().bez, false, bez_steps, path);
+    for (size_t used_count = 1; used_count < chain.size(); used_count++) {
+        const auto tail = path.back();
+        double best_dist = std::numeric_limits<double>::max();
+        size_t best_idx = chain.size();
+        bool best_reversed = false;
+        for (size_t i = 0; i < chain.size(); i++) {
+            if (chain.at(i).used)
+                continue;
+            const auto d_start = glm::length(chain.at(i).bez->m_p1 - tail);
+            if (d_start < best_dist) {
+                best_dist = d_start;
+                best_idx = i;
+                best_reversed = false;
+            }
+            const auto d_end = glm::length(chain.at(i).bez->m_p2 - tail);
+            if (d_end < best_dist) {
+                best_dist = d_end;
+                best_idx = i;
+                best_reversed = true;
+            }
+        }
+        if (best_idx >= chain.size())
+            break;
+        chain.at(best_idx).used = true;
+        sample_bezier_points(*chain.at(best_idx).bez, best_reversed, bez_steps, path);
+    }
+
+    if (path.size() < 2) {
+        if (error)
+            *error = "Couldn't build a path from selected Beziers";
+        return false;
+    }
+    bool closed = glm::length(path.front() - path.back()) < 1e-2;
+    if (closed)
+        path.pop_back();
+
+    out = {};
+    out.kind = GearProfileSource::Kind::BEZIER_CHAIN;
+    out.layer = layer;
+    out.wrkpl = wrkpl;
+    out.source_entities = selected;
+    out.polyline = std::move(path);
+    out.closed = closed;
+    return out.polyline.size() >= 2;
+}
+
+void append_point_if_new(std::vector<glm::dvec2> &points, const glm::dvec2 &p)
+{
+    if (points.empty() || glm::length(points.back() - p) > 1e-6)
+        points.push_back(p);
+}
+
+void append_arc_ccw(std::vector<glm::dvec2> &points, double radius, double from_angle, double to_angle, int steps)
+{
+    if (steps < 1)
+        return;
+    auto delta = to_angle - from_angle;
+    while (delta <= 0)
+        delta += 2 * M_PI;
+    for (int i = 1; i <= steps; i++) {
+        const auto angle = from_angle + delta * static_cast<double>(i) / static_cast<double>(steps);
+        append_point_if_new(points, polar_2d(radius, angle));
+    }
+}
+
+bool build_involute_gear_outline(const GearGeneratorParams &params, std::vector<glm::dvec2> &outline)
+{
+    outline.clear();
+    if (params.teeth < 3 || params.module <= 0)
+        return false;
+
+    const auto z = static_cast<double>(params.teeth);
+    const auto pressure_angle = std::clamp(params.pressure_angle_deg, 5.0, 45.0) * M_PI / 180.0;
+    const auto pitch_radius = params.module * z * 0.5;
+    const auto base_radius = pitch_radius * std::cos(pressure_angle);
+    const auto addendum_radius = pitch_radius + params.module;
+    const auto dedendum_radius = std::max(0.05, pitch_radius - params.module * 1.25);
+    if (addendum_radius <= dedendum_radius || base_radius <= 1e-6)
+        return false;
+
+    const auto tooth_pitch_angle = 2.0 * M_PI / z;
+    const auto backlash = std::clamp(std::max(0.0, params.backlash_mm), 0.0, params.module * 0.4);
+    auto half_tooth_pitch_angle = tooth_pitch_angle * 0.25 - backlash / (4.0 * std::max(1e-6, pitch_radius));
+    half_tooth_pitch_angle = std::clamp(half_tooth_pitch_angle, tooth_pitch_angle * 0.05, tooth_pitch_angle * 0.45);
+
+    const auto involute_angle_for_radius = [base_radius](double radius) {
+        if (radius <= base_radius)
+            return 0.0;
+        const auto t = std::sqrt(std::max(0.0, (radius * radius) / (base_radius * base_radius) - 1.0));
+        return t - std::atan(t);
+    };
+
+    const auto involute_t_for_radius = [base_radius](double radius) {
+        if (radius <= base_radius)
+            return 0.0;
+        return std::sqrt(std::max(0.0, (radius * radius) / (base_radius * base_radius) - 1.0));
+    };
+
+    const auto r_start = std::max(base_radius, dedendum_radius);
+    const auto t_start = involute_t_for_radius(r_start);
+    const auto t_tip = involute_t_for_radius(addendum_radius);
+    const auto inv_pressure = involute_angle_for_radius(pitch_radius);
+    const auto inv_start = involute_angle_for_radius(r_start);
+    const auto inv_tip = involute_angle_for_radius(addendum_radius);
+
+    const auto flank_steps = std::max(4, params.involute_segments);
+    const auto root_arc_steps = std::max(2, params.involute_segments / 3);
+    const auto tip_arc_steps = std::max(2, params.involute_segments / 3);
+
+    auto tooth_angles = [&](int tooth_idx) {
+        const auto center_angle = tooth_pitch_angle * static_cast<double>(tooth_idx);
+        const auto right_base = center_angle - half_tooth_pitch_angle - inv_pressure;
+        const auto left_base = center_angle + half_tooth_pitch_angle + inv_pressure;
+        const auto right_start = right_base + inv_start;
+        const auto right_tip = right_base + inv_tip;
+        const auto left_tip = left_base - inv_tip;
+        const auto left_start = left_base - inv_start;
+        return std::array<double, 6>{right_base, left_base, right_start, right_tip, left_tip, left_start};
+    };
+
+    const auto first_angles = tooth_angles(0);
+    const auto first_right_start = first_angles[2];
+    append_point_if_new(outline, polar_2d(dedendum_radius, first_right_start));
+    if (r_start > dedendum_radius + 1e-6)
+        append_point_if_new(outline, polar_2d(r_start, first_right_start));
+    auto previous_left_start = first_right_start;
+
+    for (int tooth_idx = 0; tooth_idx < params.teeth; tooth_idx++) {
+        const auto angles = tooth_angles(tooth_idx);
+        const auto right_base = angles[0];
+        const auto left_base = angles[1];
+        const auto right_start = angles[2];
+        const auto right_tip = angles[3];
+        const auto left_tip = angles[4];
+        const auto left_start = angles[5];
+
+        if (tooth_idx > 0) {
+            append_arc_ccw(outline, dedendum_radius, previous_left_start, right_start, root_arc_steps);
+            if (r_start > dedendum_radius + 1e-6)
+                append_point_if_new(outline, polar_2d(r_start, right_start));
+        }
+
+        for (int i = 1; i <= flank_steps; i++) {
+            const auto t = t_start + (t_tip - t_start) * static_cast<double>(i) / static_cast<double>(flank_steps);
+            const auto inv = t - std::atan(t);
+            const auto radius = base_radius * std::sqrt(1.0 + t * t);
+            append_point_if_new(outline, polar_2d(radius, right_base + inv));
+        }
+
+        append_arc_ccw(outline, addendum_radius, right_tip, left_tip, tip_arc_steps);
+
+        for (int i = 1; i <= flank_steps; i++) {
+            const auto t = t_tip + (t_start - t_tip) * static_cast<double>(i) / static_cast<double>(flank_steps);
+            const auto inv = t - std::atan(t);
+            const auto radius = base_radius * std::sqrt(1.0 + t * t);
+            append_point_if_new(outline, polar_2d(radius, left_base - inv));
+        }
+
+        if (r_start > dedendum_radius + 1e-6)
+            append_point_if_new(outline, polar_2d(dedendum_radius, left_start));
+        previous_left_start = left_start;
+    }
+
+    append_arc_ccw(outline, dedendum_radius, previous_left_start, first_right_start, root_arc_steps);
+    return outline.size() >= static_cast<size_t>(params.teeth * 6);
+}
+
+struct JointPatternData {
+    int fingers = 0;
+    double finger_width = 0.0;
+    double space_width = 0.0;
+    double left_margin = 0.0;
+    double right_margin = 0.0;
+};
+
+JointPatternData build_joint_pattern_data(double length, const JointGeneratorParams &params, bool counterpart)
+{
+    JointPatternData pattern;
+    if (length <= 1e-6)
+        return pattern;
+
+    const auto base_finger = std::max(0.0, params.finger_width_mm);
+    const auto base_space = std::max(0.0, params.space_width_mm);
+    const auto play = std::max(0.0, params.play_mm);
+    const auto surroundingspaces = std::max(0.0, params.surroundingspaces);
+    const auto pitch = base_space + base_finger;
+    double leftover = length;
+
+    if (pitch >= 0.1 && base_finger > 1e-6) {
+        pattern.fingers = static_cast<int>(std::floor((length - (surroundingspaces - 1.0) * base_space) / pitch));
+        if (pattern.fingers < 0)
+            pattern.fingers = 0;
+        leftover = length - static_cast<double>(pattern.fingers) * pitch + base_space;
+        if (pattern.fingers <= 0)
+            leftover = length;
+    }
+
+    pattern.finger_width = base_finger;
+    pattern.space_width = base_space;
+
+    if (pattern.fingers == 0 && pattern.finger_width > 1e-6 && leftover > 0.75 * params.thickness_mm && leftover > 4.0 * play) {
+        pattern.fingers = 1;
+        pattern.finger_width = leftover * 0.5;
+        pattern.space_width = 0.0;
+        leftover = pattern.finger_width;
+    }
+
+    if (counterpart) {
+        pattern.finger_width += play;
+        pattern.space_width = std::max(0.0, pattern.space_width - play);
+        leftover = std::max(0.0, leftover - play);
+    }
+
+    pattern.left_margin = leftover * 0.5;
+    pattern.right_margin = leftover * 0.5;
+    return pattern;
+}
+
+std::pair<double, double> apply_joint_kerf(double x0, double x1, double kerf)
+{
+    auto xa = x0 + kerf * 0.5;
+    auto xb = x1 - kerf * 0.5;
+    if ((xa - x0) <= kJointMinEdgeStubMm)
+        xa = x0;
+    if ((x1 - xb) <= kJointMinEdgeStubMm)
+        xb = x1;
+    if (xb <= xa) {
+        xa = x0;
+        xb = x1;
+    }
+    return {xa, xb};
+}
+
+struct JointTurtlePoint {
+    double x = 0.0;
+    double y = 0.0;
+};
+
+struct JointTurtle {
+    std::vector<JointTurtlePoint> points;
+    JointTurtlePoint pos{0.0, 0.0};
+    double heading_rad = 0.0;
+
+    void add_point(const JointTurtlePoint &p)
+    {
+        if (points.empty() || std::abs(points.back().x - p.x) > 1e-6 || std::abs(points.back().y - p.y) > 1e-6)
+            points.push_back(p);
+        pos = p;
+    }
+
+    void edge(double length)
+    {
+        add_point({pos.x + std::cos(heading_rad) * length, pos.y + std::sin(heading_rad) * length});
+    }
+
+    void corner(double degrees, double radius = 0.0)
+    {
+        if (std::abs(degrees) < 1e-6)
+            return;
+        if (radius <= 1e-6) {
+            heading_rad += glm::radians(degrees);
+            return;
+        }
+
+        const auto heading = heading_rad;
+        const glm::dvec2 left{-std::sin(heading), std::cos(heading)};
+        glm::dvec2 center;
+        double start_angle = 0.0;
+        if (degrees > 0.0) {
+            center = {pos.x, pos.y};
+            center += left * radius;
+            start_angle = heading - M_PI_2;
+        }
+        else {
+            center = {pos.x, pos.y};
+            center -= left * radius;
+            start_angle = heading + M_PI_2;
+        }
+
+        const auto sweep = glm::radians(degrees);
+        const auto steps = std::max(2, static_cast<int>(std::ceil(std::abs(degrees) / 18.0)));
+        for (int i = 1; i <= steps; i++) {
+            const auto angle = start_angle + sweep * static_cast<double>(i) / static_cast<double>(steps);
+            add_point({center.x + std::cos(angle) * radius, center.y + std::sin(angle) * radius});
+        }
+        heading_rad += sweep;
+    }
+};
+
+void append_joint_rect_segment(std::vector<glm::dvec2> &profile, const auto &point_at, double x0, double x1, double depth, double burn)
+{
+    if (x1 <= x0 + 1e-6)
+        return;
+    const auto [xa, xb] = apply_joint_kerf(x0, x1, burn);
+    append_point_if_new(profile, point_at(xa, 0.0));
+    append_point_if_new(profile, point_at(xa, depth));
+    append_point_if_new(profile, point_at(xb, depth));
+    append_point_if_new(profile, point_at(xb, 0.0));
+}
+
+void append_joint_styled_finger_segment(std::vector<glm::dvec2> &profile, const auto &point_at, double x0, double x1, double depth,
+                                        double thickness_mm, double burn_mm, JointFingerVariantPreset variant, bool positive,
+                                        bool firsthalf)
+{
+    const auto width = x1 - x0;
+    if (width <= 1e-6)
+        return;
+
+    if (!positive || variant == JointFingerVariantPreset::RECTANGULAR) {
+        append_joint_rect_segment(profile, point_at, x0, x1, depth, burn_mm);
+        append_point_if_new(profile, point_at(x1, 0.0));
+        return;
+    }
+
+    if (variant == JointFingerVariantPreset::BARBS) {
+        const auto barb = std::max(0.2 * thickness_mm, 0.12 * width);
+        const auto steps = std::max(2, static_cast<int>((depth + 0.1 * thickness_mm) / std::max(0.2, 0.35 * thickness_mm)));
+        append_point_if_new(profile, point_at(x0, 0.0));
+        for (int i = 0; i < steps; i++) {
+            const auto y0 = depth * static_cast<double>(i) / static_cast<double>(steps);
+            const auto y1 = depth * static_cast<double>(i + 1) / static_cast<double>(steps);
+            append_point_if_new(profile, point_at(x0, y0));
+            append_point_if_new(profile, point_at(x0 + barb, y0 + (y1 - y0) * 0.45));
+            append_point_if_new(profile, point_at(x0, y1));
+        }
+        append_point_if_new(profile, point_at(x1, depth));
+        for (int i = steps; i-- > 0;) {
+            const auto y0 = depth * static_cast<double>(i + 1) / static_cast<double>(steps);
+            const auto y1 = depth * static_cast<double>(i) / static_cast<double>(steps);
+            append_point_if_new(profile, point_at(x1, y0));
+            append_point_if_new(profile, point_at(x1 - barb, y0 - (y0 - y1) * 0.45));
+            append_point_if_new(profile, point_at(x1, y1));
+        }
+        append_point_if_new(profile, point_at(x1, 0.0));
+        return;
+    }
+
+    JointTurtle turtle;
+    turtle.add_point({0.0, 0.0});
+
+    if (variant == JointFingerVariantPreset::SPRINGS) {
+        turtle.corner(-90.0);
+        turtle.edge(0.8 * depth);
+        turtle.corner(90.0, 0.2 * depth);
+        turtle.edge(0.1 * depth);
+        turtle.corner(90.0);
+        turtle.edge(0.9 * depth);
+        turtle.corner(-180.0);
+        turtle.edge(0.9 * depth);
+        turtle.corner(90.0);
+        turtle.edge(std::max(0.0, width - 0.6 * depth));
+        turtle.corner(90.0);
+        turtle.edge(0.9 * depth);
+        turtle.corner(-180.0);
+        turtle.edge(0.9 * depth);
+        turtle.corner(90.0);
+        turtle.edge(0.1 * depth);
+        turtle.corner(90.0, 0.2 * depth);
+        turtle.edge(0.8 * depth);
+        turtle.corner(-90.0);
+    }
+    else if (variant == JointFingerVariantPreset::SNAP) {
+        if (width <= 1.9 * thickness_mm) {
+            append_joint_rect_segment(profile, point_at, x0, x1, depth, burn_mm);
+            append_point_if_new(profile, point_at(x1, 0.0));
+            return;
+        }
+        const auto hook = std::max(thickness_mm * 0.55, depth * 0.3);
+        const auto neck = std::max(thickness_mm * 0.35, depth * 0.18);
+        const auto left_inner = std::max(thickness_mm * 0.55, width * 0.28);
+        const auto right_inner = std::min(width - thickness_mm * 0.55, width * 0.72);
+
+        turtle.corner(-90.0);
+        turtle.edge(std::max(0.0, depth - hook));
+        turtle.corner(55.0);
+        turtle.edge(hook);
+        turtle.corner(35.0);
+        turtle.edge(std::max(0.0, left_inner));
+        turtle.corner(90.0);
+        turtle.edge(neck);
+        turtle.corner(-90.0);
+        turtle.edge(std::max(0.0, right_inner - left_inner));
+        turtle.corner(-90.0);
+        turtle.edge(neck);
+        turtle.corner(90.0);
+        turtle.edge(std::max(0.0, width - right_inner));
+        turtle.corner(35.0);
+        turtle.edge(hook);
+        turtle.corner(55.0);
+        turtle.edge(std::max(0.0, depth - hook));
+        turtle.corner(-90.0);
+        if (!firsthalf) {
+            for (auto &pt : turtle.points)
+                pt.x = width - pt.x;
+            std::reverse(turtle.points.begin(), turtle.points.end());
+        }
+    }
+
+    for (const auto &pt : turtle.points)
+        append_point_if_new(profile, point_at(x0 + pt.x, -pt.y));
+    append_point_if_new(profile, point_at(x1, 0.0));
+}
+
+std::vector<glm::dvec2> build_joint_line_profile(const glm::dvec2 &p1, const glm::dvec2 &p2, const JointGeneratorParams &params,
+                                                 bool counterpart, bool protrude_on_fingers, double side_sign,
+                                                 JointFingerVariantPreset variant)
+{
+    std::vector<glm::dvec2> profile;
+    const auto delta = p2 - p1;
+    const auto length = glm::length(delta);
+    if (length < 1e-6)
+        return profile;
+
+    const auto tangent = delta / length;
+    const auto normal = normalize_dir(glm::dvec2{-tangent.y, tangent.x}) * (side_sign >= 0 ? 1.0 : -1.0);
+    const auto pattern = build_joint_pattern_data(length, params, counterpart);
+    const auto burn = std::max(0.0, params.burn_mm);
+    const auto depth = std::max(0.1, params.thickness_mm + params.extra_length_mm);
+
+    auto point_at = [&](double along, double offset = 0.0) { return p1 + tangent * along + normal * offset; };
+
+    profile.reserve(static_cast<size_t>(pattern.fingers) * 8 + 4);
+    profile.push_back(p1);
+
+    auto emit_segment = [&](double x0, double x1, bool protrude) {
+        if (x1 <= x0 + 1e-6)
+            return;
+        if (protrude) {
+            append_joint_styled_finger_segment(profile, point_at, x0, x1, depth, params.thickness_mm, burn, variant, !counterpart,
+                                               x0 < length * 0.5);
+        }
+        append_point_if_new(profile, point_at(x1, 0.0));
+    };
+
+    double cursor = 0.0;
+    emit_segment(cursor, std::min(length, pattern.left_margin), false);
+    cursor = std::min(length, pattern.left_margin);
+    for (int i = 0; i < pattern.fingers; i++) {
+        const auto tooth_end = std::min(length, cursor + pattern.finger_width);
+        emit_segment(cursor, tooth_end, protrude_on_fingers);
+        cursor = tooth_end;
+        if (i + 1 < pattern.fingers) {
+            const auto gap_end = std::min(length, cursor + pattern.space_width);
+            emit_segment(cursor, gap_end, !protrude_on_fingers);
+            cursor = gap_end;
+        }
+    }
+    emit_segment(cursor, length, false);
+
+    append_point_if_new(profile, p2);
+    return profile;
+}
+
+std::vector<std::vector<glm::dvec2>> build_joint_finger_hole_profiles(const glm::dvec2 &p1, const glm::dvec2 &p2,
+                                                                      const JointGeneratorParams &params, double side_sign)
+{
+    std::vector<std::vector<glm::dvec2>> slots;
+    const auto delta = p2 - p1;
+    const auto length = glm::length(delta);
+    if (length < 1e-6)
+        return slots;
+
+    const auto tangent = delta / length;
+    const auto normal = normalize_dir(glm::dvec2{-tangent.y, tangent.x}) * (side_sign >= 0 ? 1.0 : -1.0);
+    const auto pattern = build_joint_pattern_data(length, params, false);
+    const auto slot_center_offset = params.edge_width_mm + params.thickness_mm * 0.5 + params.burn_mm;
+    const auto slot_half_height = std::max(0.05, (params.hole_width_mm + params.play_mm) * 0.5);
+
+    auto point_at = [&](double along, double offset = 0.0) { return p1 + tangent * along + normal * offset; };
+    auto emit_slot = [&](double center_along, double hole_width) {
+        const auto half = std::max(0.05, hole_width * 0.5);
+        const auto [xa, xb] = apply_joint_kerf(center_along - half, center_along + half, params.burn_mm);
+        if (xb <= xa + 1e-6)
+            return;
+        std::vector<glm::dvec2> rect;
+        rect.reserve(5);
+        rect.push_back(point_at(xa, slot_center_offset - slot_half_height));
+        rect.push_back(point_at(xb, slot_center_offset - slot_half_height));
+        rect.push_back(point_at(xb, slot_center_offset + slot_half_height));
+        rect.push_back(point_at(xa, slot_center_offset + slot_half_height));
+        rect.push_back(point_at(xa, slot_center_offset - slot_half_height));
+        slots.push_back(std::move(rect));
+    };
+
+    double cursor = std::min(length, pattern.left_margin);
+    for (int i = 0; i < pattern.fingers; i++) {
+        emit_slot(cursor + pattern.finger_width * 0.5, pattern.finger_width + params.play_mm);
+        cursor = std::min(length, cursor + pattern.finger_width);
+        if (i + 1 < pattern.fingers)
+            cursor = std::min(length, cursor + pattern.space_width);
+    }
+
+    return slots;
+}
+
+std::vector<std::vector<glm::dvec2>> build_joint_interlocking_slot_profiles(const glm::dvec2 &p1, const glm::dvec2 &p2,
+                                                                             const JointGeneratorParams &params, bool counterpart,
+                                                                             bool slots_on_fingers, double side_sign)
+{
+    std::vector<std::vector<glm::dvec2>> slots;
+    const auto delta = p2 - p1;
+    const auto length = glm::length(delta);
+    if (length < 1e-6)
+        return slots;
+
+    const auto tangent = delta / length;
+    const auto normal = normalize_dir(glm::dvec2{-tangent.y, tangent.x}) * (side_sign >= 0 ? 1.0 : -1.0);
+    const auto pattern = build_joint_pattern_data(length, params, counterpart);
+    const auto kerf = std::max(0.0, params.burn_mm);
+    const auto depth = std::max(0.1, params.thickness_mm + params.extra_length_mm);
+
+    auto point_at = [&](double along, double offset = 0.0) { return p1 + tangent * along + normal * offset; };
+    auto emit_slot = [&](double x0, double x1) {
+        if (x1 <= x0 + 1e-6)
+            return;
+        const auto [xa, xb] = apply_joint_kerf(x0, x1, kerf);
+        if (xb <= xa + 1e-6)
+            return;
+        std::vector<glm::dvec2> rect;
+        rect.reserve(5);
+        rect.push_back(point_at(xa, depth));
+        rect.push_back(point_at(xb, depth));
+        rect.push_back(point_at(xb, depth * 2.0));
+        rect.push_back(point_at(xa, depth * 2.0));
+        rect.push_back(point_at(xa, depth));
+        slots.push_back(std::move(rect));
+    };
+
+    double cursor = std::min(length, pattern.left_margin);
+    for (int i = 0; i < pattern.fingers; i++) {
+        const auto tooth_end = std::min(length, cursor + pattern.finger_width);
+        if (slots_on_fingers)
+            emit_slot(cursor, tooth_end);
+        cursor = tooth_end;
+        if (i + 1 < pattern.fingers) {
+            const auto gap_end = std::min(length, cursor + pattern.space_width);
+            if (!slots_on_fingers)
+                emit_slot(cursor, gap_end);
+            cursor = gap_end;
+        }
+    }
+
+    return slots;
+}
+
+bool spawn_sync_argv(const std::vector<std::string> &argv, std::string &stdout_text, std::string &stderr_text, int &exit_code)
+{
+    std::vector<gchar *> argv_native;
+    argv_native.reserve(argv.size() + 1);
+    for (const auto &arg : argv)
+        argv_native.push_back(const_cast<gchar *>(arg.c_str()));
+    argv_native.push_back(nullptr);
+
+    gchar *stdout_buf = nullptr;
+    gchar *stderr_buf = nullptr;
+    gint wait_status = 0;
+    GError *error = nullptr;
+    const auto ok = g_spawn_sync(nullptr, argv_native.data(), nullptr, G_SPAWN_SEARCH_PATH, nullptr, nullptr, &stdout_buf,
+                                 &stderr_buf, &wait_status, &error);
+
+    stdout_text = stdout_buf ? stdout_buf : "";
+    stderr_text = stderr_buf ? stderr_buf : "";
+    if (stdout_buf)
+        g_free(stdout_buf);
+    if (stderr_buf)
+        g_free(stderr_buf);
+
+    if (error) {
+        if (!stderr_text.empty())
+            stderr_text += "\n";
+        stderr_text += error->message;
+        g_error_free(error);
+    }
+
+    if (!ok) {
+        exit_code = -1;
+        return false;
+    }
+
+    if (WIFEXITED(wait_status))
+        exit_code = WEXITSTATUS(wait_status);
+    else if (WIFSIGNALED(wait_status))
+        exit_code = 128 + WTERMSIG(wait_status);
+    else
+        exit_code = wait_status;
+
+    return true;
+}
+
+struct BoxesSvgSegment {
+    enum class Kind {
+        LINE,
+        BEZIER,
+    };
+
+    enum class Layer {
+        OUTER_CUT,
+        INNER_CUT,
+        ETCHING,
+        ETCHING_DEEP,
+        ANNOTATIONS,
+    };
+
+    Kind kind = Kind::LINE;
+    Layer layer = Layer::OUTER_CUT;
+    glm::dvec2 p1 = {0, 0};
+    glm::dvec2 c1 = {0, 0};
+    glm::dvec2 c2 = {0, 0};
+    glm::dvec2 p2 = {0, 0};
+};
+
+struct BoxesSvgPath {
+    BoxesSvgSegment::Layer layer = BoxesSvgSegment::Layer::OUTER_CUT;
+    std::vector<BoxesSvgSegment> segments;
+    glm::dvec2 bbox_min = {0, 0};
+    glm::dvec2 bbox_max = {0, 0};
+};
+
+struct BoxesSvgGroup {
+    std::string id;
+    std::vector<BoxesSvgSegment> segments;
+    glm::dvec2 bbox_min = {0, 0};
+    glm::dvec2 bbox_max = {0, 0};
+};
+
+struct BoxesPreviewTransform {
+    double scale = 1.0;
+    double ox = 0.0;
+    double oy = 0.0;
+};
+
+struct BoxesValuesSnapshot {
+    std::map<std::string, std::string> values;
+};
+
+glm::dvec2 map_boxes_svg_point(double x, double y, double svg_height)
+{
+    return {x, svg_height - y};
+}
+
+void expand_boxes_svg_bbox(glm::dvec2 &bbox_min, glm::dvec2 &bbox_max, const glm::dvec2 &p)
+{
+    bbox_min.x = std::min(bbox_min.x, p.x);
+    bbox_min.y = std::min(bbox_min.y, p.y);
+    bbox_max.x = std::max(bbox_max.x, p.x);
+    bbox_max.y = std::max(bbox_max.y, p.y);
+}
+
+double point_line_distance(const glm::dvec2 &p, const glm::dvec2 &a, const glm::dvec2 &b)
+{
+    const auto ab = b - a;
+    const auto len = glm::length(ab);
+    if (len < 1e-9)
+        return glm::length(p - a);
+    return std::abs(ab.x * (a.y - p.y) - (a.x - p.x) * ab.y) / len;
+}
+
+bool boxes_svg_bezier_is_effectively_line(const glm::dvec2 &p1, const glm::dvec2 &c1, const glm::dvec2 &c2, const glm::dvec2 &p2)
+{
+    return point_line_distance(c1, p1, p2) < 1e-3 && point_line_distance(c2, p1, p2) < 1e-3;
+}
+
+std::optional<BoxesSvgSegment::Layer> classify_boxes_svg_stroke(const NSVGshape &shape)
+{
+    if (shape.stroke.type != NSVG_PAINT_COLOR)
+        return std::nullopt;
+
+    const auto color = shape.stroke.color;
+    const auto r = static_cast<unsigned int>(color & 0xffu);
+    const auto g = static_cast<unsigned int>((color >> 8u) & 0xffu);
+    const auto b = static_cast<unsigned int>((color >> 16u) & 0xffu);
+
+    if (r == 0u && g == 0u && b == 255u)
+        return BoxesSvgSegment::Layer::INNER_CUT;
+    if (r == 0u && g == 255u && b == 0u)
+        return BoxesSvgSegment::Layer::ETCHING;
+    if (r == 0u && g == 255u && b == 255u)
+        return BoxesSvgSegment::Layer::ETCHING_DEEP;
+    if (r == 255u && g == 0u && b == 0u)
+        return BoxesSvgSegment::Layer::ANNOTATIONS;
+
+    if ((r == 0u && g == 0u && b == 0u) || (r == 255u && g == 0u && b == 255u)
+        || (r == 255u && g == 255u && b == 0u) || (r == 255u && g == 255u && b == 255u))
+        return BoxesSvgSegment::Layer::OUTER_CUT;
+
+    return std::nullopt;
+}
+
+double boxes_svg_bbox_area(const glm::dvec2 &bbox_min, const glm::dvec2 &bbox_max)
+{
+    const auto size = bbox_max - bbox_min;
+    return std::max(0.0, size.x) * std::max(0.0, size.y);
+}
+
+double boxes_svg_bbox_gap_distance(const glm::dvec2 &a_min, const glm::dvec2 &a_max, const glm::dvec2 &b_min, const glm::dvec2 &b_max)
+{
+    const auto dx = std::max({a_min.x - b_max.x, b_min.x - a_max.x, 0.0});
+    const auto dy = std::max({a_min.y - b_max.y, b_min.y - a_max.y, 0.0});
+    return std::hypot(dx, dy);
+}
+
+double boxes_svg_bbox_union_area(const glm::dvec2 &a_min, const glm::dvec2 &a_max, const glm::dvec2 &b_min, const glm::dvec2 &b_max)
+{
+    const auto minp = glm::dvec2{std::min(a_min.x, b_min.x), std::min(a_min.y, b_min.y)};
+    const auto maxp = glm::dvec2{std::max(a_max.x, b_max.x), std::max(a_max.y, b_max.y)};
+    return boxes_svg_bbox_area(minp, maxp);
+}
+
+bool boxes_svg_bbox_contains(const glm::dvec2 &outer_min, const glm::dvec2 &outer_max, const glm::dvec2 &inner_min,
+                             const glm::dvec2 &inner_max, double margin = 1e-3)
+{
+    return inner_min.x >= outer_min.x - margin && inner_min.y >= outer_min.y - margin && inner_max.x <= outer_max.x + margin
+           && inner_max.y <= outer_max.y + margin;
+}
+
+void repack_boxes_svg_paths(std::vector<BoxesSvgPath> &paths, std::vector<BoxesSvgSegment> &segments, glm::dvec2 &bbox_min,
+                            glm::dvec2 &bbox_max)
+{
+    struct Group {
+        std::vector<size_t> path_indices;
+        glm::dvec2 bbox_min = {0, 0};
+        glm::dvec2 bbox_max = {0, 0};
+    };
+
+    if (paths.empty()) {
+        segments.clear();
+        bbox_min = {0, 0};
+        bbox_max = {0, 0};
+        return;
+    }
+
+    std::vector<size_t> outer_roots;
+    outer_roots.reserve(paths.size());
+    for (size_t i = 0; i < paths.size(); i++) {
+        if (paths.at(i).layer == BoxesSvgSegment::Layer::OUTER_CUT)
+            outer_roots.push_back(i);
+    }
+
+    std::vector<size_t> roots(paths.size());
+    std::iota(roots.begin(), roots.end(), 0);
+    for (size_t i = 0; i < paths.size(); i++) {
+        if (paths.at(i).layer == BoxesSvgSegment::Layer::OUTER_CUT)
+            continue;
+
+        const auto path_area = boxes_svg_bbox_area(paths.at(i).bbox_min, paths.at(i).bbox_max);
+        double best_score = std::numeric_limits<double>::infinity();
+        std::optional<size_t> best_outer;
+        for (const auto j : outer_roots) {
+            if (i == j)
+                continue;
+            const auto outer_area = boxes_svg_bbox_area(paths.at(j).bbox_min, paths.at(j).bbox_max);
+            const auto contains =
+                    boxes_svg_bbox_contains(paths.at(j).bbox_min, paths.at(j).bbox_max, paths.at(i).bbox_min, paths.at(i).bbox_max,
+                                            1e-2);
+            const auto gap =
+                    boxes_svg_bbox_gap_distance(paths.at(j).bbox_min, paths.at(j).bbox_max, paths.at(i).bbox_min, paths.at(i).bbox_max);
+            const auto union_area =
+                    boxes_svg_bbox_union_area(paths.at(j).bbox_min, paths.at(j).bbox_max, paths.at(i).bbox_min, paths.at(i).bbox_max);
+            const auto area_penalty = std::max(0.0, union_area - outer_area - path_area);
+            const auto score = (contains ? 0.0 : 1'000'000.0) + gap * 1000.0 + area_penalty;
+            if (score < best_score) {
+                best_score = score;
+                best_outer = j;
+            }
+        }
+
+        if (best_outer) {
+            const auto gap =
+                    boxes_svg_bbox_gap_distance(paths.at(*best_outer).bbox_min, paths.at(*best_outer).bbox_max, paths.at(i).bbox_min,
+                                                paths.at(i).bbox_max);
+            const auto outer_size = paths.at(*best_outer).bbox_max - paths.at(*best_outer).bbox_min;
+            const auto attach_limit = std::max(12.0, std::min(outer_size.x, outer_size.y) * 0.2);
+            if (gap <= attach_limit || paths.at(i).layer == BoxesSvgSegment::Layer::ANNOTATIONS)
+                roots.at(i) = *best_outer;
+        }
+    }
+
+    std::map<size_t, Group> groups_by_root;
+    for (size_t i = 0; i < paths.size(); i++) {
+        auto &group = groups_by_root[roots.at(i)];
+        if (group.path_indices.empty()) {
+            group.bbox_min = paths.at(i).bbox_min;
+            group.bbox_max = paths.at(i).bbox_max;
+        }
+        else {
+            expand_boxes_svg_bbox(group.bbox_min, group.bbox_max, paths.at(i).bbox_min);
+            expand_boxes_svg_bbox(group.bbox_min, group.bbox_max, paths.at(i).bbox_max);
+        }
+        group.path_indices.push_back(i);
+    }
+
+    std::vector<Group> groups;
+    groups.reserve(groups_by_root.size());
+    for (auto &[_, group] : groups_by_root)
+        groups.push_back(std::move(group));
+
+    std::stable_sort(groups.begin(), groups.end(), [](const auto &a, const auto &b) {
+        const auto as = a.bbox_max - a.bbox_min;
+        const auto bs = b.bbox_max - b.bbox_min;
+        const auto area_a = as.x * as.y;
+        const auto area_b = bs.x * bs.y;
+        if (std::abs(area_a - area_b) > 1e-6)
+            return area_a > area_b;
+        if (std::abs(as.y - bs.y) > 1e-6)
+            return as.y > bs.y;
+        return as.x > bs.x;
+    });
+
+    double total_area = 0.0;
+    double max_width = 0.0;
+    for (const auto &group : groups) {
+        const auto size = group.bbox_max - group.bbox_min;
+        total_area += std::max(0.0, size.x) * std::max(0.0, size.y);
+        max_width = std::max(max_width, size.x);
+    }
+
+    const double gap = 10.0;
+    const double row_target_width = std::max(max_width, std::sqrt(std::max(1.0, total_area)) * 1.35);
+    double x = 0.0;
+    double y = 0.0;
+    double row_height = 0.0;
+
+    segments.clear();
+    bbox_min = {std::numeric_limits<double>::infinity(), std::numeric_limits<double>::infinity()};
+    bbox_max = {-std::numeric_limits<double>::infinity(), -std::numeric_limits<double>::infinity()};
+
+    for (const auto &group : groups) {
+        const auto size = group.bbox_max - group.bbox_min;
+        if (x > 0.0 && x + size.x > row_target_width) {
+            x = 0.0;
+            y += row_height + gap;
+            row_height = 0.0;
+        }
+
+        const auto offset = glm::dvec2{x, y} - group.bbox_min;
+        for (const auto path_index : group.path_indices) {
+            for (const auto &seg : paths.at(path_index).segments) {
+                auto packed_seg = seg;
+                packed_seg.p1 += offset;
+                packed_seg.p2 += offset;
+                if (packed_seg.kind == BoxesSvgSegment::Kind::BEZIER) {
+                    packed_seg.c1 += offset;
+                    packed_seg.c2 += offset;
+                }
+                expand_boxes_svg_bbox(bbox_min, bbox_max, packed_seg.p1);
+                expand_boxes_svg_bbox(bbox_min, bbox_max, packed_seg.p2);
+                if (packed_seg.kind == BoxesSvgSegment::Kind::BEZIER) {
+                    expand_boxes_svg_bbox(bbox_min, bbox_max, packed_seg.c1);
+                    expand_boxes_svg_bbox(bbox_min, bbox_max, packed_seg.c2);
+                }
+                segments.push_back(std::move(packed_seg));
+            }
+        }
+
+        x += size.x + gap;
+        row_height = std::max(row_height, size.y);
+    }
+}
+
+bool parse_boxes_svg_image(NSVGimage *image, std::vector<BoxesSvgSegment> &segments, glm::dvec2 &bbox_min, glm::dvec2 &bbox_max,
+                           std::string &error, bool repack_paths = true)
+{
+    if (!image) {
+        error = "Couldn't parse generated SVG";
+        return false;
+    }
+
+    std::vector<BoxesSvgPath> paths;
+
+    for (auto *shape = image->shapes; shape; shape = shape->next) {
+        const auto layer = classify_boxes_svg_stroke(*shape);
+        if (!layer)
+            continue;
+        for (auto *path = shape->paths; path; path = path->next) {
+            auto &svg_path = paths.emplace_back();
+            svg_path.layer = *layer;
+            svg_path.bbox_min = {std::numeric_limits<double>::infinity(), std::numeric_limits<double>::infinity()};
+            svg_path.bbox_max = {-std::numeric_limits<double>::infinity(), -std::numeric_limits<double>::infinity()};
+            for (int i = 0; i < path->npts - 1; i += 3) {
+                const auto p1 = map_boxes_svg_point(path->pts[2 * i], path->pts[2 * i + 1], image->height);
+                const auto c1 = map_boxes_svg_point(path->pts[2 * (i + 1)], path->pts[2 * (i + 1) + 1], image->height);
+                const auto c2 = map_boxes_svg_point(path->pts[2 * (i + 2)], path->pts[2 * (i + 2) + 1], image->height);
+                const auto p2 = map_boxes_svg_point(path->pts[2 * (i + 3)], path->pts[2 * (i + 3) + 1], image->height);
+                if (glm::length(p2 - p1) < 1e-6)
+                    continue;
+
+                expand_boxes_svg_bbox(svg_path.bbox_min, svg_path.bbox_max, p1);
+                expand_boxes_svg_bbox(svg_path.bbox_min, svg_path.bbox_max, c1);
+                expand_boxes_svg_bbox(svg_path.bbox_min, svg_path.bbox_max, c2);
+                expand_boxes_svg_bbox(svg_path.bbox_min, svg_path.bbox_max, p2);
+
+                if (boxes_svg_bezier_is_effectively_line(p1, c1, c2, p2))
+                    svg_path.segments.push_back({BoxesSvgSegment::Kind::LINE, *layer, p1, {}, {}, p2});
+                else
+                    svg_path.segments.push_back({BoxesSvgSegment::Kind::BEZIER, *layer, p1, c1, c2, p2});
+            }
+            if (svg_path.segments.empty())
+                paths.pop_back();
+        }
+    }
+
+    if (paths.empty()) {
+        error = "Generated SVG contains no geometry";
+        return false;
+    }
+
+    if (repack_paths)
+        repack_boxes_svg_paths(paths, segments, bbox_min, bbox_max);
+    else {
+        segments.clear();
+        bbox_min = {std::numeric_limits<double>::infinity(), std::numeric_limits<double>::infinity()};
+        bbox_max = {-std::numeric_limits<double>::infinity(), -std::numeric_limits<double>::infinity()};
+        for (const auto &path : paths) {
+            for (const auto &seg : path.segments) {
+                segments.push_back(seg);
+                expand_boxes_svg_bbox(bbox_min, bbox_max, seg.p1);
+                expand_boxes_svg_bbox(bbox_min, bbox_max, seg.p2);
+                if (seg.kind == BoxesSvgSegment::Kind::BEZIER) {
+                    expand_boxes_svg_bbox(bbox_min, bbox_max, seg.c1);
+                    expand_boxes_svg_bbox(bbox_min, bbox_max, seg.c2);
+                }
+            }
+        }
+    }
+    return true;
+}
+
+bool parse_boxes_svg_string(const std::string &svg_text, std::vector<BoxesSvgSegment> &segments, glm::dvec2 &bbox_min,
+                            glm::dvec2 &bbox_max, std::string &error)
+{
+    std::vector<char> buf(svg_text.begin(), svg_text.end());
+    buf.push_back('\0');
+    auto image = std::unique_ptr<NSVGimage, void (*)(NSVGimage *)>(nsvgParse(buf.data(), "mm", 96.0f), nsvgDelete);
+    return parse_boxes_svg_image(image.get(), segments, bbox_min, bbox_max, error, false);
+}
+
+bool parse_boxes_svg(const std::filesystem::path &svg_path, std::vector<BoxesSvgSegment> &segments, glm::dvec2 &bbox_min,
+                     glm::dvec2 &bbox_max, std::string &error)
+{
+    auto image = std::unique_ptr<NSVGimage, void (*)(NSVGimage *)>(
+            nsvgParseFromFile(path_to_string(svg_path).c_str(), "mm", 96.0f), nsvgDelete);
+    return parse_boxes_svg_image(image.get(), segments, bbox_min, bbox_max, error);
+}
+
+void repack_boxes_svg_groups(const std::vector<BoxesSvgGroup> &groups, std::vector<BoxesSvgSegment> &segments, glm::dvec2 &bbox_min,
+                             glm::dvec2 &bbox_max)
+{
+    if (groups.empty()) {
+        segments.clear();
+        bbox_min = {0, 0};
+        bbox_max = {0, 0};
+        return;
+    }
+
+    std::vector<size_t> order(groups.size());
+    std::iota(order.begin(), order.end(), 0);
+    std::stable_sort(order.begin(), order.end(), [&groups](size_t ia, size_t ib) {
+        const auto as = groups.at(ia).bbox_max - groups.at(ia).bbox_min;
+        const auto bs = groups.at(ib).bbox_max - groups.at(ib).bbox_min;
+        const auto area_a = as.x * as.y;
+        const auto area_b = bs.x * bs.y;
+        if (std::abs(area_a - area_b) > 1e-6)
+            return area_a > area_b;
+        if (std::abs(as.y - bs.y) > 1e-6)
+            return as.y > bs.y;
+        return as.x > bs.x;
+    });
+
+    double total_area = 0.0;
+    double max_width = 0.0;
+    for (const auto idx : order) {
+        const auto size = groups.at(idx).bbox_max - groups.at(idx).bbox_min;
+        total_area += std::max(0.0, size.x) * std::max(0.0, size.y);
+        max_width = std::max(max_width, size.x);
+    }
+
+    const double gap = 10.0;
+    const double row_target_width = std::max(max_width, std::sqrt(std::max(1.0, total_area)) * 1.35);
+    double x = 0.0;
+    double y = 0.0;
+    double row_height = 0.0;
+
+    segments.clear();
+    bbox_min = {std::numeric_limits<double>::infinity(), std::numeric_limits<double>::infinity()};
+    bbox_max = {-std::numeric_limits<double>::infinity(), -std::numeric_limits<double>::infinity()};
+
+    for (const auto idx : order) {
+        const auto &group = groups.at(idx);
+        const auto size = group.bbox_max - group.bbox_min;
+        if (x > 0.0 && x + size.x > row_target_width) {
+            x = 0.0;
+            y += row_height + gap;
+            row_height = 0.0;
+        }
+
+        const auto offset = glm::dvec2{x, y} - group.bbox_min;
+        for (const auto &seg : group.segments) {
+            auto packed_seg = seg;
+            packed_seg.p1 += offset;
+            packed_seg.p2 += offset;
+            if (packed_seg.kind == BoxesSvgSegment::Kind::BEZIER) {
+                packed_seg.c1 += offset;
+                packed_seg.c2 += offset;
+            }
+            expand_boxes_svg_bbox(bbox_min, bbox_max, packed_seg.p1);
+            expand_boxes_svg_bbox(bbox_min, bbox_max, packed_seg.p2);
+            if (packed_seg.kind == BoxesSvgSegment::Kind::BEZIER) {
+                expand_boxes_svg_bbox(bbox_min, bbox_max, packed_seg.c1);
+                expand_boxes_svg_bbox(bbox_min, bbox_max, packed_seg.c2);
+            }
+            segments.push_back(std::move(packed_seg));
+        }
+
+        x += size.x + gap;
+        row_height = std::max(row_height, size.y);
+    }
+}
+
+BoxesPreviewTransform get_boxes_preview_transform(const glm::dvec2 &bbox_min, const glm::dvec2 &bbox_max, int width, int height,
+                                                  double zoom, double pan_x, double pan_y)
+{
+    BoxesPreviewTransform transform;
+    const auto bbox_size = bbox_max - bbox_min;
+    const auto safe_width = std::max(1.0, bbox_size.x);
+    const auto safe_height = std::max(1.0, bbox_size.y);
+    const auto fit_w = std::max(1, width) - 32.0;
+    const auto fit_h = std::max(1, height) - 32.0;
+    const auto fit_scale = std::max(0.01, std::min(fit_w / safe_width, fit_h / safe_height));
+    transform.scale = fit_scale * std::clamp(zoom, 0.1, 64.0);
+    transform.ox = (static_cast<double>(width) - safe_width * transform.scale) * 0.5 - bbox_min.x * transform.scale + pan_x;
+    transform.oy = (static_cast<double>(height) - safe_height * transform.scale) * 0.5 + bbox_max.y * transform.scale + pan_y;
+    return transform;
+}
+
+int boxes_preview_layer_index(BoxesSvgSegment::Layer layer)
+{
+    switch (layer) {
+    case BoxesSvgSegment::Layer::OUTER_CUT:
+        return 0;
+    case BoxesSvgSegment::Layer::INNER_CUT:
+        return 1;
+    case BoxesSvgSegment::Layer::ETCHING:
+        return 2;
+    case BoxesSvgSegment::Layer::ETCHING_DEEP:
+        return 3;
+    case BoxesSvgSegment::Layer::ANNOTATIONS:
+        return 4;
+    }
+    return 0;
+}
+
+void append_boxes_preview_polyline(auto &polylines, const BoxesSvgSegment &seg)
+{
+    if (seg.kind == BoxesSvgSegment::Kind::LINE) {
+        polylines.push_back({{seg.p1, seg.p2}, boxes_preview_layer_index(seg.layer)});
+        return;
+    }
+
+    auto &polyline = polylines.emplace_back();
+    polyline.layer = boxes_preview_layer_index(seg.layer);
+    constexpr int bezier_steps = 18;
+    for (int i = 0; i <= bezier_steps; i++) {
+        const auto t = static_cast<double>(i) / static_cast<double>(bezier_steps);
+        const auto u = 1.0 - t;
+        const auto p = u * u * u * seg.p1 + 3.0 * u * u * t * seg.c1 + 3.0 * u * t * t * seg.c2 + t * t * t * seg.p2;
+        append_point_if_new(polyline.points, p);
+    }
+}
+
+BoxesValuesSnapshot capture_boxes_values_snapshot(const BoxesTemplateDef &template_def,
+                                                 const std::map<std::string, Gtk::SpinButton *> &spins,
+                                                 const std::map<std::string, Gtk::Entry *> &entries,
+                                                 const std::map<std::string, Gtk::DropDown *> &dropdowns,
+                                                 const std::map<std::string, Gtk::Switch *> &switches)
+{
+    const auto fmt = [](double value) {
+        std::ostringstream ss;
+        ss << std::fixed << std::setprecision(3) << value;
+        return ss.str();
+    };
+
+    BoxesValuesSnapshot snapshot;
+
+    for (const auto &arg : template_def.args) {
+        std::string value = arg.default_string;
+        switch (arg.kind) {
+        case BoxesTemplateDef::ArgKind::FLOAT:
+            if (const auto it = spins.find(arg.dest); it != spins.end() && it->second)
+                value = fmt(it->second->get_value());
+            else
+                value = fmt(arg.default_float);
+            break;
+        case BoxesTemplateDef::ArgKind::INT:
+            if (const auto it = spins.find(arg.dest); it != spins.end() && it->second)
+                value = std::to_string(static_cast<int>(std::lround(it->second->get_value())));
+            else
+                value = std::to_string(arg.default_int);
+            break;
+        case BoxesTemplateDef::ArgKind::BOOL:
+            if (const auto it = switches.find(arg.dest); it != switches.end() && it->second)
+                value = it->second->get_active() ? "1" : "0";
+            else
+                value = arg.default_bool ? "1" : "0";
+            break;
+        case BoxesTemplateDef::ArgKind::CHOICE:
+            if (const auto it = dropdowns.find(arg.dest); it != dropdowns.end() && it->second && !arg.choices.empty()) {
+                const auto idx = std::min<size_t>(it->second->get_selected(), arg.choices.size() - 1);
+                value = arg.choices.at(idx);
+            }
+            else if (!arg.choices.empty()) {
+                value = arg.choices.front();
+            }
+            break;
+        case BoxesTemplateDef::ArgKind::STRING:
+            if (const auto it = entries.find(arg.dest); it != entries.end() && it->second)
+                value = it->second->get_text();
+            break;
+        }
+        snapshot.values[arg.dest] = std::move(value);
+    }
+    return snapshot;
+}
+
+std::string joints_value_key(const std::string &family_id, const std::string &dest)
+{
+    return family_id + ":" + dest;
+}
+
+std::vector<SettingsArgDef> collect_joint_visible_args(const JointFamilyDef &family, const JointRoleDef &role)
+{
+    std::vector<SettingsArgDef> args = family.args;
+    const auto append_edge_args = [&args](const JointEdgeDef *edge) {
+        if (!edge)
+            return;
+        for (const auto &arg : edge->extra_args) {
+            if (std::none_of(args.begin(), args.end(), [&arg](const auto &existing) { return existing.dest == arg.dest; }))
+                args.push_back(arg);
+        }
+    };
+    append_edge_args(find_joint_edge(family, role.line0_edge));
+    if (role.pair)
+        append_edge_args(find_joint_edge(family, role.line1_edge));
+    return args;
+}
+
+std::vector<SettingsArgDef> collect_joint_edge_args(const JointFamilyDef &family, const JointEdgeDef &edge)
+{
+    std::vector<SettingsArgDef> args = family.args;
+    for (const auto &arg : edge.extra_args) {
+        if (std::none_of(args.begin(), args.end(), [&arg](const auto &existing) { return existing.dest == arg.dest; }))
+            args.push_back(arg);
+    }
+    return args;
+}
+
+BoxesValuesSnapshot capture_joint_values_snapshot(const JointFamilyDef &family, const JointRoleDef &role,
+                                                  const std::map<std::string, Gtk::SpinButton *> &spins,
+                                                  const std::map<std::string, Gtk::Entry *> &entries,
+                                                  const std::map<std::string, Gtk::DropDown *> &dropdowns,
+                                                  const std::map<std::string, Gtk::Switch *> &switches)
+{
+    const auto fmt = [](double value) {
+        std::ostringstream ss;
+        ss << std::fixed << std::setprecision(3) << value;
+        return ss.str();
+    };
+
+    BoxesValuesSnapshot snapshot;
+    for (const auto &arg : collect_joint_visible_args(family, role)) {
+        std::string value = arg.default_string;
+        switch (arg.kind) {
+        case SettingsArgKind::FLOAT:
+            if (const auto it = spins.find(arg.dest); it != spins.end() && it->second)
+                value = fmt(it->second->get_value());
+            else
+                value = fmt(arg.default_float);
+            break;
+        case SettingsArgKind::INT:
+            if (const auto it = spins.find(arg.dest); it != spins.end() && it->second)
+                value = std::to_string(static_cast<int>(std::lround(it->second->get_value())));
+            else
+                value = std::to_string(arg.default_int);
+            break;
+        case SettingsArgKind::BOOL:
+            if (const auto it = switches.find(arg.dest); it != switches.end() && it->second)
+                value = it->second->get_active() ? "1" : "0";
+            else
+                value = arg.default_bool ? "1" : "0";
+            break;
+        case SettingsArgKind::CHOICE:
+            if (const auto it = dropdowns.find(arg.dest); it != dropdowns.end() && it->second && !arg.choices.empty()) {
+                const auto idx = std::min<size_t>(it->second->get_selected(), arg.choices.size() - 1);
+                value = arg.choices.at(idx);
+            }
+            else if (!arg.choices.empty()) {
+                value = arg.choices.front();
+            }
+            break;
+        case SettingsArgKind::STRING:
+            if (const auto it = entries.find(arg.dest); it != entries.end() && it->second)
+                value = it->second->get_text();
+            break;
+        }
+        snapshot.values[arg.dest] = std::move(value);
+    }
+    return snapshot;
+}
+
+bool generate_joint_edge_segments(const JointFamilyDef &family, const JointEdgeDef &edge, double length,
+                                  const BoxesValuesSnapshot &snapshot, double thickness_mm, double burn_mm,
+                                  std::vector<BoxesSvgSegment> &segments, glm::dvec2 &bbox_min, glm::dvec2 &bbox_max,
+                                  std::string &error)
+{
+    const auto fmt = [](double value) {
+        std::ostringstream ss;
+        ss << std::fixed << std::setprecision(3) << value;
+        return ss.str();
+    };
+
+    std::filesystem::path runner_path;
+    for (const auto &candidate : get_boxes_runner_candidates()) {
+        if (std::filesystem::exists(candidate)) {
+            runner_path = candidate;
+            break;
+        }
+    }
+    if (runner_path.empty()) {
+        error = "Bundled boxes runner is missing";
+        return false;
+    }
+
+    auto generator_args = std::vector<std::string>{
+            "--joint-edge-json",
+            family.id,
+            edge.id,
+            fmt(length),
+            "--thickness",
+            fmt(thickness_mm),
+            "--burn",
+            fmt(burn_mm),
+    };
+
+    for (const auto &arg : collect_joint_edge_args(family, edge)) {
+        const auto it = snapshot.values.find(arg.dest);
+        const auto &value = it != snapshot.values.end() ? it->second : arg.default_string;
+        if (arg.option.empty())
+            generator_args.push_back("--call_" + arg.dest);
+        else
+            generator_args.push_back(arg.option);
+        generator_args.push_back(value);
+    }
+
+    std::vector<std::vector<std::string>> commands;
+    for (const auto &python_cmd : get_boxes_python_candidates(runner_path)) {
+        auto cmd = std::vector<std::string>{python_cmd, path_to_string(runner_path)};
+        cmd.insert(cmd.end(), generator_args.begin(), generator_args.end());
+        commands.push_back(std::move(cmd));
+    }
+
+    std::string last_stdout;
+    std::string last_stderr;
+    int last_exit_code = -1;
+    bool generated = false;
+    for (const auto &cmd : commands) {
+        std::string out;
+        std::string err;
+        int exit_code = -1;
+        const auto spawned = spawn_sync_argv(cmd, out, err, exit_code);
+        last_stdout = std::move(out);
+        last_stderr = std::move(err);
+        last_exit_code = exit_code;
+        if (!spawned || exit_code != 0 || last_stdout.empty())
+            continue;
+        generated = true;
+        break;
+    }
+
+    if (!generated) {
+        if (last_exit_code == -1)
+            error = "Bundled joints helper couldn't start";
+        else if (!last_stderr.empty())
+            error = last_stderr;
+        else if (!last_stdout.empty())
+            error = last_stdout;
+        else
+            error = "Bundled joints helper failed";
+        return false;
+    }
+
+    try {
+        const auto json = nlohmann::json::parse(last_stdout);
+        segments.clear();
+        bbox_min = {std::numeric_limits<double>::infinity(), std::numeric_limits<double>::infinity()};
+        bbox_max = {-std::numeric_limits<double>::infinity(), -std::numeric_limits<double>::infinity()};
+
+        auto parse_layer = [](const std::string &name) {
+            if (name == "inner_cut")
+                return BoxesSvgSegment::Layer::INNER_CUT;
+            if (name == "etching")
+                return BoxesSvgSegment::Layer::ETCHING;
+            if (name == "etching_deep")
+                return BoxesSvgSegment::Layer::ETCHING_DEEP;
+            if (name == "annotations")
+                return BoxesSvgSegment::Layer::ANNOTATIONS;
+            return BoxesSvgSegment::Layer::OUTER_CUT;
+        };
+
+        for (const auto &seg_item : json.at("segments")) {
+            BoxesSvgSegment seg;
+            seg.kind = seg_item.value("kind", "line") == "bezier" ? BoxesSvgSegment::Kind::BEZIER : BoxesSvgSegment::Kind::LINE;
+            seg.layer = parse_layer(seg_item.value("layer", "outer_cut"));
+            const auto p1 = seg_item.at("p1").get<std::vector<double>>();
+            const auto p2 = seg_item.at("p2").get<std::vector<double>>();
+            seg.p1 = {p1.at(0), p1.at(1)};
+            seg.p2 = {p2.at(0), p2.at(1)};
+            if (seg.kind == BoxesSvgSegment::Kind::BEZIER) {
+                const auto c1 = seg_item.at("c1").get<std::vector<double>>();
+                const auto c2 = seg_item.at("c2").get<std::vector<double>>();
+                seg.c1 = {c1.at(0), c1.at(1)};
+                seg.c2 = {c2.at(0), c2.at(1)};
+            }
+            segments.push_back(seg);
+            expand_boxes_svg_bbox(bbox_min, bbox_max, seg.p1);
+            expand_boxes_svg_bbox(bbox_min, bbox_max, seg.p2);
+            if (seg.kind == BoxesSvgSegment::Kind::BEZIER) {
+                expand_boxes_svg_bbox(bbox_min, bbox_max, seg.c1);
+                expand_boxes_svg_bbox(bbox_min, bbox_max, seg.c2);
+            }
+        }
+
+        if (segments.empty()) {
+            error = "Joint helper returned no geometry";
+            return false;
+        }
+    }
+    catch (const std::exception &e) {
+        error = std::string("Couldn't parse joints geometry: ") + e.what();
+        return false;
+    }
+
+    return true;
+}
+
+bool generate_boxes_svg_segments(const BoxesTemplateDef &template_def, const BoxesValuesSnapshot &snapshot,
+                                 std::vector<BoxesSvgSegment> &segments, glm::dvec2 &bbox_min, glm::dvec2 &bbox_max,
+                                 std::string &error)
+{
+    auto generator_args = std::vector<std::string>{
+            template_def.generator,
+            "--format",
+            "svg",
+            "--output",
+            "-",
+    };
+
+    for (const auto &arg : template_def.args) {
+        const auto it = snapshot.values.find(arg.dest);
+        const auto &value = it != snapshot.values.end() ? it->second : arg.default_string;
+        if (arg.option.empty())
+            continue;
+        generator_args.push_back(arg.option);
+        generator_args.push_back(value);
+    }
+
+    std::filesystem::path runner_path;
+    for (const auto &candidate : get_boxes_runner_candidates()) {
+        if (std::filesystem::exists(candidate)) {
+            runner_path = candidate;
+            break;
+        }
+    }
+    if (runner_path.empty()) {
+        error = "Bundled boxes runner is missing";
+        return false;
+    }
+
+    std::vector<std::vector<std::string>> commands;
+    for (const auto &python_cmd : get_boxes_python_candidates(runner_path)) {
+        auto cmd = std::vector<std::string>{python_cmd, path_to_string(runner_path)};
+        cmd.insert(cmd.end(), generator_args.begin(), generator_args.end());
+        commands.push_back(std::move(cmd));
+    }
+
+    std::string last_stdout;
+    std::string last_stderr;
+    int last_exit_code = -1;
+    bool generated = false;
+    for (const auto &cmd : commands) {
+        std::string out;
+        std::string err;
+        int exit_code = -1;
+        const auto spawned = spawn_sync_argv(cmd, out, err, exit_code);
+        last_stdout = std::move(out);
+        last_stderr = std::move(err);
+        last_exit_code = exit_code;
+        if (!spawned || exit_code != 0 || last_stdout.empty())
+            continue;
+        generated = true;
+        break;
+    }
+
+    if (!generated) {
+        if (last_exit_code == -1)
+            error = "Bundled boxes runner couldn't start (missing Python runtime?)";
+        else if (!last_stderr.empty())
+            error = last_stderr;
+        else if (!last_stdout.empty())
+            error = last_stdout;
+        else
+            error = "Bundled boxes generation failed; check parameters";
+        return false;
+    }
+
+    return parse_boxes_svg_string(last_stdout, segments, bbox_min, bbox_max, error);
+}
+
+std::vector<std::filesystem::path> get_boxes_runner_candidates()
+{
+    std::vector<std::filesystem::path> paths;
+    const auto get_executable_dir = []() -> std::filesystem::path {
+#ifdef _WIN32
+        std::wstring buffer(32768, L'\0');
+        const auto len = GetModuleFileNameW(nullptr, buffer.data(), static_cast<DWORD>(buffer.size()));
+        if (len == 0 || len >= buffer.size())
+            return {};
+        buffer.resize(len);
+        return std::filesystem::path(buffer).parent_path();
+#elif defined(__APPLE__)
+        uint32_t size = 0;
+        _NSGetExecutablePath(nullptr, &size);
+        std::string buffer(size, '\0');
+        if (_NSGetExecutablePath(buffer.data(), &size) != 0)
+            return {};
+        return std::filesystem::weakly_canonical(std::filesystem::path(buffer.c_str())).parent_path();
+#else
+        std::vector<char> buffer(4096, '\0');
+        const auto len = readlink("/proc/self/exe", buffer.data(), buffer.size() - 1);
+        if (len <= 0)
+            return {};
+        buffer.at(static_cast<size_t>(len)) = '\0';
+        return std::filesystem::weakly_canonical(std::filesystem::path(buffer.data())).parent_path();
+#endif
+    };
+
+    const auto exe_dir = get_executable_dir();
+    if (!exe_dir.empty()) {
+        paths.emplace_back(exe_dir / "share" / "dxfsketcher" / "pyvendor" / "boxes_runner.py");
+        paths.emplace_back(exe_dir.parent_path() / "share" / "dxfsketcher" / "pyvendor" / "boxes_runner.py");
+        paths.emplace_back(exe_dir.parent_path() / "Resources" / "share" / "dxfsketcher" / "pyvendor" / "boxes_runner.py");
+    }
+    paths.emplace_back(std::filesystem::path(DUNE_SOURCE_ROOT) / "3rd_party" / "pyvendor" / "boxes_runner.py");
+    paths.emplace_back(std::filesystem::path(DUNE_PKGDATADIR) / "pyvendor" / "boxes_runner.py");
+    return paths;
+}
+
+std::vector<std::string> get_boxes_python_candidates(const std::filesystem::path &runner_path)
+{
+    std::vector<std::string> commands;
+    if (const auto *env_python = std::getenv("DUNE_BOXES_PYTHON")) {
+        if (*env_python)
+            commands.emplace_back(env_python);
+    }
+
+    const auto root = runner_path.parent_path();
+    for (const auto &candidate : {
+                 root / "python" / "bin" / "python3",
+                 root / "python" / "bin" / "python",
+                 root / "python" / "Scripts" / "python.exe",
+                 root / "python" / "python.exe",
+         }) {
+        if (std::filesystem::exists(candidate))
+            commands.push_back(path_to_string(candidate));
+    }
+
+    commands.push_back("python3");
+    commands.push_back("python");
+    return commands;
+}
+
+bool ensure_boxes_catalog_loaded(std::string &error)
+{
+    if (!g_boxes_templates.empty() && !g_boxes_categories.empty())
+        return true;
+
+    std::filesystem::path runner_path;
+    for (const auto &candidate : get_boxes_runner_candidates()) {
+        if (std::filesystem::exists(candidate)) {
+            runner_path = candidate;
+            break;
+        }
+    }
+    if (runner_path.empty()) {
+        error = "Bundled boxes runner is missing";
+        return false;
+    }
+
+    std::vector<std::vector<std::string>> commands;
+    for (const auto &python_cmd : get_boxes_python_candidates(runner_path))
+        commands.push_back({python_cmd, path_to_string(runner_path), "--catalog-json"});
+
+    std::string last_stdout;
+    std::string last_stderr;
+    int last_exit_code = -1;
+    bool loaded = false;
+    for (const auto &cmd : commands) {
+        std::string out;
+        std::string err;
+        int exit_code = -1;
+        const auto spawned = spawn_sync_argv(cmd, out, err, exit_code);
+        last_stdout = std::move(out);
+        last_stderr = std::move(err);
+        last_exit_code = exit_code;
+        if (!spawned || exit_code != 0 || last_stdout.empty())
+            continue;
+
+        try {
+            const auto json = nlohmann::json::parse(last_stdout);
+            const auto json_string = [](const nlohmann::json &obj, const char *key, std::string fallback = {}) {
+                const auto it = obj.find(key);
+                if (it == obj.end() || it->is_null())
+                    return fallback;
+                if (it->is_string())
+                    return it->get<std::string>();
+                return it->dump();
+            };
+            g_boxes_categories.clear();
+            g_boxes_templates.clear();
+
+            for (const auto &item : json.at("categories")) {
+                BoxesCategoryDef category;
+                category.id = json_string(item, "id");
+                category.title = json_string(item, "title", category.id);
+                category.description = json_string(item, "description");
+                category.sample_image = json_string(item, "sample_image");
+                category.sample_thumbnail = json_string(item, "sample_thumbnail");
+                g_boxes_categories.push_back(std::move(category));
+            }
+
+            for (const auto &item : json.at("generators")) {
+                BoxesTemplateDef def;
+                def.id = json_string(item, "id");
+                def.label = json_string(item, "label", def.id);
+                def.generator = def.id;
+                def.category = json_string(item, "group", "Misc");
+                def.short_description = json_string(item, "short_description");
+                def.description = json_string(item, "description");
+                def.sample_image = json_string(item, "sample_image");
+                def.sample_thumbnail = json_string(item, "sample_thumbnail");
+
+                for (const auto &arg_item : item.at("args")) {
+                    BoxesTemplateDef::ArgDef arg;
+                    arg.dest = json_string(arg_item, "dest");
+                    arg.option = json_string(arg_item, "option");
+                    arg.label = json_string(arg_item, "label", arg.dest);
+                    arg.help = json_string(arg_item, "help");
+                    arg.group = json_string(arg_item, "group", "Settings");
+                    arg.default_string = json_string(arg_item, "default_string");
+                    const auto kind = json_string(arg_item, "kind", "string");
+                    if (kind == "float") {
+                        arg.kind = BoxesTemplateDef::ArgKind::FLOAT;
+                        arg.default_float = arg_item.value("default_float", 0.0);
+                    }
+                    else if (kind == "int") {
+                        arg.kind = BoxesTemplateDef::ArgKind::INT;
+                        arg.default_int = arg_item.value("default_int", 0);
+                    }
+                    else if (kind == "bool") {
+                        arg.kind = BoxesTemplateDef::ArgKind::BOOL;
+                        arg.default_bool = arg_item.value("default_bool", false);
+                    }
+                    else if (kind == "choice") {
+                        arg.kind = BoxesTemplateDef::ArgKind::CHOICE;
+                        arg.choices = arg_item.value("choices", std::vector<std::string>{});
+                    }
+                    else {
+                        arg.kind = BoxesTemplateDef::ArgKind::STRING;
+                    }
+                    def.args.push_back(std::move(arg));
+                }
+
+                for (const auto &group_item : item.at("arg_groups")) {
+                    BoxesTemplateDef::ArgGroupDef group;
+                    group.title = json_string(group_item, "title", "Settings");
+                    group.args = group_item.value("args", std::vector<std::string>{});
+                    def.arg_groups.push_back(std::move(group));
+                }
+
+                g_boxes_templates.push_back(std::move(def));
+            }
+
+            loaded = !g_boxes_templates.empty();
+        }
+        catch (const std::exception &e) {
+            error = std::string("Couldn't parse boxes catalog: ") + e.what();
+            g_boxes_categories.clear();
+            g_boxes_templates.clear();
+            return false;
+        }
+
+        if (loaded)
+            break;
+    }
+
+    if (!loaded) {
+        if (last_exit_code == -1)
+            error = "Bundled boxes runner couldn't start (missing Python runtime?)";
+        else if (!last_stderr.empty())
+            error = last_stderr;
+        else if (!last_stdout.empty())
+            error = last_stdout;
+        else
+            error = "Bundled boxes catalog loading failed";
+        return false;
+    }
+
+    if (std::none_of(g_boxes_categories.begin(), g_boxes_categories.end(),
+                     [](const auto &category) { return category.id == "Misc"; })) {
+        g_boxes_categories.push_back({"Misc", "Misc", "", "", ""});
+    }
+    return true;
+}
+
+bool ensure_joint_families_loaded(std::string &error)
+{
+    if (!g_joint_families.empty())
+        return true;
+
+    std::filesystem::path runner_path;
+    for (const auto &candidate : get_boxes_runner_candidates()) {
+        if (std::filesystem::exists(candidate)) {
+            runner_path = candidate;
+            break;
+        }
+    }
+    if (runner_path.empty()) {
+        error = "Bundled boxes runner is missing";
+        return false;
+    }
+
+    std::vector<std::vector<std::string>> commands;
+    for (const auto &python_cmd : get_boxes_python_candidates(runner_path))
+        commands.push_back({python_cmd, path_to_string(runner_path), "--joint-families-json"});
+
+    std::string last_stdout;
+    std::string last_stderr;
+    int last_exit_code = -1;
+    bool loaded = false;
+    for (const auto &cmd : commands) {
+        std::string out;
+        std::string err;
+        int exit_code = -1;
+        const auto spawned = spawn_sync_argv(cmd, out, err, exit_code);
+        last_stdout = std::move(out);
+        last_stderr = std::move(err);
+        last_exit_code = exit_code;
+        if (!spawned || exit_code != 0 || last_stdout.empty())
+            continue;
+
+        try {
+            const auto json = nlohmann::json::parse(last_stdout);
+            const auto json_string = [](const nlohmann::json &obj, const char *key, std::string fallback = {}) {
+                const auto it = obj.find(key);
+                if (it == obj.end() || it->is_null())
+                    return fallback;
+                if (it->is_string())
+                    return it->get<std::string>();
+                return it->dump();
+            };
+
+            g_joint_families.clear();
+            for (const auto &item : json.at("families")) {
+                JointFamilyDef family;
+                family.id = json_string(item, "id");
+                family.label = json_string(item, "label", family.id);
+                family.description = json_string(item, "description");
+
+                for (const auto &arg_item : item.at("args")) {
+                    SettingsArgDef arg;
+                    arg.dest = json_string(arg_item, "dest");
+                    arg.option = json_string(arg_item, "option");
+                    arg.label = json_string(arg_item, "label", arg.dest);
+                    arg.help = json_string(arg_item, "help");
+                    arg.group = json_string(arg_item, "group", "Settings");
+                    arg.default_string = json_string(arg_item, "default_string");
+                    const auto kind = json_string(arg_item, "kind", "string");
+                    if (kind == "float") {
+                        arg.kind = SettingsArgKind::FLOAT;
+                        arg.default_float = arg_item.value("default_float", 0.0);
+                    }
+                    else if (kind == "int") {
+                        arg.kind = SettingsArgKind::INT;
+                        arg.default_int = arg_item.value("default_int", 0);
+                    }
+                    else if (kind == "bool") {
+                        arg.kind = SettingsArgKind::BOOL;
+                        arg.default_bool = arg_item.value("default_bool", false);
+                    }
+                    else if (kind == "choice") {
+                        arg.kind = SettingsArgKind::CHOICE;
+                        arg.choices = arg_item.value("choices", std::vector<std::string>{});
+                    }
+                    else {
+                        arg.kind = SettingsArgKind::STRING;
+                    }
+                    family.args.push_back(std::move(arg));
+                }
+
+                for (const auto &group_item : item.at("arg_groups")) {
+                    SettingsArgGroupDef group;
+                    group.title = json_string(group_item, "title", "Settings");
+                    group.args = group_item.value("args", std::vector<std::string>{});
+                    family.arg_groups.push_back(std::move(group));
+                }
+
+                for (const auto &edge_item : item.at("edges")) {
+                    JointEdgeDef edge;
+                    edge.id = json_string(edge_item, "id");
+                    edge.label = json_string(edge_item, "label", edge.id);
+                    edge.side_mode = json_string(edge_item, "side_mode", "feature");
+                    for (const auto &arg_item : edge_item.value("extra_args", nlohmann::json::array())) {
+                        SettingsArgDef arg;
+                        arg.dest = json_string(arg_item, "dest");
+                        arg.option = json_string(arg_item, "option");
+                        arg.label = json_string(arg_item, "label", arg.dest);
+                        arg.help = json_string(arg_item, "help");
+                        arg.group = json_string(arg_item, "group", "Settings");
+                        arg.default_string = json_string(arg_item, "default_string");
+                        const auto kind = json_string(arg_item, "kind", "string");
+                        if (kind == "float") {
+                            arg.kind = SettingsArgKind::FLOAT;
+                            arg.default_float = arg_item.value("default_float", 0.0);
+                        }
+                        else if (kind == "int") {
+                            arg.kind = SettingsArgKind::INT;
+                            arg.default_int = arg_item.value("default_int", 0);
+                        }
+                        else if (kind == "bool") {
+                            arg.kind = SettingsArgKind::BOOL;
+                            arg.default_bool = arg_item.value("default_bool", false);
+                        }
+                        else if (kind == "choice") {
+                            arg.kind = SettingsArgKind::CHOICE;
+                            arg.choices = arg_item.value("choices", std::vector<std::string>{});
+                        }
+                        else {
+                            arg.kind = SettingsArgKind::STRING;
+                        }
+                        edge.extra_args.push_back(std::move(arg));
+                    }
+                    family.edges.push_back(std::move(edge));
+                }
+
+                for (const auto &role_item : item.at("roles")) {
+                    JointRoleDef role;
+                    role.id = json_string(role_item, "id");
+                    role.label = json_string(role_item, "label", role.id);
+                    role.pair = role_item.value("pair", false);
+                    role.line0_edge = json_string(role_item, "line0_edge");
+                    role.line1_edge = json_string(role_item, "line1_edge");
+                    family.roles.push_back(std::move(role));
+                }
+
+                if (!family.id.empty() && !family.roles.empty())
+                    g_joint_families.push_back(std::move(family));
+            }
+
+            loaded = !g_joint_families.empty();
+        }
+        catch (const std::exception &e) {
+            error = std::string("Couldn't parse joints families: ") + e.what();
+            g_joint_families.clear();
+            return false;
+        }
+
+        if (loaded)
+            break;
+    }
+
+    if (!loaded) {
+        if (last_exit_code == -1)
+            error = "Bundled joints helper couldn't start (missing Python runtime?)";
+        else if (!last_stderr.empty())
+            error = last_stderr;
+        else if (!last_stdout.empty())
+            error = last_stdout;
+        else
+            error = "Bundled joints families loading failed";
+        return false;
+    }
+
+    return true;
+}
+
+std::vector<std::filesystem::path> get_boxes_sample_candidates(const std::string &sample_image)
+{
+    std::vector<std::filesystem::path> paths;
+    if (sample_image.empty())
+        return paths;
+
+    const auto relative_path = std::filesystem::path("boxes") / "static" / "samples" / sample_image;
+
+    const auto get_executable_dir = []() -> std::filesystem::path {
+#ifdef _WIN32
+        std::vector<wchar_t> buffer(MAX_PATH, L'\0');
+        const auto len = GetModuleFileNameW(nullptr, buffer.data(), static_cast<DWORD>(buffer.size()));
+        if (len == 0)
+            return {};
+        return std::filesystem::path(std::wstring(buffer.data(), buffer.data() + len)).parent_path();
+#elif defined(__APPLE__)
+        uint32_t size = 0;
+        _NSGetExecutablePath(nullptr, &size);
+        std::string buffer(size, '\0');
+        if (_NSGetExecutablePath(buffer.data(), &size) != 0)
+            return {};
+        return std::filesystem::weakly_canonical(std::filesystem::path(buffer.c_str())).parent_path();
+#else
+        std::vector<char> buffer(4096, '\0');
+        const auto len = readlink("/proc/self/exe", buffer.data(), buffer.size() - 1);
+        if (len <= 0)
+            return {};
+        buffer.at(static_cast<size_t>(len)) = '\0';
+        return std::filesystem::weakly_canonical(std::filesystem::path(buffer.data())).parent_path();
+#endif
+    };
+
+    const auto exe_dir = get_executable_dir();
+    if (!exe_dir.empty()) {
+        paths.emplace_back(exe_dir / "share" / "dxfsketcher" / "pyvendor" / relative_path);
+        paths.emplace_back(exe_dir.parent_path() / "share" / "dxfsketcher" / "pyvendor" / relative_path);
+        paths.emplace_back(exe_dir.parent_path() / "Resources" / "share" / "dxfsketcher" / "pyvendor" / relative_path);
+    }
+    paths.emplace_back(std::filesystem::path(DUNE_SOURCE_ROOT) / "3rd_party" / "pyvendor" / relative_path);
+    paths.emplace_back(std::filesystem::path(DUNE_PKGDATADIR) / "pyvendor" / relative_path);
+    return paths;
+}
+
+std::optional<std::filesystem::path> get_boxes_sample_path(const BoxesTemplateDef &template_def)
+{
+    return get_boxes_sample_path(template_def.sample_image);
+}
+
+std::optional<std::filesystem::path> get_boxes_sample_path(const std::string &sample_image)
+{
+    for (const auto &candidate : get_boxes_sample_candidates(sample_image)) {
+        if (std::filesystem::exists(candidate))
+            return candidate;
+    }
+    return std::nullopt;
 }
 
 const UUID &selection_transform_rotate_uuid()
@@ -628,13 +3584,13 @@ bool widget_or_descendant_has_focus(Gtk::Widget &widget)
 }
 
 void install_hover_popover(Gtk::Widget &button, Gtk::Popover &popover, std::function<bool()> can_open = {},
-                           std::function<bool()> right_click_only = {})
+                           std::function<bool()> right_click_only = {}, bool keep_open_on_focus = true)
 {
     auto state = std::make_shared<HoverPopoverState>();
 
-    auto maybe_close = [state, &button, &popover] {
+    auto maybe_close = [state, &button, &popover, keep_open_on_focus] {
         // Keep popover while focused widget is inside opener button or inside the popover.
-        if (widget_or_descendant_has_focus(button) || widget_or_descendant_has_focus(popover))
+        if (keep_open_on_focus && (widget_or_descendant_has_focus(button) || widget_or_descendant_has_focus(popover)))
             return;
         if (!state->pointer_on_button && !state->pointer_on_popover && popover.get_visible()) {
             if (g_active_hover_popover == &popover)
@@ -764,12 +3720,19 @@ void Editor::init()
         update_workspace_view_names();
     });
     get_canvas().signal_selection_changed().connect([this] {
+        if (sanitize_canvas_selection_if_needed())
+            return;
+        if (expand_selection_to_closed_loops_if_needed())
+            return;
         update_action_sensitivity();
         sync_symmetry_popover_context();
         if (!m_core.tool_is_active())
             apply_symmetry_live_from_popover(false);
         sync_draw_text_popover_from_selection(true);
 #ifdef DUNE_SKETCHER_ONLY
+        update_gears_quick_popover();
+        update_joints_summary();
+        update_joints_quick_popover();
         if (m_selection_transform_enabled && !m_selection_transform_drag_active && !m_core.tool_is_active())
             canvas_update_keep_selection();
 #endif
@@ -828,8 +3791,11 @@ void Editor::init()
             m_sticky_draw_tool = ToolID::NONE;
             set_symmetry_enabled(false, false);
             m_layers_mode_enabled = false;
+            m_joints_mode_enabled = false;
             m_cup_template_enabled = false;
             m_active_layer_by_group.clear();
+            if (m_joints_quick_popover && m_joints_quick_popover->get_visible())
+                m_joints_quick_popover->popdown();
         }
 #endif
         rebuild_layers_popover();
@@ -894,6 +3860,15 @@ void Editor::init()
         snap_row->append(*m_selection_snap_switch);
         box->append(*snap_row);
 
+        auto closed_loop_row = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 8);
+        auto closed_loop_label = Gtk::make_managed<Gtk::Label>("Closed loop");
+        closed_loop_label->set_hexpand(true);
+        closed_loop_label->set_xalign(0);
+        m_selection_closed_loop_switch = Gtk::make_managed<Gtk::Switch>();
+        closed_loop_row->append(*closed_loop_label);
+        closed_loop_row->append(*m_selection_closed_loop_switch);
+        box->append(*closed_loop_row);
+
         m_selection_transform_switch->property_active().signal_changed().connect([this] {
             if (m_updating_selection_mode_popover)
                 return;
@@ -917,11 +3892,20 @@ void Editor::init()
                 return;
             m_selection_snap_enabled = m_selection_snap_switch->get_active();
         });
+        m_selection_closed_loop_switch->property_active().signal_changed().connect([this] {
+            if (m_updating_selection_mode_popover)
+                return;
+            m_selection_closed_loop_enabled = m_selection_closed_loop_switch->get_active();
+            m_closed_loop_previous_selection = get_canvas().get_selection();
+        });
     }
     sync_selection_mode_popover();
     m_win.add_action_button(*m_selection_mode_button);
     init_layers_popover();
     init_cup_template_popover();
+    init_gears_popover();
+    init_joints_popover();
+    init_boxes_popover();
 #endif
 
     auto add_sketch_toolbar_divider = [this]() {
@@ -974,8 +3958,14 @@ void Editor::init()
         button->signal_clicked().connect(sigc::mem_fun(*this, &Editor::on_trace_image_button));
         m_win.add_action_button(*button);
     }
-    if (m_layers_mode_button || m_cup_template_button)
+    if (m_gears_button || m_joints_button || m_boxes_button || m_cup_template_button || m_layers_mode_button)
         add_sketch_toolbar_divider();
+    if (m_gears_button)
+        m_win.add_action_button(*m_gears_button);
+    if (m_joints_button)
+        m_win.add_action_button(*m_joints_button);
+    if (m_boxes_button)
+        m_win.add_action_button(*m_boxes_button);
     if (m_cup_template_button)
         m_win.add_action_button(*m_cup_template_button);
     if (m_layers_mode_button) {
@@ -1545,6 +4535,68 @@ bool Editor::is_sticky_draw_tool(ToolID id) const
 #endif
 }
 
+bool Editor::is_middle_toggle_draw_tool(ToolID id) const
+{
+#ifdef DUNE_SKETCHER_ONLY
+    switch (id) {
+    case ToolID::DRAW_CONTOUR:
+    case ToolID::DRAW_CONTOUR_FROM_POINT:
+    case ToolID::DRAW_LINE_2D:
+    case ToolID::DRAW_ARC_2D:
+    case ToolID::DRAW_BEZIER_2D:
+    case ToolID::DRAW_POINT_2D:
+    case ToolID::DRAW_CIRCLE_2D:
+    case ToolID::DRAW_REGULAR_POLYGON:
+    case ToolID::DRAW_RECTANGLE:
+    case ToolID::DRAW_TEXT:
+        return true;
+    default:
+        return false;
+    }
+#else
+    (void)id;
+    return false;
+#endif
+}
+
+void Editor::remember_last_draw_tool(ToolID id)
+{
+#ifdef DUNE_SKETCHER_ONLY
+    if (is_middle_toggle_draw_tool(id))
+        m_last_middle_toggle_draw_tool = id;
+#else
+    (void)id;
+#endif
+}
+
+void Editor::toggle_selection_mode_or_last_draw_tool()
+{
+#ifdef DUNE_SKETCHER_ONLY
+    const auto active_tool = m_core.get_tool_id();
+    if (m_core.tool_is_active() || m_sticky_draw_tool != ToolID::NONE) {
+        if (is_middle_toggle_draw_tool(active_tool))
+            remember_last_draw_tool(active_tool);
+        else if (is_middle_toggle_draw_tool(m_sticky_draw_tool))
+            remember_last_draw_tool(m_sticky_draw_tool);
+        activate_selection_mode();
+        return;
+    }
+
+    if (m_last_middle_toggle_draw_tool != ToolID::NONE && m_core.has_documents()) {
+        const auto restore_tool = m_last_middle_toggle_draw_tool;
+        if (!force_end_tool())
+            return;
+        if (!trigger_action(restore_tool))
+            return;
+        m_sticky_draw_tool = is_sticky_draw_tool(restore_tool) ? restore_tool : ToolID::NONE;
+        update_sketcher_toolbar_button_states();
+        return;
+    }
+
+    activate_selection_mode();
+#endif
+}
+
 std::optional<UUID> Editor::get_single_selected_text_entity()
 {
 #ifdef DUNE_SKETCHER_ONLY
@@ -1641,13 +4693,146 @@ void Editor::sync_selection_mode_popover()
     if (!m_selection_mode_button)
         return;
     m_selection_mode_button->set_tooltip_text("Selection tool (Middle mouse)");
-    if (!m_selection_transform_switch || !m_selection_markers_switch || !m_selection_snap_switch)
+    if (!m_selection_transform_switch || !m_selection_markers_switch || !m_selection_snap_switch
+        || !m_selection_closed_loop_switch)
         return;
     m_updating_selection_mode_popover = true;
     m_selection_transform_switch->set_active(m_selection_transform_enabled);
     m_selection_markers_switch->set_active(m_show_technical_markers);
     m_selection_snap_switch->set_active(m_selection_snap_enabled);
+    m_selection_closed_loop_switch->set_active(m_selection_closed_loop_enabled);
     m_updating_selection_mode_popover = false;
+#endif
+}
+
+bool Editor::expand_selection_to_closed_loops_if_needed()
+{
+#ifdef DUNE_SKETCHER_ONLY
+    if (!m_core.has_documents())
+        return false;
+    const auto selection = get_canvas().get_selection();
+    if (m_applying_closed_loop_selection) {
+        m_closed_loop_previous_selection = selection;
+        return false;
+    }
+    if (!m_selection_closed_loop_enabled) {
+        m_closed_loop_previous_selection = selection;
+        return false;
+    }
+    if (m_core.tool_is_active()) {
+        m_closed_loop_previous_selection = selection;
+        return false;
+    }
+    if (selection.empty()) {
+        m_closed_loop_previous_selection.clear();
+        return false;
+    }
+
+    const auto &doc = m_core.get_current_document();
+    const auto group_uu = m_core.get_current_group();
+    std::set<SelectableRef> added_selection;
+    for (const auto &sr : selection) {
+        if (!m_closed_loop_previous_selection.contains(sr))
+            added_selection.insert(sr);
+    }
+    m_closed_loop_previous_selection = selection;
+    if (added_selection.empty())
+        return false;
+
+    std::set<SelectableRef> expanded = selection;
+    std::set<UUID> processed_entities;
+    bool changed = false;
+    for (const auto &sr : entities_from_selection(added_selection)) {
+        if (sr.type != SelectableRef::Type::ENTITY || sr.point != 0)
+            continue;
+        if (processed_entities.contains(sr.item))
+            continue;
+        const auto *en = doc.get_entity_ptr(sr.item);
+        if (!en || en->m_group != group_uu)
+            continue;
+
+        if (en->get_type() == Entity::Type::CIRCLE_2D) {
+            processed_entities.insert(sr.item);
+            changed |= expanded.emplace(SelectableRef::Type::ENTITY, sr.item, 0).second;
+            continue;
+        }
+
+        UUID wrkpl_uu;
+        glm::dvec2 p1, p2;
+        if (!get_loop_edge_endpoints(*en, wrkpl_uu, p1, p2))
+            continue;
+
+        std::set<UUID> loop_entities;
+        if (!collect_closed_loop_component(doc, group_uu, wrkpl_uu, sr.item, loop_entities)) {
+            processed_entities.insert(sr.item);
+            continue;
+        }
+
+        for (const auto &uu : loop_entities) {
+            processed_entities.insert(uu);
+            changed |= expanded.emplace(SelectableRef::Type::ENTITY, uu, 0).second;
+        }
+    }
+
+    if (!changed)
+        return false;
+
+    m_closed_loop_previous_selection = expanded;
+    m_applying_closed_loop_selection = true;
+    get_canvas().set_selection(expanded, true);
+    m_applying_closed_loop_selection = false;
+    return true;
+#else
+    return false;
+#endif
+}
+
+bool Editor::sanitize_canvas_selection_if_needed()
+{
+#ifdef DUNE_SKETCHER_ONLY
+    if (m_sanitizing_selection || !m_core.has_documents())
+        return false;
+
+    const auto selection = get_canvas().get_selection();
+    if (selection.empty())
+        return false;
+
+    const auto &doc = m_core.get_current_document();
+    std::set<SelectableRef> sanitized;
+    bool changed = false;
+    for (const auto &sr : selection) {
+        bool keep = true;
+        switch (sr.type) {
+        case SelectableRef::Type::ENTITY:
+            {
+                const auto *en = doc.get_entity_ptr(sr.item);
+                keep = en && (sr.point == 0 || en->is_valid_point(sr.point));
+            }
+            break;
+        case SelectableRef::Type::CONSTRAINT:
+            keep = doc.get_constraint_ptr(sr.item) != nullptr;
+            break;
+        case SelectableRef::Type::SOLID_MODEL_EDGE:
+        case SelectableRef::Type::DOCUMENT:
+        default:
+            keep = true;
+            break;
+        }
+        if (keep)
+            sanitized.insert(sr);
+        else
+            changed = true;
+    }
+
+    if (!changed)
+        return false;
+
+    m_sanitizing_selection = true;
+    get_canvas().set_selection(sanitized, true);
+    m_sanitizing_selection = false;
+    return true;
+#else
+    return false;
 #endif
 }
 
@@ -2117,6 +5302,3562 @@ void Editor::init_cup_template_popover()
 #endif
 }
 
+void Editor::init_gears_popover()
+{
+#ifdef DUNE_SKETCHER_ONLY
+    m_gears_button = Gtk::make_managed<Gtk::Button>();
+    m_gears_button->set_icon_name("applications-engineering-symbolic");
+    m_gears_button->set_tooltip_text("Gears");
+    m_gears_button->set_has_frame(true);
+    m_gears_button->set_focusable(false);
+    m_gears_button->add_css_class("sketch-toolbar-button");
+
+    m_gears_popover = Gtk::make_managed<Gtk::Popover>();
+    m_gears_popover->set_has_arrow(true);
+    m_gears_popover->set_autohide(false);
+    m_gears_popover->add_css_class("sketch-grid-popover");
+    m_gears_popover->set_parent(*m_gears_button);
+    m_gears_popover->set_size_request(sketch_popover_total_width, -1);
+    install_hover_popover(*m_gears_button, *m_gears_popover, [this] { return !m_primary_button_pressed; },
+                          [this] { return m_right_click_popovers_only; }, false);
+    m_gears_popover->signal_show().connect([this] {
+        update_gears_quick_popover();
+        update_sketcher_toolbar_button_states();
+    });
+    m_gears_popover->signal_hide().connect([this] {
+        update_gears_quick_popover();
+        update_sketcher_toolbar_button_states();
+    });
+
+    auto root = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 8);
+    root->set_margin_start(12);
+    root->set_margin_end(12);
+    root->set_margin_top(12);
+    root->set_margin_bottom(12);
+    root->set_size_request(sketch_popover_content_width, -1);
+    m_gears_popover->set_child(*root);
+
+    auto add_spin_row = [root](const char *label_text, Gtk::SpinButton *&spin, int digits, double min, double max, double step,
+                               const char *unit = nullptr) {
+        auto row = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 6);
+        auto label = Gtk::make_managed<Gtk::Label>(label_text);
+        label->set_hexpand(true);
+        label->set_xalign(0);
+        spin = Gtk::make_managed<Gtk::SpinButton>();
+        spin->set_digits(digits);
+        spin->set_numeric(true);
+        spin->set_range(min, max);
+        spin->set_increments(step, step * 10.0);
+        spin->set_width_chars(6);
+        row->append(*label);
+        row->append(*spin);
+        if (unit) {
+            auto unit_label = Gtk::make_managed<Gtk::Label>(unit);
+            unit_label->add_css_class("dim-label");
+            row->append(*unit_label);
+        }
+        root->append(*row);
+    };
+
+    add_spin_row("Module", m_gears_module_spin, 2, 0.1, 50.0, 0.1, "mm");
+    add_spin_row("Teeth", m_gears_teeth_spin, 0, 3, 360, 1);
+    add_spin_row("Pressure", m_gears_pressure_angle_spin, 1, 5, 45, 0.5, "deg");
+    add_spin_row("Backlash", m_gears_backlash_spin, 3, 0.0, 0.5, 0.01, "mm");
+    add_spin_row("Segments", m_gears_segments_spin, 0, 4, 128, 1);
+    add_spin_row("Bore", m_gears_bore_spin, 2, 0.0, 400.0, 0.1, "mm");
+    add_spin_row("Material", m_gears_material_thickness_spin, 2, 0.1, 100.0, 0.1, "mm");
+
+    auto hole_mode_row = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 6);
+    auto hole_mode_title = Gtk::make_managed<Gtk::Label>("Hole");
+    hole_mode_title->set_hexpand(true);
+    hole_mode_title->set_xalign(0);
+    m_gears_hole_mode_prev_button = Gtk::make_managed<Gtk::Button>();
+    m_gears_hole_mode_prev_button->set_icon_name("go-previous-symbolic");
+    m_gears_hole_mode_prev_button->set_has_frame(true);
+    m_gears_hole_mode_label = Gtk::make_managed<Gtk::Label>("Circle");
+    m_gears_hole_mode_label->set_width_chars(6);
+    m_gears_hole_mode_label->set_xalign(0.5f);
+    m_gears_hole_mode_next_button = Gtk::make_managed<Gtk::Button>();
+    m_gears_hole_mode_next_button->set_icon_name("go-next-symbolic");
+    m_gears_hole_mode_next_button->set_has_frame(true);
+    hole_mode_row->append(*hole_mode_title);
+    hole_mode_row->append(*m_gears_hole_mode_prev_button);
+    hole_mode_row->append(*m_gears_hole_mode_label);
+    hole_mode_row->append(*m_gears_hole_mode_next_button);
+    root->append(*hole_mode_row);
+
+    auto inward_row = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 6);
+    auto inward_label = Gtk::make_managed<Gtk::Label>("Inward");
+    inward_label->set_hexpand(true);
+    inward_label->set_xalign(0);
+    m_gears_inward_switch = Gtk::make_managed<Gtk::Switch>();
+    inward_row->append(*inward_label);
+    inward_row->append(*m_gears_inward_switch);
+    root->append(*inward_row);
+
+    m_gears_module_spin->set_value(2.0);
+    m_gears_teeth_spin->set_value(24);
+    m_gears_pressure_angle_spin->set_value(20.0);
+    m_gears_backlash_spin->set_value(0.0);
+    m_gears_segments_spin->set_value(12);
+    m_gears_bore_spin->set_value(5.0);
+    m_gears_material_thickness_spin->set_value(3.0);
+    m_gears_inward_switch->set_active(false);
+    m_gears_teeth_spin->set_tooltip_text("Standalone gear only. Selection-mode gears derive tooth count from Module.");
+    m_gears_segments_spin->set_tooltip_text("Curve quality for standalone involute gear generation.");
+    m_gears_backlash_spin->set_tooltip_text(
+            "Tooth side clearance at pitch circle. Use small values (typically 0.02-0.10 mm).");
+
+    const auto update_hole_mode_label = [this] {
+        if (m_gears_hole_mode_label)
+            m_gears_hole_mode_label->set_text(gear_hole_mode_name_by_index(static_cast<int>(m_gears_hole_mode)));
+        if (m_gears_generator_hole_mode_label)
+            m_gears_generator_hole_mode_label->set_text(gear_hole_mode_name_by_index(static_cast<int>(m_gears_hole_mode)));
+    };
+    m_gears_hole_mode_prev_button->signal_clicked().connect([this, update_hole_mode_label] {
+        auto idx = static_cast<int>(m_gears_hole_mode);
+        idx = normalize_gear_hole_mode_index(idx - 1);
+        m_gears_hole_mode = static_cast<GearHoleMode>(idx);
+        update_hole_mode_label();
+        update_gears_generator_preview();
+    });
+    m_gears_hole_mode_next_button->signal_clicked().connect([this, update_hole_mode_label] {
+        auto idx = static_cast<int>(m_gears_hole_mode);
+        idx = normalize_gear_hole_mode_index(idx + 1);
+        m_gears_hole_mode = static_cast<GearHoleMode>(idx);
+        update_hole_mode_label();
+        update_gears_generator_preview();
+    });
+    update_hole_mode_label();
+
+    m_gears_quick_popover = Gtk::make_managed<Gtk::Popover>();
+    m_gears_quick_popover->set_has_arrow(true);
+    m_gears_quick_popover->set_autohide(false);
+    m_gears_quick_popover->add_css_class("sketch-grid-popover");
+    m_gears_quick_popover->set_parent(get_canvas());
+    m_gears_quick_popover->set_position(Gtk::PositionType::RIGHT);
+    m_gears_quick_popover->set_offset(10, 10);
+
+    auto quick_root = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 6);
+    quick_root->set_margin_start(10);
+    quick_root->set_margin_end(10);
+    quick_root->set_margin_top(10);
+    quick_root->set_margin_bottom(10);
+    quick_root->set_size_request(160, -1);
+    m_gears_quick_popover->set_child(*quick_root);
+
+    auto quick_inward_row = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 6);
+    auto quick_inward_label = Gtk::make_managed<Gtk::Label>("Inward");
+    quick_inward_label->set_hexpand(true);
+    quick_inward_label->set_xalign(0);
+    m_gears_quick_inward_switch = Gtk::make_managed<Gtk::Switch>();
+    quick_inward_row->append(*quick_inward_label);
+    quick_inward_row->append(*m_gears_quick_inward_switch);
+    quick_root->append(*quick_inward_row);
+
+    m_gears_quick_apply_button = Gtk::make_managed<Gtk::Button>("Apply");
+    m_gears_quick_apply_button->set_has_frame(true);
+    m_gears_quick_apply_button->add_css_class("suggested-action");
+    quick_root->append(*m_gears_quick_apply_button);
+    m_gears_quick_apply_button->signal_clicked().connect([this] {
+        if (!generate_gears_from_selected_profile()) {
+            if (m_workspace_browser)
+                m_workspace_browser->show_toast("Select a circle, arc, or oval (Bezier chain) for Gears");
+            return;
+        }
+        update_gears_quick_popover();
+    });
+
+    auto sync_gears_inward = [this](bool inward) {
+        if (m_updating_gears_inward_switches)
+            return;
+        m_updating_gears_inward_switches = true;
+        if (m_gears_inward_switch && m_gears_inward_switch->get_active() != inward)
+            m_gears_inward_switch->set_active(inward);
+        if (m_gears_quick_inward_switch && m_gears_quick_inward_switch->get_active() != inward)
+            m_gears_quick_inward_switch->set_active(inward);
+        m_updating_gears_inward_switches = false;
+    };
+    m_gears_inward_switch->property_active().signal_changed().connect(
+            [this, sync_gears_inward] { sync_gears_inward(m_gears_inward_switch->get_active()); });
+    m_gears_quick_inward_switch->property_active().signal_changed().connect(
+            [this, sync_gears_inward] { sync_gears_inward(m_gears_quick_inward_switch->get_active()); });
+    sync_gears_inward(false);
+
+    const auto sync_generator_from_main = [this] {
+        update_gears_generator_ui();
+        update_gears_generator_preview();
+    };
+    m_gears_module_spin->signal_value_changed().connect(sync_generator_from_main);
+    m_gears_teeth_spin->signal_value_changed().connect(sync_generator_from_main);
+    m_gears_pressure_angle_spin->signal_value_changed().connect(sync_generator_from_main);
+    m_gears_backlash_spin->signal_value_changed().connect(sync_generator_from_main);
+    m_gears_segments_spin->signal_value_changed().connect(sync_generator_from_main);
+    m_gears_bore_spin->signal_value_changed().connect(sync_generator_from_main);
+    m_gears_material_thickness_spin->signal_value_changed().connect(sync_generator_from_main);
+    m_gears_inward_switch->property_active().signal_changed().connect(sync_generator_from_main);
+
+    auto generator_button = Gtk::make_managed<Gtk::Button>("Generator");
+    generator_button->set_has_frame(true);
+    generator_button->add_css_class("suggested-action");
+    root->append(*generator_button);
+    generator_button->signal_clicked().connect([this] {
+        if (m_gears_popover && m_gears_popover->get_visible()) {
+            m_gears_popover->popdown();
+            if (g_active_hover_popover == m_gears_popover)
+                g_active_hover_popover = nullptr;
+        }
+        open_gears_generator_window();
+    });
+
+    m_gears_button->signal_clicked().connect([this] {
+        m_gears_mode_enabled = !m_gears_mode_enabled;
+        update_gears_quick_popover();
+        update_sketcher_toolbar_button_states();
+    });
+#endif
+}
+
+void Editor::update_gears_quick_popover()
+{
+#ifdef DUNE_SKETCHER_ONLY
+    if (!m_gears_quick_popover)
+        return;
+
+    const auto hide_quick = [this] {
+        if (m_gears_quick_popover && m_gears_quick_popover->get_visible())
+            m_gears_quick_popover->popdown();
+    };
+
+    if (!m_gears_mode_enabled || !m_core.has_documents() || m_core.tool_is_active()) {
+        hide_quick();
+        return;
+    }
+    if (m_gears_popover && m_gears_popover->get_visible()) {
+        hide_quick();
+        return;
+    }
+
+    auto &doc = m_core.get_current_document();
+    GearProfileSource source;
+    std::string error;
+    if (!collect_selected_gear_profile_source(doc, get_canvas().get_selection(), m_core.get_current_group(), source, &error)) {
+        hide_quick();
+        return;
+    }
+
+    if (!m_gears_quick_popover->get_visible()) {
+        Gdk::Rectangle rect(static_cast<int>(std::lround(m_last_x)) + 1, static_cast<int>(std::lround(m_last_y)) + 1, 1, 1);
+        m_gears_quick_popover->set_pointing_to(rect);
+        m_gears_quick_popover->popup();
+    }
+#endif
+}
+
+void Editor::open_gears_generator_window()
+{
+#ifdef DUNE_SKETCHER_ONLY
+    if (!m_gears_generator_window) {
+        m_gears_generator_window = Gtk::make_managed<Gtk::Window>();
+        m_gears_generator_window->set_title("Gear Generator");
+        m_gears_generator_window->set_default_size(1020, 640);
+        m_gears_generator_window->set_transient_for(m_win);
+        m_gears_generator_window->set_modal(false);
+        m_gears_generator_window->set_hide_on_close(true);
+        m_gears_generator_window->signal_close_request().connect(
+                [this] {
+                    if (m_gears_generator_window)
+                        m_gears_generator_window->hide();
+                    return true;
+                },
+                false);
+
+        auto header = Gtk::make_managed<Gtk::HeaderBar>();
+        header->set_show_title_buttons(true);
+        auto title = Gtk::make_managed<Gtk::Label>("Generator");
+        header->set_title_widget(*title);
+        m_gears_generator_import_button = Gtk::make_managed<Gtk::Button>("Import");
+        m_gears_generator_import_button->add_css_class("suggested-action");
+        header->pack_end(*m_gears_generator_import_button);
+        m_gears_generator_window->set_titlebar(*header);
+
+        auto root = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 12);
+        root->set_margin_start(12);
+        root->set_margin_end(12);
+        root->set_margin_top(12);
+        root->set_margin_bottom(12);
+        m_gears_generator_window->set_child(*root);
+
+        auto settings_frame = Gtk::make_managed<Gtk::Frame>("Settings");
+        settings_frame->set_size_request(270, -1);
+        settings_frame->set_vexpand(true);
+        root->append(*settings_frame);
+
+        auto settings_scroll = Gtk::make_managed<Gtk::ScrolledWindow>();
+        settings_scroll->set_policy(Gtk::PolicyType::NEVER, Gtk::PolicyType::AUTOMATIC);
+        settings_scroll->set_min_content_height(100);
+        settings_frame->set_child(*settings_scroll);
+
+        auto settings = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 8);
+        settings->set_margin_start(10);
+        settings->set_margin_end(10);
+        settings->set_margin_top(10);
+        settings->set_margin_bottom(10);
+        settings_scroll->set_child(*settings);
+
+        auto add_spin_row = [settings](const char *label_text, Gtk::SpinButton *&spin, int digits, double min, double max,
+                                       double step, const char *unit = nullptr) {
+            auto row = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 6);
+            auto label = Gtk::make_managed<Gtk::Label>(label_text);
+            label->set_hexpand(true);
+            label->set_xalign(0);
+            spin = Gtk::make_managed<Gtk::SpinButton>();
+            spin->set_digits(digits);
+            spin->set_numeric(true);
+            spin->set_range(min, max);
+            spin->set_increments(step, step * 10.0);
+            spin->set_width_chars(6);
+            row->append(*label);
+            row->append(*spin);
+            if (unit) {
+                auto unit_label = Gtk::make_managed<Gtk::Label>(unit);
+                unit_label->add_css_class("dim-label");
+                row->append(*unit_label);
+            }
+            settings->append(*row);
+        };
+
+        add_spin_row("Module", m_gears_generator_module_spin, 2, 0.1, 50.0, 0.1, "mm");
+        add_spin_row("Teeth", m_gears_generator_teeth_spin, 0, 3, 720, 1);
+        add_spin_row("Pressure", m_gears_generator_pressure_spin, 1, 5, 45, 0.5, "deg");
+        add_spin_row("Backlash", m_gears_generator_backlash_spin, 3, 0.0, 0.5, 0.01, "mm");
+        add_spin_row("Segments", m_gears_generator_segments_spin, 0, 4, 128, 1);
+        add_spin_row("Bore", m_gears_generator_bore_spin, 2, 0.0, 400.0, 0.1, "mm");
+        add_spin_row("Material", m_gears_generator_material_thickness_spin, 2, 0.1, 100.0, 0.1, "mm");
+
+        auto hole_mode_row = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 6);
+        auto hole_mode_title = Gtk::make_managed<Gtk::Label>("Hole");
+        hole_mode_title->set_hexpand(true);
+        hole_mode_title->set_xalign(0);
+        m_gears_generator_hole_mode_prev_button = Gtk::make_managed<Gtk::Button>();
+        m_gears_generator_hole_mode_prev_button->set_icon_name("go-previous-symbolic");
+        m_gears_generator_hole_mode_prev_button->set_has_frame(true);
+        m_gears_generator_hole_mode_label = Gtk::make_managed<Gtk::Label>("Circle");
+        m_gears_generator_hole_mode_label->set_width_chars(6);
+        m_gears_generator_hole_mode_label->set_xalign(0.5f);
+        m_gears_generator_hole_mode_next_button = Gtk::make_managed<Gtk::Button>();
+        m_gears_generator_hole_mode_next_button->set_icon_name("go-next-symbolic");
+        m_gears_generator_hole_mode_next_button->set_has_frame(true);
+        hole_mode_row->append(*hole_mode_title);
+        hole_mode_row->append(*m_gears_generator_hole_mode_prev_button);
+        hole_mode_row->append(*m_gears_generator_hole_mode_label);
+        hole_mode_row->append(*m_gears_generator_hole_mode_next_button);
+        settings->append(*hole_mode_row);
+
+        {
+            auto row = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 6);
+            auto label = Gtk::make_managed<Gtk::Label>("Diameter 1");
+            label->set_hexpand(true);
+            label->set_xalign(0);
+            m_gears_generator_diameter1_spin = Gtk::make_managed<Gtk::SpinButton>();
+            m_gears_generator_diameter1_spin->set_digits(2);
+            m_gears_generator_diameter1_spin->set_numeric(true);
+            m_gears_generator_diameter1_spin->set_range(1.0, 2000.0);
+            m_gears_generator_diameter1_spin->set_increments(0.1, 1.0);
+            auto unit = Gtk::make_managed<Gtk::Label>("mm");
+            unit->add_css_class("dim-label");
+            row->append(*label);
+            row->append(*m_gears_generator_diameter1_spin);
+            row->append(*unit);
+            settings->append(*row);
+        }
+
+        auto pair_row = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 6);
+        auto pair_label = Gtk::make_managed<Gtk::Label>("Two gears");
+        pair_label->set_hexpand(true);
+        pair_label->set_xalign(0);
+        m_gears_generator_pair_switch = Gtk::make_managed<Gtk::Switch>();
+        pair_row->append(*pair_label);
+        pair_row->append(*m_gears_generator_pair_switch);
+        settings->append(*pair_row);
+
+        m_gears_generator_pair_box = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 8);
+        settings->append(*m_gears_generator_pair_box);
+
+        auto ratio_mode_row = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 6);
+        auto ratio_mode_label = Gtk::make_managed<Gtk::Label>("Use degrees");
+        ratio_mode_label->set_hexpand(true);
+        ratio_mode_label->set_xalign(0);
+        m_gears_generator_ratio_degrees_switch = Gtk::make_managed<Gtk::Switch>();
+        ratio_mode_row->append(*ratio_mode_label);
+        ratio_mode_row->append(*m_gears_generator_ratio_degrees_switch);
+        m_gears_generator_pair_box->append(*ratio_mode_row);
+
+        auto ratio_row = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 6);
+        m_gears_generator_ratio_label = Gtk::make_managed<Gtk::Label>("Ratio");
+        m_gears_generator_ratio_label->set_hexpand(true);
+        m_gears_generator_ratio_label->set_xalign(0);
+        m_gears_generator_ratio_spin = Gtk::make_managed<Gtk::SpinButton>();
+        m_gears_generator_ratio_spin->set_digits(3);
+        m_gears_generator_ratio_spin->set_numeric(true);
+        m_gears_generator_ratio_spin->set_range(0.05, 20.0);
+        m_gears_generator_ratio_spin->set_increments(0.01, 0.1);
+        ratio_row->append(*m_gears_generator_ratio_label);
+        ratio_row->append(*m_gears_generator_ratio_spin);
+        m_gears_generator_pair_box->append(*ratio_row);
+
+        m_gears_generator_summary_label = Gtk::make_managed<Gtk::Label>();
+        m_gears_generator_summary_label->set_xalign(0);
+        m_gears_generator_summary_label->set_wrap(true);
+        m_gears_generator_summary_label->add_css_class("dim-label");
+        settings->append(*m_gears_generator_summary_label);
+
+        auto preview_box = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 8);
+        preview_box->set_hexpand(true);
+        preview_box->set_vexpand(true);
+        root->append(*preview_box);
+
+        auto preview_frame = Gtk::make_managed<Gtk::Frame>("Preview");
+        preview_frame->set_hexpand(true);
+        preview_frame->set_vexpand(true);
+        preview_box->append(*preview_frame);
+
+        m_gears_generator_preview_area = Gtk::make_managed<Gtk::DrawingArea>();
+        m_gears_generator_preview_area->set_hexpand(true);
+        m_gears_generator_preview_area->set_vexpand(true);
+        m_gears_generator_preview_area->set_content_width(1);
+        m_gears_generator_preview_area->set_content_height(1);
+        m_gears_generator_preview_area->set_draw_func(sigc::mem_fun(*this, &Editor::draw_gears_generator_preview));
+        preview_frame->set_child(*m_gears_generator_preview_area);
+
+        m_gears_generator_rotation_slider = Gtk::make_managed<Gtk::Scale>(Gtk::Orientation::VERTICAL);
+        m_gears_generator_rotation_slider->set_range(-360.0, 360.0);
+        m_gears_generator_rotation_slider->set_increments(1.0, 15.0);
+        m_gears_generator_rotation_slider->set_digits(1);
+        m_gears_generator_rotation_slider->set_draw_value(false);
+        m_gears_generator_rotation_slider->set_value(0.0);
+        m_gears_generator_rotation_slider->set_vexpand(true);
+        preview_box->append(*m_gears_generator_rotation_slider);
+
+        const auto on_value_changed = [this] {
+            if (m_updating_gears_generator_ui)
+                return;
+            update_gears_generator_ui();
+            update_gears_generator_preview();
+        };
+
+        m_gears_generator_module_spin->signal_value_changed().connect(on_value_changed);
+        m_gears_generator_teeth_spin->signal_value_changed().connect(on_value_changed);
+        m_gears_generator_pressure_spin->signal_value_changed().connect(on_value_changed);
+        m_gears_generator_backlash_spin->signal_value_changed().connect(on_value_changed);
+        m_gears_generator_segments_spin->signal_value_changed().connect(on_value_changed);
+        m_gears_generator_bore_spin->signal_value_changed().connect(on_value_changed);
+        m_gears_generator_material_thickness_spin->signal_value_changed().connect(on_value_changed);
+        m_gears_generator_pair_switch->property_active().signal_changed().connect(on_value_changed);
+        m_gears_generator_ratio_degrees_switch->property_active().signal_changed().connect([this, on_value_changed] {
+            if (!m_gears_generator_ratio_spin)
+                return;
+            m_updating_gears_generator_ui = true;
+            if (m_gears_generator_ratio_degrees_switch && m_gears_generator_ratio_degrees_switch->get_active()) {
+                m_gears_generator_ratio_spin->set_range(1.0, 3600.0);
+                m_gears_generator_ratio_spin->set_digits(1);
+                m_gears_generator_ratio_spin->set_increments(1.0, 10.0);
+                m_gears_generator_ratio_spin->set_value(m_gears_generator_ratio_spin->get_value() * 360.0);
+            }
+            else {
+                m_gears_generator_ratio_spin->set_range(0.05, 20.0);
+                m_gears_generator_ratio_spin->set_digits(3);
+                m_gears_generator_ratio_spin->set_increments(0.01, 0.1);
+                m_gears_generator_ratio_spin->set_value(m_gears_generator_ratio_spin->get_value() / 360.0);
+            }
+            m_updating_gears_generator_ui = false;
+            on_value_changed();
+        });
+        m_gears_generator_diameter1_spin->signal_value_changed().connect(on_value_changed);
+        m_gears_generator_ratio_spin->signal_value_changed().connect(on_value_changed);
+        m_gears_generator_rotation_slider->signal_value_changed().connect(on_value_changed);
+        m_gears_generator_hole_mode_prev_button->signal_clicked().connect([this] {
+            auto idx = normalize_gear_hole_mode_index(static_cast<int>(m_gears_hole_mode) - 1);
+            m_gears_hole_mode = static_cast<GearHoleMode>(idx);
+            if (m_gears_hole_mode_label)
+                m_gears_hole_mode_label->set_text(gear_hole_mode_name_by_index(idx));
+            update_gears_generator_ui();
+            update_gears_generator_preview();
+        });
+        m_gears_generator_hole_mode_next_button->signal_clicked().connect([this] {
+            auto idx = normalize_gear_hole_mode_index(static_cast<int>(m_gears_hole_mode) + 1);
+            m_gears_hole_mode = static_cast<GearHoleMode>(idx);
+            if (m_gears_hole_mode_label)
+                m_gears_hole_mode_label->set_text(gear_hole_mode_name_by_index(idx));
+            update_gears_generator_ui();
+            update_gears_generator_preview();
+        });
+        m_gears_generator_import_button->signal_clicked().connect([this] {
+            if (!import_gears_generator_to_document())
+                return;
+            if (m_gears_generator_window)
+                m_gears_generator_window->hide();
+        });
+
+        m_updating_gears_generator_ui = true;
+        m_gears_generator_pair_switch->set_active(false);
+        m_gears_generator_ratio_degrees_switch->set_active(false);
+        m_gears_generator_diameter1_spin->set_value(48.0);
+        m_gears_generator_ratio_spin->set_value(1.0);
+        m_updating_gears_generator_ui = false;
+    }
+
+    m_updating_gears_generator_ui = true;
+    if (m_gears_generator_module_spin && m_gears_module_spin)
+        m_gears_generator_module_spin->set_value(m_gears_module_spin->get_value());
+    if (m_gears_generator_teeth_spin && m_gears_teeth_spin)
+        m_gears_generator_teeth_spin->set_value(m_gears_teeth_spin->get_value());
+    if (m_gears_generator_pressure_spin && m_gears_pressure_angle_spin)
+        m_gears_generator_pressure_spin->set_value(m_gears_pressure_angle_spin->get_value());
+    if (m_gears_generator_backlash_spin && m_gears_backlash_spin)
+        m_gears_generator_backlash_spin->set_value(m_gears_backlash_spin->get_value());
+    if (m_gears_generator_segments_spin && m_gears_segments_spin)
+        m_gears_generator_segments_spin->set_value(m_gears_segments_spin->get_value());
+    if (m_gears_generator_bore_spin && m_gears_bore_spin)
+        m_gears_generator_bore_spin->set_value(m_gears_bore_spin->get_value());
+    if (m_gears_generator_material_thickness_spin && m_gears_material_thickness_spin)
+        m_gears_generator_material_thickness_spin->set_value(m_gears_material_thickness_spin->get_value());
+    if (m_gears_generator_diameter1_spin && m_gears_generator_module_spin && m_gears_generator_teeth_spin)
+        m_gears_generator_diameter1_spin->set_value(m_gears_generator_module_spin->get_value() * m_gears_generator_teeth_spin->get_value());
+    m_updating_gears_generator_ui = false;
+
+    update_gears_generator_ui();
+    update_gears_generator_preview();
+    m_gears_generator_window->present();
+#endif
+}
+
+void Editor::update_gears_generator_ui()
+{
+#ifdef DUNE_SKETCHER_ONLY
+    if (!m_gears_generator_window)
+        return;
+    if (m_gears_generator_hole_mode_label)
+        m_gears_generator_hole_mode_label->set_text(gear_hole_mode_name_by_index(static_cast<int>(m_gears_hole_mode)));
+    if (m_gears_hole_mode_label)
+        m_gears_hole_mode_label->set_text(gear_hole_mode_name_by_index(static_cast<int>(m_gears_hole_mode)));
+
+    const auto pair_mode = m_gears_generator_pair_switch && m_gears_generator_pair_switch->get_active();
+    if (m_gears_generator_pair_box)
+        m_gears_generator_pair_box->set_visible(pair_mode);
+    if (m_gears_generator_rotation_slider)
+        m_gears_generator_rotation_slider->set_visible(pair_mode);
+    if (m_gears_generator_ratio_label) {
+        if (m_gears_generator_ratio_degrees_switch && m_gears_generator_ratio_degrees_switch->get_active())
+            m_gears_generator_ratio_label->set_text("Angle2/360");
+        else
+            m_gears_generator_ratio_label->set_text("Ratio");
+    }
+
+    if (!m_gears_generator_summary_label || !m_gears_generator_module_spin || !m_gears_generator_teeth_spin)
+        return;
+
+    const auto module = std::max(0.05, m_gears_generator_module_spin->get_value());
+    const auto diameter1 =
+            m_gears_generator_diameter1_spin ? std::max(1.0, m_gears_generator_diameter1_spin->get_value()) : module * 24.0;
+    const auto z1_from_diameter = std::max(3, static_cast<int>(std::lround(diameter1 / module)));
+    if (m_gears_generator_teeth_spin) {
+        const auto old = static_cast<int>(std::lround(m_gears_generator_teeth_spin->get_value()));
+        if (old != z1_from_diameter) {
+            m_updating_gears_generator_ui = true;
+            m_gears_generator_teeth_spin->set_value(z1_from_diameter);
+            m_updating_gears_generator_ui = false;
+        }
+    }
+    if (!pair_mode) {
+        const auto pitch_d = module * static_cast<double>(z1_from_diameter);
+        std::ostringstream ss;
+        ss << "z=" << z1_from_diameter << "  pitch diameter=" << std::fixed << std::setprecision(2) << pitch_d << " mm";
+        m_gears_generator_summary_label->set_text(ss.str());
+        return;
+    }
+
+    if (!m_gears_generator_diameter1_spin || !m_gears_generator_ratio_spin) {
+        m_gears_generator_summary_label->set_text({});
+        return;
+    }
+    auto ratio_value = std::max(0.001, m_gears_generator_ratio_spin->get_value());
+    if (m_gears_generator_ratio_degrees_switch && m_gears_generator_ratio_degrees_switch->get_active())
+        ratio_value /= 360.0;
+    ratio_value = std::clamp(ratio_value, 0.01, 100.0);
+
+    const auto z1 = z1_from_diameter;
+    const auto z2 = std::max(3, static_cast<int>(std::lround(static_cast<double>(z1) / ratio_value)));
+    const auto d1 = module * static_cast<double>(z1);
+    const auto d2 = module * static_cast<double>(z2);
+    const auto actual_ratio = static_cast<double>(z1) / static_cast<double>(z2);
+    const auto actual_deg = 360.0 * actual_ratio;
+    std::ostringstream ss;
+    ss << "z1=" << z1 << "  z2=" << z2 << "  d1=" << std::fixed << std::setprecision(2) << d1 << " mm  d2=" << d2
+       << " mm  ratio=" << std::setprecision(3) << actual_ratio << " (" << std::setprecision(1) << actual_deg
+       << " deg/360)";
+    m_gears_generator_summary_label->set_text(ss.str());
+#endif
+}
+
+bool Editor::build_gears_generator_polylines(std::vector<std::vector<glm::dvec2>> &polylines) const
+{
+#ifdef DUNE_SKETCHER_ONLY
+    polylines.clear();
+    if (!m_gears_generator_module_spin || !m_gears_generator_teeth_spin || !m_gears_generator_pressure_spin
+        || !m_gears_generator_backlash_spin || !m_gears_generator_segments_spin || !m_gears_generator_bore_spin
+        || !m_gears_generator_material_thickness_spin)
+        return false;
+
+    const auto module = std::max(0.05, m_gears_generator_module_spin->get_value());
+    const auto pressure = m_gears_generator_pressure_spin->get_value();
+    const auto backlash = std::max(0.0, m_gears_generator_backlash_spin->get_value());
+    const auto segments = std::max(4, static_cast<int>(std::lround(m_gears_generator_segments_spin->get_value())));
+    const auto bore = std::max(0.0, m_gears_generator_bore_spin->get_value());
+    const auto material = std::max(0.1, m_gears_generator_material_thickness_spin->get_value());
+    const auto pair_mode = m_gears_generator_pair_switch && m_gears_generator_pair_switch->get_active();
+    const auto slider_deg =
+            (pair_mode && m_gears_generator_rotation_slider) ? m_gears_generator_rotation_slider->get_value() : 0.0;
+    const auto angle1 = slider_deg * M_PI / 180.0;
+
+    auto build_outline = [&](int teeth, double angle, const glm::dvec2 &center) -> std::vector<glm::dvec2> {
+        GearGeneratorParams p;
+        p.module = module;
+        p.teeth = std::max(3, teeth);
+        p.pressure_angle_deg = pressure;
+        p.backlash_mm = backlash;
+        p.involute_segments = segments;
+        p.bore_diameter_mm = 0.0;
+        std::vector<glm::dvec2> outline;
+        if (!build_involute_gear_outline(p, outline))
+            return {};
+        for (auto &pt : outline)
+            pt = rotate_point_2d(pt, {0, 0}, angle) + center;
+        return outline;
+    };
+
+    if (!pair_mode) {
+        const auto diameter1 =
+                m_gears_generator_diameter1_spin ? std::max(1.0, m_gears_generator_diameter1_spin->get_value()) : module * 24.0;
+        const auto teeth = std::max(3, static_cast<int>(std::lround(diameter1 / module)));
+        auto outline = build_outline(teeth, 0.0, {0, 0});
+        if (outline.empty())
+            return false;
+        append_closed_polyline(polylines, std::move(outline));
+        append_gear_hole_polylines(polylines, static_cast<int>(m_gears_hole_mode), bore, material, {0, 0}, 0.0, segments * 4);
+        return !polylines.empty();
+    }
+
+    if (!m_gears_generator_diameter1_spin || !m_gears_generator_ratio_spin)
+        return false;
+
+    const auto diameter1 = std::max(1.0, m_gears_generator_diameter1_spin->get_value());
+    auto ratio_value = std::max(0.001, m_gears_generator_ratio_spin->get_value());
+    if (m_gears_generator_ratio_degrees_switch && m_gears_generator_ratio_degrees_switch->get_active())
+        ratio_value /= 360.0;
+    ratio_value = std::clamp(ratio_value, 0.01, 100.0);
+
+    const auto z1 = std::max(3, static_cast<int>(std::lround(diameter1 / module)));
+    const auto z2 = std::max(3, static_cast<int>(std::lround(static_cast<double>(z1) / ratio_value)));
+    const auto r1 = module * static_cast<double>(z1) * 0.5;
+    const auto r2 = module * static_cast<double>(z2) * 0.5;
+    const auto c1 = glm::dvec2(-(r1 + r2) * 0.5, 0.0);
+    const auto c2 = glm::dvec2((r1 + r2) * 0.5, 0.0);
+    // Mesh phase: our generated outline starts with a tooth centered at +X.
+    // For odd z2, the opposite side is already a gap; for even z2 we shift by half tooth.
+    const auto mesh_phase = (z2 % 2 == 0) ? (M_PI / static_cast<double>(z2)) : 0.0;
+    const auto angle2 = -angle1 * static_cast<double>(z1) / static_cast<double>(z2) + mesh_phase;
+
+    auto outline1 = build_outline(z1, angle1, c1);
+    auto outline2 = build_outline(z2, angle2, c2);
+    if (outline1.empty() || outline2.empty())
+        return false;
+    append_closed_polyline(polylines, std::move(outline1));
+    append_closed_polyline(polylines, std::move(outline2));
+    append_gear_hole_polylines(polylines, static_cast<int>(m_gears_hole_mode), bore, material, c1, angle1, segments * 4);
+    append_gear_hole_polylines(polylines, static_cast<int>(m_gears_hole_mode), bore, material, c2, angle2, segments * 4);
+    return !polylines.empty();
+#else
+    (void)polylines;
+    return false;
+#endif
+}
+
+void Editor::update_gears_generator_preview()
+{
+#ifdef DUNE_SKETCHER_ONLY
+    if (!m_gears_generator_preview_area)
+        return;
+    build_gears_generator_polylines(m_gears_generator_preview_polylines);
+    m_gears_generator_preview_area->queue_draw();
+#endif
+}
+
+void Editor::draw_gears_generator_preview(const Cairo::RefPtr<Cairo::Context> &cr, int w, int h)
+{
+#ifdef DUNE_SKETCHER_ONLY
+    cr->save();
+    cr->set_source_rgb(0.96, 0.96, 0.96);
+    cr->paint();
+
+    if (m_gears_generator_preview_polylines.empty()) {
+        cr->set_source_rgb(0.35, 0.35, 0.35);
+        cr->set_line_width(1.0);
+        cr->move_to(18, 28);
+        cr->show_text("No preview");
+        cr->restore();
+        return;
+    }
+
+    glm::dvec2 bb_min{std::numeric_limits<double>::max(), std::numeric_limits<double>::max()};
+    glm::dvec2 bb_max{std::numeric_limits<double>::lowest(), std::numeric_limits<double>::lowest()};
+    for (const auto &poly : m_gears_generator_preview_polylines) {
+        for (const auto &p : poly) {
+            bb_min = glm::min(bb_min, p);
+            bb_max = glm::max(bb_max, p);
+        }
+    }
+    const auto size = glm::max(bb_max - bb_min, glm::dvec2(1e-6, 1e-6));
+    const auto margin = 18.0;
+    const auto sx = (static_cast<double>(w) - margin * 2.0) / size.x;
+    const auto sy = (static_cast<double>(h) - margin * 2.0) / size.y;
+    const auto scale = std::max(1e-6, std::min(sx, sy));
+    const auto center = (bb_min + bb_max) * 0.5;
+
+    cr->translate(w * 0.5, h * 0.5);
+    cr->scale(scale, -scale);
+    cr->translate(-center.x, -center.y);
+
+    cr->set_source_rgb(0.1, 0.1, 0.1);
+    cr->set_line_width(1.2 / scale);
+    for (const auto &poly : m_gears_generator_preview_polylines) {
+        if (poly.size() < 2)
+            continue;
+        cr->move_to(poly.front().x, poly.front().y);
+        for (size_t i = 1; i < poly.size(); i++)
+            cr->line_to(poly.at(i).x, poly.at(i).y);
+        cr->close_path();
+    }
+    cr->stroke();
+    cr->restore();
+#else
+    (void)cr;
+    (void)w;
+    (void)h;
+#endif
+}
+
+bool Editor::import_gears_generator_to_document()
+{
+#ifdef DUNE_SKETCHER_ONLY
+    std::vector<std::vector<glm::dvec2>> polylines;
+    if (!build_gears_generator_polylines(polylines)) {
+        if (m_workspace_browser)
+            m_workspace_browser->show_toast("Generator preview is empty");
+        return false;
+    }
+    const auto pair_mode = m_gears_generator_pair_switch && m_gears_generator_pair_switch->get_active();
+    bool imported = false;
+    if (pair_mode && polylines.size() >= 2) {
+        std::vector<std::vector<std::vector<glm::dvec2>>> groups(2);
+        groups.at(0).push_back(polylines.at(0));
+        groups.at(1).push_back(polylines.at(1));
+
+        const auto centroid = [](const std::vector<glm::dvec2> &poly) {
+            glm::dvec2 c{0, 0};
+            if (poly.empty())
+                return c;
+            for (const auto &p : poly)
+                c += p;
+            return c / static_cast<double>(poly.size());
+        };
+        const auto c0 = centroid(polylines.at(0));
+        const auto c1 = centroid(polylines.at(1));
+        for (size_t i = 2; i < polylines.size(); i++) {
+            const auto c = centroid(polylines.at(i));
+            const auto d0 = glm::length(c - c0);
+            const auto d1 = glm::length(c - c1);
+            groups.at((d0 <= d1) ? 0 : 1).push_back(polylines.at(i));
+        }
+
+        imported = commit_generator_polyline_groups(groups, true, "gear generator import", true);
+    }
+    else {
+        imported = commit_generator_polylines(polylines, true, "gear generator import", true);
+    }
+
+    if (!imported) {
+        if (m_workspace_browser)
+            m_workspace_browser->show_toast("Couldn't import generator output");
+        return false;
+    }
+    return true;
+#else
+    return false;
+#endif
+}
+
+void Editor::rebuild_joints_family_dropdown()
+{
+#ifdef DUNE_SKETCHER_ONLY
+    if (!m_joints_category_dropdown || !m_joints_family_dropdown || g_joint_families.empty())
+        return;
+
+    const auto &categories = joint_ui_categories();
+    const auto category_index =
+            static_cast<size_t>(std::min<unsigned int>(m_joints_category_dropdown->get_selected(), categories.size() - 1));
+    const auto &category = categories.at(category_index);
+    if (m_joints_category_label)
+        m_joints_category_label->set_text(category.label);
+    if (m_joints_category_prev_button)
+        m_joints_category_prev_button->set_sensitive(categories.size() > 1);
+    if (m_joints_category_next_button)
+        m_joints_category_next_button->set_sensitive(categories.size() > 1);
+
+    auto family_model = Gtk::StringList::create();
+    m_joints_visible_family_indices.clear();
+    for (size_t i = 0; i < g_joint_families.size(); i++) {
+        const auto &family = g_joint_families.at(i);
+        if (joint_ui_category_for_family_id(family.id).id != category.id)
+            continue;
+        family_model->append(family.label);
+        m_joints_visible_family_indices.push_back(static_cast<unsigned int>(i));
+    }
+    if (m_joints_visible_family_indices.empty()) {
+        for (size_t i = 0; i < g_joint_families.size(); i++) {
+            family_model->append(g_joint_families.at(i).label);
+            m_joints_visible_family_indices.push_back(static_cast<unsigned int>(i));
+        }
+    }
+
+    const auto last_family_id = m_joints_setting_values["__joint_family__"];
+    size_t selected_index = 0;
+    if (!last_family_id.empty()) {
+        for (size_t i = 0; i < m_joints_visible_family_indices.size(); i++) {
+            if (g_joint_families.at(m_joints_visible_family_indices.at(i)).id == last_family_id) {
+                selected_index = i;
+                break;
+            }
+        }
+    }
+
+    m_joints_family_dropdown->set_model(family_model);
+    m_joints_family_dropdown->set_selected(static_cast<unsigned int>(std::min(selected_index, m_joints_visible_family_indices.size() - 1)));
+    if (const auto *family = get_selected_joint_family(m_joints_family_dropdown, m_joints_visible_family_indices)) {
+        m_joints_setting_values["__joint_family__"] = family->id;
+        if (m_joints_family_label)
+            m_joints_family_label->set_text(family->label);
+        if (m_joints_family_description_label)
+            m_joints_family_description_label->set_text(family->description);
+    }
+    if (m_joints_family_prev_button)
+        m_joints_family_prev_button->set_sensitive(m_joints_visible_family_indices.size() > 1);
+    if (m_joints_family_next_button)
+        m_joints_family_next_button->set_sensitive(m_joints_visible_family_indices.size() > 1);
+#endif
+}
+
+void Editor::rebuild_joints_role_dropdowns()
+{
+#ifdef DUNE_SKETCHER_ONLY
+    const auto *family = get_selected_joint_family(m_joints_family_dropdown, m_joints_visible_family_indices);
+    if (!family || !m_joints_role_dropdown)
+        return;
+
+    m_updating_joints_role_controls = true;
+    auto role_model = Gtk::StringList::create();
+    for (const auto &role : family->roles)
+        role_model->append(role.label);
+    m_joints_role_dropdown->set_model(role_model);
+
+    const auto last_key = joints_value_key(family->id, "__role__");
+    size_t selected_index = 0;
+    if (const auto it = m_joints_setting_values.find(last_key); it != m_joints_setting_values.end()) {
+        const auto role_it = std::find_if(family->roles.begin(), family->roles.end(),
+                                          [&id = it->second](const auto &role) { return role.id == id; });
+        if (role_it != family->roles.end())
+            selected_index = static_cast<size_t>(std::distance(family->roles.begin(), role_it));
+    }
+    selected_index = std::min(selected_index, family->roles.size() - 1);
+    m_joints_role_dropdown->set_selected(static_cast<unsigned int>(selected_index));
+    m_joints_setting_values[last_key] = family->roles.at(selected_index).id;
+    if (m_joints_quick_role_label)
+        m_joints_quick_role_label->set_text(family->roles.at(selected_index).label);
+    if (m_joints_role_label)
+        m_joints_role_label->set_text(family->roles.at(selected_index).label);
+    if (m_joints_quick_role_prev_button)
+        m_joints_quick_role_prev_button->set_sensitive(family->roles.size() > 1);
+    if (m_joints_quick_role_next_button)
+        m_joints_quick_role_next_button->set_sensitive(family->roles.size() > 1);
+    if (m_joints_role_prev_button)
+        m_joints_role_prev_button->set_sensitive(family->roles.size() > 1);
+    if (m_joints_role_next_button)
+        m_joints_role_next_button->set_sensitive(family->roles.size() > 1);
+    m_updating_joints_role_controls = false;
+#endif
+}
+
+void Editor::rebuild_joints_settings_ui()
+{
+#ifdef DUNE_SKETCHER_ONLY
+    const auto *family = get_selected_joint_family(m_joints_family_dropdown, m_joints_visible_family_indices);
+    if (!m_joints_settings_box || !family)
+        return;
+
+    m_joints_rebuilding_settings = true;
+    while (auto *child = m_joints_settings_box->get_first_child())
+        m_joints_settings_box->remove(*child);
+
+    m_joints_setting_rows.clear();
+    m_joints_spin_settings.clear();
+    m_joints_entry_settings.clear();
+    m_joints_dropdown_settings.clear();
+    m_joints_switch_settings.clear();
+
+    const auto *role = get_selected_joint_role(*family, m_joints_role_dropdown);
+    if (!role) {
+        m_joints_rebuilding_settings = false;
+        return;
+    }
+    m_joints_setting_values[joints_value_key(family->id, "__role__")] = role->id;
+
+    const auto visible_args = collect_joint_visible_args(*family, *role);
+    const auto get_value = [this, family](const SettingsArgDef &arg) {
+        if (const auto it = m_joints_setting_values.find(joints_value_key(family->id, arg.dest)); it != m_joints_setting_values.end())
+            return it->second;
+        return arg.default_string;
+    };
+    const auto save_value = [this, family](const std::string &dest, std::string value) {
+        m_joints_setting_values[joints_value_key(family->id, dest)] = std::move(value);
+    };
+
+    for (const auto &group : family->arg_groups) {
+        auto frame = Gtk::make_managed<Gtk::Frame>(group.title);
+        auto group_box = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 6);
+        group_box->set_margin_start(8);
+        group_box->set_margin_end(8);
+        group_box->set_margin_top(8);
+        group_box->set_margin_bottom(8);
+        frame->set_child(*group_box);
+
+        bool has_rows = false;
+        for (const auto &dest : group.args) {
+            const auto it = std::find_if(visible_args.begin(), visible_args.end(),
+                                         [&dest](const auto &arg) { return arg.dest == dest; });
+            if (it == visible_args.end())
+                continue;
+            const auto &arg = *it;
+
+            auto row = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 6);
+            auto label = Gtk::make_managed<Gtk::Label>(arg.label);
+            label->set_hexpand(true);
+            label->set_xalign(0.0f);
+            label->set_tooltip_text(arg.help);
+            row->append(*label);
+
+            if (arg.kind == SettingsArgKind::FLOAT || arg.kind == SettingsArgKind::INT) {
+                const auto digits = arg.kind == SettingsArgKind::INT ? 0 : 3;
+                const auto step = arg.kind == SettingsArgKind::INT ? 1.0 : 0.1;
+                auto spin = Gtk::make_managed<Gtk::SpinButton>();
+                spin->set_digits(digits);
+                spin->set_numeric(true);
+                spin->set_range(-1000000.0, 1000000.0);
+                spin->set_increments(step, step * 10.0);
+                spin->set_width_chars(8);
+                try {
+                    spin->set_value(std::stod(get_value(arg)));
+                }
+                catch (...) {
+                    spin->set_value(arg.kind == SettingsArgKind::INT ? static_cast<double>(arg.default_int) : arg.default_float);
+                }
+                spin->signal_value_changed().connect([this, save_value, dest = arg.dest, digits, spin] {
+                    if (m_joints_rebuilding_settings)
+                        return;
+                    std::ostringstream ss;
+                    ss << std::fixed << std::setprecision(digits) << spin->get_value();
+                    save_value(dest, ss.str());
+                    update_joints_summary();
+                });
+                row->append(*spin);
+                m_joints_spin_settings[arg.dest] = spin;
+            }
+            else if (arg.kind == SettingsArgKind::BOOL) {
+                auto sw = Gtk::make_managed<Gtk::Switch>();
+                const auto value = get_value(arg);
+                sw->set_active(value == "1" || value == "true" || (value.empty() && arg.default_bool));
+                sw->property_active().signal_changed().connect([this, save_value, dest = arg.dest, sw] {
+                    if (m_joints_rebuilding_settings)
+                        return;
+                    save_value(dest, sw->get_active() ? "1" : "0");
+                    update_joints_summary();
+                });
+                row->append(*sw);
+                m_joints_switch_settings[arg.dest] = sw;
+            }
+            else if (arg.kind == SettingsArgKind::CHOICE) {
+                auto model = Gtk::StringList::create();
+                for (const auto &choice : arg.choices)
+                    model->append(choice);
+                auto dropdown = Gtk::make_managed<Gtk::DropDown>(model, nullptr);
+                auto value = get_value(arg);
+                auto pos = std::find(arg.choices.begin(), arg.choices.end(), value);
+                if (pos == arg.choices.end())
+                    pos = arg.choices.begin();
+                if (pos != arg.choices.end())
+                    dropdown->set_selected(static_cast<unsigned int>(std::distance(arg.choices.begin(), pos)));
+                dropdown->property_selected().signal_changed().connect([this, save_value, arg, dropdown] {
+                    if (m_joints_rebuilding_settings)
+                        return;
+                    if (!arg.choices.empty()) {
+                        const auto idx = std::min<size_t>(dropdown->get_selected(), arg.choices.size() - 1);
+                        save_value(arg.dest, arg.choices.at(idx));
+                    }
+                    update_joints_summary();
+                });
+                row->append(*dropdown);
+                m_joints_dropdown_settings[arg.dest] = dropdown;
+            }
+            else {
+                auto entry = Gtk::make_managed<Gtk::Entry>();
+                entry->set_hexpand(true);
+                entry->set_width_chars(12);
+                entry->set_text(get_value(arg));
+                entry->signal_changed().connect([this, save_value, dest = arg.dest, entry] {
+                    if (m_joints_rebuilding_settings)
+                        return;
+                    save_value(dest, entry->get_text());
+                    update_joints_summary();
+                });
+                row->append(*entry);
+                m_joints_entry_settings[arg.dest] = entry;
+            }
+
+            m_joints_setting_rows[arg.dest] = row;
+            group_box->append(*row);
+            has_rows = true;
+        }
+
+        if (has_rows)
+            m_joints_settings_box->append(*frame);
+    }
+
+    const auto append_edge_extra_group = [this, &family, &visible_args, &get_value, &save_value](const JointEdgeDef *edge) {
+        if (!edge || edge->extra_args.empty())
+            return;
+        auto frame = Gtk::make_managed<Gtk::Frame>(edge->label);
+        auto group_box = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 6);
+        group_box->set_margin_start(8);
+        group_box->set_margin_end(8);
+        group_box->set_margin_top(8);
+        group_box->set_margin_bottom(8);
+        frame->set_child(*group_box);
+
+        for (const auto &arg : edge->extra_args) {
+            if (std::none_of(visible_args.begin(), visible_args.end(), [&arg](const auto &existing) { return existing.dest == arg.dest; }))
+                continue;
+            auto row = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 6);
+            auto label = Gtk::make_managed<Gtk::Label>(arg.label);
+            label->set_hexpand(true);
+            label->set_xalign(0.0f);
+            label->set_tooltip_text(arg.help);
+            row->append(*label);
+            if (arg.kind == SettingsArgKind::FLOAT || arg.kind == SettingsArgKind::INT) {
+                const auto digits = arg.kind == SettingsArgKind::INT ? 0 : 3;
+                const auto step = arg.kind == SettingsArgKind::INT ? 1.0 : 0.1;
+                auto spin = Gtk::make_managed<Gtk::SpinButton>();
+                spin->set_digits(digits);
+                spin->set_numeric(true);
+                spin->set_range(-1000000.0, 1000000.0);
+                spin->set_increments(step, step * 10.0);
+                spin->set_width_chars(8);
+                try {
+                    spin->set_value(std::stod(get_value(arg)));
+                }
+                catch (...) {
+                    spin->set_value(arg.kind == SettingsArgKind::INT ? static_cast<double>(arg.default_int) : arg.default_float);
+                }
+                spin->signal_value_changed().connect([this, save_value, dest = arg.dest, digits, spin] {
+                    if (m_joints_rebuilding_settings)
+                        return;
+                    std::ostringstream ss;
+                    ss << std::fixed << std::setprecision(digits) << spin->get_value();
+                    save_value(dest, ss.str());
+                    update_joints_summary();
+                });
+                row->append(*spin);
+                m_joints_spin_settings[arg.dest] = spin;
+            }
+            group_box->append(*row);
+        }
+        m_joints_settings_box->append(*frame);
+    };
+    append_edge_extra_group(find_joint_edge(*family, role->line0_edge));
+    if (role->pair)
+        append_edge_extra_group(find_joint_edge(*family, role->line1_edge));
+
+    if (!family->description.empty()) {
+        auto description = Gtk::make_managed<Gtk::Label>(family->description);
+        description->set_wrap(true);
+        description->set_xalign(0.0f);
+        description->add_css_class("dim-label");
+        m_joints_settings_box->append(*description);
+    }
+
+    m_joints_rebuilding_settings = false;
+#endif
+}
+
+void Editor::sync_joints_popover_controls()
+{
+#ifdef DUNE_SKETCHER_ONLY
+    if (m_updating_joints_ui || m_joints_rebuilding_settings)
+        return;
+    m_updating_joints_ui = true;
+    std::string error;
+    if (ensure_joint_families_loaded(error)) {
+        rebuild_joints_family_dropdown();
+        rebuild_joints_role_dropdowns();
+        rebuild_joints_settings_ui();
+    }
+    m_updating_joints_ui = false;
+    update_joints_summary();
+#endif
+}
+
+void Editor::update_joints_summary()
+{
+#ifdef DUNE_SKETCHER_ONLY
+    if (!m_joints_summary_label)
+        return;
+
+    std::string error;
+    if (!ensure_joint_families_loaded(error)) {
+        m_joints_summary_label->set_text(error);
+        return;
+    }
+    if (g_joint_families.empty()) {
+        m_joints_summary_label->set_text("No joint families");
+        return;
+    }
+
+    const auto *family = get_selected_joint_family(m_joints_family_dropdown, m_joints_visible_family_indices);
+    if (!family) {
+        m_joints_summary_label->set_text("No edge feature family");
+        return;
+    }
+    const auto *role = get_selected_joint_role(*family, m_joints_role_dropdown);
+    if (!role) {
+        m_joints_summary_label->set_text("No operation");
+        return;
+    }
+
+    std::ostringstream ss;
+    ss << family->label << "  " << role->label << "  thickness "
+       << std::fixed << std::setprecision(2) << (m_joints_thickness_spin ? m_joints_thickness_spin->get_value() : 3.0)
+       << " mm  burn " << (m_joints_burn_spin ? m_joints_burn_spin->get_value() : 0.1) << " mm";
+    if (!family->description.empty())
+        ss << "  " << family->description;
+    m_joints_summary_label->set_text(ss.str());
+    if (m_joints_family_description_label)
+        m_joints_family_description_label->set_text(family->description);
+    JointSelectionState selection_state;
+    if (m_core.has_documents()) {
+        auto &doc = m_core.get_current_document();
+        selection_state =
+                evaluate_joint_selection_state(doc, m_core.get_current_group(), get_canvas().get_selection(), *family, *role);
+    }
+    else {
+        selection_state = {false, role->pair ? "Select first edge." : "Select one or more lines."};
+    }
+    if (m_joints_selection_hint_label) {
+        auto hint = joint_selection_hint(*family, *role);
+        if (!selection_state.text.empty())
+            hint += "\n" + selection_state.text;
+        m_joints_selection_hint_label->set_text(hint);
+    }
+    if (m_joints_quick_hint_label)
+        m_joints_quick_hint_label->set_text(selection_state.text);
+    if (m_joints_apply_button)
+        m_joints_apply_button->set_sensitive(selection_state.ready);
+    if (m_joints_quick_apply_button)
+        m_joints_quick_apply_button->set_sensitive(selection_state.ready);
+    const auto can_swap = find_swapped_joint_role(*family, *role) != nullptr;
+    if (m_joints_swap_roles_button)
+        m_joints_swap_roles_button->set_sensitive(can_swap);
+    if (m_joints_quick_swap_roles_button)
+        m_joints_quick_swap_roles_button->set_sensitive(can_swap);
+    const auto side_mode = joint_side_mode_from_index(m_joints_side_dropdown ? m_joints_side_dropdown->get_selected() : 0);
+    if (m_joints_quick_side_label)
+        m_joints_quick_side_label->set_text(joint_side_mode_label(side_mode));
+    if (m_joints_side_label)
+        m_joints_side_label->set_text(joint_side_mode_label(side_mode));
+#endif
+}
+
+void Editor::init_joints_popover()
+{
+#ifdef DUNE_SKETCHER_ONLY
+    m_joints_button = Gtk::make_managed<Gtk::Button>();
+    m_joints_button->set_icon_name("insert-link-symbolic");
+    m_joints_button->set_tooltip_text("Edge Features: joints, hinges, lids, grooves, and utility edge cuts");
+    m_joints_button->set_has_frame(true);
+    m_joints_button->set_focusable(false);
+    m_joints_button->add_css_class("sketch-toolbar-button");
+
+    m_joints_popover = Gtk::make_managed<Gtk::Popover>();
+    m_joints_popover->set_has_arrow(true);
+    m_joints_popover->set_autohide(false);
+    m_joints_popover->add_css_class("sketch-grid-popover");
+    m_joints_popover->set_parent(*m_joints_button);
+    m_joints_popover->set_size_request(edge_features_popover_total_width, -1);
+    install_hover_popover(*m_joints_button, *m_joints_popover, [this] { return !m_primary_button_pressed; },
+                          [this] { return m_right_click_popovers_only; });
+    m_joints_popover->signal_show().connect([this] {
+        sync_joints_popover_controls();
+        update_sketcher_toolbar_button_states();
+    });
+    m_joints_popover->signal_hide().connect([this] { update_sketcher_toolbar_button_states(); });
+
+    auto root = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 8);
+    root->set_margin_start(12);
+    root->set_margin_end(12);
+    root->set_margin_top(12);
+    root->set_margin_bottom(12);
+    root->set_size_request(edge_features_popover_content_width, -1);
+    m_joints_popover->set_child(*root);
+
+    auto add_spin_row = [](Gtk::Box &parent, const char *label_text, Gtk::SpinButton *&spin, int digits, double min, double max,
+                           double step, const char *unit = nullptr) {
+        auto row = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 6);
+        auto label = Gtk::make_managed<Gtk::Label>(label_text);
+        label->set_hexpand(true);
+        label->set_xalign(0);
+        spin = Gtk::make_managed<Gtk::SpinButton>();
+        spin->set_digits(digits);
+        spin->set_numeric(true);
+        spin->set_range(min, max);
+        spin->set_increments(step, step * 10.0);
+        spin->set_width_chars(6);
+        row->append(*label);
+        row->append(*spin);
+        if (unit) {
+            auto unit_label = Gtk::make_managed<Gtk::Label>(unit);
+            unit_label->add_css_class("dim-label");
+            row->append(*unit_label);
+        }
+        parent.append(*row);
+    };
+    auto add_dropdown_row = [](Gtk::Box &parent, const char *label_text, Gtk::DropDown *&dropdown,
+                               std::initializer_list<const char *> items) {
+        auto row = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 6);
+        auto label = Gtk::make_managed<Gtk::Label>(label_text);
+        label->set_hexpand(true);
+        label->set_xalign(0);
+        auto model = Gtk::StringList::create();
+        for (const auto *item : items)
+            model->append(item);
+        dropdown = Gtk::make_managed<Gtk::DropDown>(model, nullptr);
+        row->append(*label);
+        row->append(*dropdown);
+        parent.append(*row);
+    };
+    auto add_dropdown_row_model = [](Gtk::Box &parent, const char *label_text, Gtk::DropDown *&dropdown,
+                                     const Glib::RefPtr<Gtk::StringList> &model) {
+        auto row = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 6);
+        auto label = Gtk::make_managed<Gtk::Label>(label_text);
+        label->set_hexpand(true);
+        label->set_xalign(0);
+        dropdown = Gtk::make_managed<Gtk::DropDown>(model, nullptr);
+        row->append(*label);
+        row->append(*dropdown);
+        parent.append(*row);
+    };
+    auto add_switcher_row = [](Gtk::Box &parent, const char *label_text, Gtk::Button *&prev_button, Gtk::Label *&value_label,
+                               Gtk::Button *&next_button) {
+        auto row = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 6);
+        auto label = Gtk::make_managed<Gtk::Label>(label_text);
+        label->set_hexpand(true);
+        label->set_xalign(0);
+        prev_button = Gtk::make_managed<Gtk::Button>();
+        prev_button->set_icon_name("go-previous-symbolic");
+        prev_button->set_has_frame(false);
+        prev_button->set_focusable(false);
+        value_label = Gtk::make_managed<Gtk::Label>("-");
+        value_label->set_hexpand(true);
+        value_label->set_xalign(0.5f);
+        value_label->set_ellipsize(Pango::EllipsizeMode::END);
+        next_button = Gtk::make_managed<Gtk::Button>();
+        next_button->set_icon_name("go-next-symbolic");
+        next_button->set_has_frame(false);
+        next_button->set_focusable(false);
+        row->append(*label);
+        row->append(*prev_button);
+        row->append(*value_label);
+        row->append(*next_button);
+        parent.append(*row);
+    };
+    auto add_switch_row = [](Gtk::Box &parent, const char *label_text, Gtk::Switch *&sw) {
+        auto row = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 6);
+        auto label = Gtk::make_managed<Gtk::Label>(label_text);
+        label->set_hexpand(true);
+        label->set_xalign(0);
+        sw = Gtk::make_managed<Gtk::Switch>();
+        row->append(*label);
+        row->append(*sw);
+        parent.append(*row);
+    };
+
+    std::string joints_error;
+    ensure_joint_families_loaded(joints_error);
+    auto category_model = Gtk::StringList::create();
+    for (const auto &category : joint_ui_categories())
+        category_model->append(category.label);
+    auto family_model = Gtk::StringList::create();
+    if (g_joint_families.empty()) {
+        family_model->append("Edge Features");
+    }
+    else {
+        for (const auto &family : g_joint_families)
+            family_model->append(family.label);
+    }
+
+    m_joints_category_dropdown = Gtk::make_managed<Gtk::DropDown>(category_model, nullptr);
+    m_joints_family_dropdown = Gtk::make_managed<Gtk::DropDown>(family_model, nullptr);
+    auto role_model = Gtk::StringList::create();
+    role_model->append("Edge");
+    m_joints_role_dropdown = Gtk::make_managed<Gtk::DropDown>(role_model, nullptr);
+    add_switcher_row(*root, "Category", m_joints_category_prev_button, m_joints_category_label, m_joints_category_next_button);
+    add_switcher_row(*root, "Family", m_joints_family_prev_button, m_joints_family_label, m_joints_family_next_button);
+    add_switcher_row(*root, "Operation", m_joints_role_prev_button, m_joints_role_label, m_joints_role_next_button);
+    auto side_model = Gtk::StringList::create();
+    side_model->append("Auto");
+    side_model->append("Inside");
+    side_model->append("Outside");
+    m_joints_side_dropdown = Gtk::make_managed<Gtk::DropDown>(side_model, nullptr);
+    add_switcher_row(*root, "Side", m_joints_side_prev_button, m_joints_side_label, m_joints_side_next_button);
+    add_switch_row(*root, "Flip direction", m_joints_flip_direction_switch);
+    add_spin_row(*root, "Thickness", m_joints_thickness_spin, 2, 0.1, 100.0, 0.1, "mm");
+    add_spin_row(*root, "Burn", m_joints_burn_spin, 3, 0.0, 3.0, 0.01, "mm");
+    m_joints_swap_roles_button = Gtk::make_managed<Gtk::Button>("Swap roles");
+    m_joints_swap_roles_button->set_has_frame(true);
+    m_joints_swap_roles_button->set_tooltip_text("Swap the first and second edge roles for pair operations");
+    root->append(*m_joints_swap_roles_button);
+
+    m_joints_family_description_label = Gtk::make_managed<Gtk::Label>();
+    m_joints_family_description_label->set_xalign(0);
+    m_joints_family_description_label->set_wrap(true);
+    m_joints_family_description_label->add_css_class("dim-label");
+    root->append(*m_joints_family_description_label);
+
+    m_joints_selection_hint_label = Gtk::make_managed<Gtk::Label>();
+    m_joints_selection_hint_label->set_xalign(0);
+    m_joints_selection_hint_label->set_wrap(true);
+    m_joints_selection_hint_label->add_css_class("dim-label");
+    root->append(*m_joints_selection_hint_label);
+
+    m_joints_summary_label = Gtk::make_managed<Gtk::Label>();
+    m_joints_summary_label->set_xalign(0);
+    m_joints_summary_label->set_wrap(true);
+    m_joints_summary_label->add_css_class("dim-label");
+    root->append(*m_joints_summary_label);
+
+    m_joints_advanced_expander = Gtk::make_managed<Gtk::Expander>("Advanced");
+    m_joints_advanced_expander->set_expanded(false);
+    auto advanced_scroll = Gtk::make_managed<Gtk::ScrolledWindow>();
+    advanced_scroll->set_policy(Gtk::PolicyType::NEVER, Gtk::PolicyType::AUTOMATIC);
+    advanced_scroll->set_min_content_height(160);
+    m_joints_settings_box = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 8);
+    m_joints_settings_box->set_margin_top(8);
+    advanced_scroll->set_child(*m_joints_settings_box);
+    m_joints_advanced_expander->set_child(*advanced_scroll);
+    root->append(*m_joints_advanced_expander);
+
+    if (m_joints_category_dropdown)
+        m_joints_category_dropdown->set_selected(0);
+    m_joints_family_dropdown->set_selected(0);
+    if (m_joints_side_dropdown)
+        m_joints_side_dropdown->set_selected(0);
+    m_joints_thickness_spin->set_value(3.0);
+    m_joints_burn_spin->set_value(0.1);
+    if (m_joints_flip_direction_switch)
+        m_joints_flip_direction_switch->set_active(false);
+
+    m_joints_quick_popover = Gtk::make_managed<Gtk::Popover>();
+    m_joints_quick_popover->set_has_arrow(true);
+    m_joints_quick_popover->set_autohide(false);
+    m_joints_quick_popover->add_css_class("sketch-grid-popover");
+    m_joints_quick_popover->set_parent(get_canvas());
+    m_joints_quick_popover->set_position(Gtk::PositionType::RIGHT);
+    m_joints_quick_popover->set_offset(10, 10);
+
+    auto quick_root = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 6);
+    quick_root->set_margin_start(10);
+    quick_root->set_margin_end(10);
+    quick_root->set_margin_top(10);
+    quick_root->set_margin_bottom(10);
+    quick_root->set_size_request(160, -1);
+    m_joints_quick_popover->set_child(*quick_root);
+
+    auto quick_role_row = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 6);
+    auto quick_role_title = Gtk::make_managed<Gtk::Label>("Operation");
+    quick_role_title->set_hexpand(true);
+    quick_role_title->set_xalign(0);
+    m_joints_quick_role_prev_button = Gtk::make_managed<Gtk::Button>();
+    m_joints_quick_role_prev_button->set_icon_name("go-previous-symbolic");
+    m_joints_quick_role_prev_button->set_has_frame(false);
+    m_joints_quick_role_prev_button->set_focusable(false);
+    m_joints_quick_role_label = Gtk::make_managed<Gtk::Label>("Edge");
+    m_joints_quick_role_label->set_hexpand(true);
+    m_joints_quick_role_label->set_xalign(0.5f);
+    m_joints_quick_role_label->set_ellipsize(Pango::EllipsizeMode::END);
+    m_joints_quick_role_next_button = Gtk::make_managed<Gtk::Button>();
+    m_joints_quick_role_next_button->set_icon_name("go-next-symbolic");
+    m_joints_quick_role_next_button->set_has_frame(false);
+    m_joints_quick_role_next_button->set_focusable(false);
+    quick_role_row->append(*quick_role_title);
+    quick_role_row->append(*m_joints_quick_role_prev_button);
+    quick_role_row->append(*m_joints_quick_role_label);
+    quick_role_row->append(*m_joints_quick_role_next_button);
+    quick_root->append(*quick_role_row);
+    auto quick_side_row = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 6);
+    auto quick_side_title = Gtk::make_managed<Gtk::Label>("Side");
+    quick_side_title->set_hexpand(true);
+    quick_side_title->set_xalign(0);
+    m_joints_quick_side_prev_button = Gtk::make_managed<Gtk::Button>();
+    m_joints_quick_side_prev_button->set_icon_name("go-previous-symbolic");
+    m_joints_quick_side_prev_button->set_has_frame(false);
+    m_joints_quick_side_prev_button->set_focusable(false);
+    m_joints_quick_side_label = Gtk::make_managed<Gtk::Label>("Auto");
+    m_joints_quick_side_label->set_hexpand(true);
+    m_joints_quick_side_label->set_xalign(0.5f);
+    m_joints_quick_side_next_button = Gtk::make_managed<Gtk::Button>();
+    m_joints_quick_side_next_button->set_icon_name("go-next-symbolic");
+    m_joints_quick_side_next_button->set_has_frame(false);
+    m_joints_quick_side_next_button->set_focusable(false);
+    quick_side_row->append(*quick_side_title);
+    quick_side_row->append(*m_joints_quick_side_prev_button);
+    quick_side_row->append(*m_joints_quick_side_label);
+    quick_side_row->append(*m_joints_quick_side_next_button);
+    quick_root->append(*quick_side_row);
+
+    auto quick_flip_row = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 6);
+    auto quick_flip_label = Gtk::make_managed<Gtk::Label>("Flip direction");
+    quick_flip_label->set_hexpand(true);
+    quick_flip_label->set_xalign(0);
+    m_joints_quick_flip_direction_switch = Gtk::make_managed<Gtk::Switch>();
+    quick_flip_row->append(*quick_flip_label);
+    quick_flip_row->append(*m_joints_quick_flip_direction_switch);
+    quick_root->append(*quick_flip_row);
+
+    m_joints_quick_swap_roles_button = Gtk::make_managed<Gtk::Button>("Swap roles");
+    m_joints_quick_swap_roles_button->set_has_frame(true);
+    m_joints_quick_swap_roles_button->set_tooltip_text("Swap the first and second edge roles");
+    quick_root->append(*m_joints_quick_swap_roles_button);
+
+    m_joints_quick_apply_button = Gtk::make_managed<Gtk::Button>("Apply");
+    m_joints_quick_apply_button->set_has_frame(true);
+    m_joints_quick_apply_button->add_css_class("suggested-action");
+    m_joints_quick_apply_button->set_tooltip_text("Apply the current Edge Feature to the selected edges");
+    quick_root->append(*m_joints_quick_apply_button);
+    m_joints_quick_hint_label = Gtk::make_managed<Gtk::Label>();
+    m_joints_quick_hint_label->set_xalign(0);
+    m_joints_quick_hint_label->set_wrap(true);
+    m_joints_quick_hint_label->add_css_class("dim-label");
+    quick_root->append(*m_joints_quick_hint_label);
+    m_joints_quick_apply_button->signal_clicked().connect([this] {
+        if (!generate_joints_from_selected_lines()) {
+            if (m_workspace_browser)
+                m_workspace_browser->show_toast("Select a valid edge selection for Edge Features");
+            return;
+        }
+        update_joints_quick_popover();
+    });
+
+    auto sync_joints_controls = [this](unsigned int side_idx, bool flip_direction) {
+        if (m_updating_joints_side_controls)
+            return;
+        m_updating_joints_side_controls = true;
+        if (m_joints_side_dropdown && m_joints_side_dropdown->get_selected() != side_idx)
+            m_joints_side_dropdown->set_selected(side_idx);
+        if (m_joints_quick_side_label)
+            m_joints_quick_side_label->set_text(joint_side_mode_label(joint_side_mode_from_index(side_idx)));
+        if (m_joints_side_label)
+            m_joints_side_label->set_text(joint_side_mode_label(joint_side_mode_from_index(side_idx)));
+        if (m_joints_flip_direction_switch && m_joints_flip_direction_switch->get_active() != flip_direction)
+            m_joints_flip_direction_switch->set_active(flip_direction);
+        if (m_joints_quick_flip_direction_switch && m_joints_quick_flip_direction_switch->get_active() != flip_direction)
+            m_joints_quick_flip_direction_switch->set_active(flip_direction);
+        m_updating_joints_side_controls = false;
+        update_joints_summary();
+    };
+    if (m_joints_side_dropdown) {
+        m_joints_side_dropdown->property_selected().signal_changed().connect([this, sync_joints_controls] {
+            sync_joints_controls(m_joints_side_dropdown->get_selected(),
+                                 m_joints_flip_direction_switch && m_joints_flip_direction_switch->get_active());
+        });
+    }
+    if (m_joints_flip_direction_switch) {
+        m_joints_flip_direction_switch->property_active().signal_changed().connect([this, sync_joints_controls] {
+            sync_joints_controls(m_joints_side_dropdown ? m_joints_side_dropdown->get_selected() : 0,
+                                 m_joints_flip_direction_switch->get_active());
+        });
+    }
+    if (m_joints_quick_flip_direction_switch) {
+        m_joints_quick_flip_direction_switch->property_active().signal_changed().connect([this, sync_joints_controls] {
+            sync_joints_controls(m_joints_side_dropdown ? m_joints_side_dropdown->get_selected() : 0,
+                                 m_joints_quick_flip_direction_switch->get_active());
+        });
+    }
+    auto cycle_quick_side = [this, sync_joints_controls](int delta) {
+        const auto current = static_cast<int>(m_joints_side_dropdown ? m_joints_side_dropdown->get_selected() : 0);
+        const auto next = (current + delta + 3) % 3;
+        sync_joints_controls(static_cast<unsigned int>(next),
+                             m_joints_flip_direction_switch && m_joints_flip_direction_switch->get_active());
+    };
+    if (m_joints_side_prev_button)
+        m_joints_side_prev_button->signal_clicked().connect([cycle_quick_side] { cycle_quick_side(-1); });
+    if (m_joints_side_next_button)
+        m_joints_side_next_button->signal_clicked().connect([cycle_quick_side] { cycle_quick_side(1); });
+    if (m_joints_quick_side_prev_button)
+        m_joints_quick_side_prev_button->signal_clicked().connect([cycle_quick_side] { cycle_quick_side(-1); });
+    if (m_joints_quick_side_next_button)
+        m_joints_quick_side_next_button->signal_clicked().connect([cycle_quick_side] { cycle_quick_side(1); });
+    sync_joints_controls(0, false);
+
+    auto sync_joints_role = [this](unsigned int role_idx) {
+        if (m_updating_joints_role_controls)
+            return;
+        m_updating_joints_role_controls = true;
+        if (m_joints_role_dropdown && m_joints_role_dropdown->get_selected() != role_idx)
+            m_joints_role_dropdown->set_selected(role_idx);
+        if (const auto *family = get_selected_joint_family(m_joints_family_dropdown, m_joints_visible_family_indices)) {
+            if (m_joints_quick_role_label && role_idx < family->roles.size()) {
+                m_joints_quick_role_label->set_text(family->roles.at(role_idx).label);
+                m_joints_setting_values[joints_value_key(family->id, "__role__")] = family->roles.at(role_idx).id;
+            }
+        }
+        m_updating_joints_role_controls = false;
+        rebuild_joints_settings_ui();
+        update_joints_summary();
+    };
+    m_joints_role_dropdown->property_selected().signal_changed().connect(
+            [this, sync_joints_role] { sync_joints_role(m_joints_role_dropdown->get_selected()); });
+    auto cycle_quick_role = [this, sync_joints_role](int delta) {
+        std::string error;
+        if (!ensure_joint_families_loaded(error) || !m_joints_family_dropdown || !m_joints_role_dropdown || g_joint_families.empty())
+            return;
+        const auto *family = get_selected_joint_family(m_joints_family_dropdown, m_joints_visible_family_indices);
+        if (!family || family->roles.empty())
+            return;
+        const auto count = static_cast<int>(family->roles.size());
+        const auto current = static_cast<int>(std::min<size_t>(m_joints_role_dropdown->get_selected(), family->roles.size() - 1));
+        const auto next = (current + delta + count) % count;
+        sync_joints_role(static_cast<unsigned int>(next));
+    };
+    if (m_joints_quick_role_prev_button) {
+        m_joints_quick_role_prev_button->signal_clicked().connect([cycle_quick_role] { cycle_quick_role(-1); });
+    }
+    if (m_joints_quick_role_next_button) {
+        m_joints_quick_role_next_button->signal_clicked().connect([cycle_quick_role] { cycle_quick_role(1); });
+    }
+    if (m_joints_role_prev_button) {
+        m_joints_role_prev_button->signal_clicked().connect([cycle_quick_role] { cycle_quick_role(-1); });
+    }
+    if (m_joints_role_next_button) {
+        m_joints_role_next_button->signal_clicked().connect([cycle_quick_role] { cycle_quick_role(1); });
+    }
+    auto swap_roles = [this, sync_joints_role] {
+        const auto *family = get_selected_joint_family(m_joints_family_dropdown, m_joints_visible_family_indices);
+        const auto *role = family ? get_selected_joint_role(*family, m_joints_role_dropdown) : nullptr;
+        const auto *swapped = (family && role) ? find_swapped_joint_role(*family, *role) : nullptr;
+        if (!family || !role || !swapped)
+            return;
+        const auto idx = static_cast<unsigned int>(std::distance(family->roles.begin(),
+                                                                 std::find_if(family->roles.begin(), family->roles.end(),
+                                                                              [swapped](const auto &candidate) {
+                                                                                  return candidate.id == swapped->id;
+                                                                              })));
+        sync_joints_role(idx);
+    };
+    if (m_joints_swap_roles_button)
+        m_joints_swap_roles_button->signal_clicked().connect(swap_roles);
+    if (m_joints_quick_swap_roles_button)
+        m_joints_quick_swap_roles_button->signal_clicked().connect(swap_roles);
+    sync_joints_role(0);
+
+    auto cycle_category = [this](int delta) {
+        if (!m_joints_category_dropdown)
+            return;
+        const auto count = static_cast<int>(joint_ui_categories().size());
+        if (count <= 0)
+            return;
+        const auto current = static_cast<int>(m_joints_category_dropdown->get_selected());
+        const auto next = (current + delta + count) % count;
+        m_joints_category_dropdown->set_selected(static_cast<unsigned int>(next));
+    };
+    auto cycle_family = [this](int delta) {
+        if (!m_joints_family_dropdown || m_joints_visible_family_indices.empty())
+            return;
+        const auto count = static_cast<int>(m_joints_visible_family_indices.size());
+        const auto current = static_cast<int>(m_joints_family_dropdown->get_selected());
+        const auto next = (current + delta + count) % count;
+        m_joints_family_dropdown->set_selected(static_cast<unsigned int>(next));
+    };
+    if (m_joints_category_prev_button)
+        m_joints_category_prev_button->signal_clicked().connect([cycle_category] { cycle_category(-1); });
+    if (m_joints_category_next_button)
+        m_joints_category_next_button->signal_clicked().connect([cycle_category] { cycle_category(1); });
+    if (m_joints_family_prev_button)
+        m_joints_family_prev_button->signal_clicked().connect([cycle_family] { cycle_family(-1); });
+    if (m_joints_family_next_button)
+        m_joints_family_next_button->signal_clicked().connect([cycle_family] { cycle_family(1); });
+    if (m_joints_category_dropdown)
+        m_joints_category_dropdown->property_selected().signal_changed().connect([this] { sync_joints_popover_controls(); });
+    m_joints_family_dropdown->property_selected().signal_changed().connect([this] {
+        if (m_updating_joints_ui || m_joints_rebuilding_settings)
+            return;
+
+        m_updating_joints_ui = true;
+        if (const auto *family = get_selected_joint_family(m_joints_family_dropdown, m_joints_visible_family_indices))
+            m_joints_setting_values["__joint_family__"] = family->id;
+        if (const auto *family = get_selected_joint_family(m_joints_family_dropdown, m_joints_visible_family_indices)) {
+            if (m_joints_family_label)
+                m_joints_family_label->set_text(family->label);
+            if (m_joints_family_description_label)
+                m_joints_family_description_label->set_text(family->description);
+        }
+        rebuild_joints_role_dropdowns();
+        rebuild_joints_settings_ui();
+        m_updating_joints_ui = false;
+        update_joints_summary();
+    });
+    m_joints_thickness_spin->signal_value_changed().connect([this] { update_joints_summary(); });
+    m_joints_burn_spin->signal_value_changed().connect([this] { update_joints_summary(); });
+
+    m_joints_apply_button = Gtk::make_managed<Gtk::Button>("Apply");
+    m_joints_apply_button->set_has_frame(true);
+    m_joints_apply_button->add_css_class("suggested-action");
+    root->append(*m_joints_apply_button);
+    m_joints_apply_button->signal_clicked().connect([this] {
+        if (!generate_joints_from_selected_lines()) {
+            if (m_workspace_browser)
+                m_workspace_browser->show_toast("Select a valid edge selection for Edge Features");
+            return;
+        }
+        if (m_joints_popover)
+            m_joints_popover->popdown();
+    });
+
+    m_joints_button->signal_clicked().connect([this] {
+        m_joints_mode_enabled = !m_joints_mode_enabled;
+        update_joints_quick_popover(false);
+        update_sketcher_toolbar_button_states();
+    });
+
+    if (!joints_error.empty() && m_workspace_browser)
+        m_workspace_browser->show_toast(joints_error);
+    sync_joints_popover_controls();
+#endif
+}
+
+void Editor::update_joints_quick_popover(bool request_popup)
+{
+#ifdef DUNE_SKETCHER_ONLY
+    if (!m_joints_quick_popover)
+        return;
+
+    if (m_boxes_generator_window && m_boxes_generator_window->get_visible()) {
+        if (m_joints_quick_popover->get_visible())
+            m_joints_quick_popover->popdown();
+        return;
+    }
+
+    const auto hide_quick = [this] {
+        if (m_joints_quick_popover && m_joints_quick_popover->get_visible())
+            m_joints_quick_popover->popdown();
+    };
+
+    if (!m_joints_mode_enabled || !m_core.has_documents() || m_core.tool_is_active()) {
+        hide_quick();
+        return;
+    }
+    if (m_joints_popover && m_joints_popover->get_visible()) {
+        hide_quick();
+        return;
+    }
+
+    std::string error;
+    if (!ensure_joint_families_loaded(error) || g_joint_families.empty()) {
+        hide_quick();
+        return;
+    }
+    const auto *family = get_selected_joint_family(m_joints_family_dropdown, m_joints_visible_family_indices);
+    if (!family) {
+        hide_quick();
+        return;
+    }
+    const auto *role = get_selected_joint_role(*family, m_joints_role_dropdown);
+    if (!role) {
+        hide_quick();
+        return;
+    }
+    update_joints_summary();
+        if (!joint_family_quick_popover_supported(*family)) {
+        hide_quick();
+        if (request_popup && m_workspace_browser)
+            m_workspace_browser->show_toast("This family needs the main Edge Features panel");
+        return;
+    }
+
+    auto &doc = m_core.get_current_document();
+    auto &group = doc.get_group(m_core.get_current_group());
+    auto *sketch = dynamic_cast<GroupSketch *>(&group);
+    if (!sketch) {
+        hide_quick();
+        return;
+    }
+
+    const auto selection = get_canvas().get_selection();
+    const auto lines = selected_line_entities_in_group(doc, selection, group.m_uuid);
+    if (lines.empty()) {
+        hide_quick();
+        if (request_popup && m_workspace_browser)
+            m_workspace_browser->show_toast("Select one or more lines first, then press Shift+LMB");
+        return;
+    }
+
+    if (!m_joints_quick_popover->get_visible() && request_popup) {
+        Gdk::Rectangle rect(static_cast<int>(std::lround(m_last_x)) + 1, static_cast<int>(std::lround(m_last_y)) + 1, 1, 1);
+        m_joints_quick_popover->set_pointing_to(rect);
+        m_joints_quick_popover->popup();
+    }
+    else if (!m_joints_quick_popover->get_visible()) {
+        return;
+    }
+#endif
+}
+
+void Editor::init_boxes_popover()
+{
+#ifdef DUNE_SKETCHER_ONLY
+    m_boxes_button = Gtk::make_managed<Gtk::Button>();
+    m_boxes_button->set_icon_name("package-x-generic-symbolic");
+    m_boxes_button->set_tooltip_text("Boxes");
+    m_boxes_button->set_has_frame(true);
+    m_boxes_button->set_focusable(false);
+    m_boxes_button->add_css_class("sketch-toolbar-button");
+    m_boxes_button->signal_clicked().connect([this] {
+        open_boxes_generator_window();
+    });
+#endif
+}
+
+void Editor::open_boxes_generator_window()
+{
+#ifdef DUNE_SKETCHER_ONLY
+    if (g_boxes_templates.empty()) {
+        if (!m_boxes_loading_window) {
+            m_boxes_loading_window = Gtk::make_managed<Gtk::Window>();
+            m_boxes_loading_window->set_title("Loading Boxes");
+            m_boxes_loading_window->set_default_size(320, 110);
+            m_boxes_loading_window->set_transient_for(m_win);
+            m_boxes_loading_window->set_modal(true);
+            m_boxes_loading_window->set_hide_on_close(true);
+            auto box = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 10);
+            box->set_margin_start(16);
+            box->set_margin_end(16);
+            box->set_margin_top(16);
+            box->set_margin_bottom(16);
+            auto spinner = Gtk::make_managed<Gtk::Spinner>();
+            spinner->start();
+            auto label = Gtk::make_managed<Gtk::Label>("Please wait while the boxes catalog is loaded...");
+            label->set_wrap(true);
+            label->set_justify(Gtk::Justification::CENTER);
+            box->append(*spinner);
+            box->append(*label);
+            m_boxes_loading_window->set_child(*box);
+        }
+        m_boxes_loading_window->present();
+
+        if (!m_boxes_catalog_loading) {
+            m_boxes_catalog_loading = true;
+            m_boxes_catalog_future = std::async(std::launch::async, [] {
+                std::string error;
+                return std::make_pair(ensure_boxes_catalog_loaded(error), error);
+            });
+            if (m_boxes_catalog_poll_connection.connected())
+                m_boxes_catalog_poll_connection.disconnect();
+            m_boxes_catalog_poll_connection = Glib::signal_timeout().connect(
+                    [this] {
+                        if (!m_boxes_catalog_loading)
+                            return false;
+                        if (m_boxes_catalog_future.valid()
+                            && m_boxes_catalog_future.wait_for(std::chrono::milliseconds(0)) == std::future_status::ready) {
+                            const auto [ok, error] = m_boxes_catalog_future.get();
+                            m_boxes_catalog_loading = false;
+                            if (m_boxes_loading_window)
+                                m_boxes_loading_window->hide();
+                            if (!ok) {
+                                m_workspace_browser->show_toast(error.empty() ? "Failed to load bundled boxes catalog" : error);
+                                return false;
+                            }
+                            open_boxes_generator_window();
+                            return false;
+                        }
+                        return true;
+                    },
+                    30);
+        }
+        return;
+    }
+
+    if (g_boxes_templates.empty()) {
+        m_workspace_browser->show_toast("Bundled boxes catalog is empty");
+        return;
+    }
+    m_boxes_template_index = std::clamp(m_boxes_template_index, 0, static_cast<int>(g_boxes_templates.size()) - 1);
+
+    if (!m_boxes_generator_window) {
+        m_boxes_generator_window = Gtk::make_managed<Gtk::Window>();
+        m_boxes_generator_window->set_title("Boxes");
+        m_boxes_generator_window->set_default_size(1320, 820);
+        m_boxes_generator_window->set_transient_for(m_win);
+        m_boxes_generator_window->set_modal(true);
+        m_boxes_generator_window->set_hide_on_close(true);
+        m_boxes_generator_window->signal_close_request().connect(
+                [this] {
+                    if (m_boxes_generator_window)
+                        m_boxes_generator_window->hide();
+                    return true;
+                },
+                false);
+        m_boxes_generator_window->signal_show().connect([this] {
+            if (m_joints_mode_enabled) {
+                m_boxes_suspend_joints_active = true;
+                m_joints_mode_enabled = false;
+                update_joints_quick_popover();
+            }
+            update_sketcher_toolbar_button_states();
+        });
+        m_boxes_generator_window->signal_hide().connect([this] {
+            if (m_boxes_suspend_joints_active) {
+                m_boxes_suspend_joints_active = false;
+                m_joints_mode_enabled = true;
+                update_joints_quick_popover();
+            }
+            update_sketcher_toolbar_button_states();
+        });
+
+        auto header = Gtk::make_managed<Gtk::HeaderBar>();
+        header->set_show_title_buttons(true);
+        auto title = Gtk::make_managed<Gtk::Label>("Boxes");
+        header->set_title_widget(*title);
+        m_boxes_import_button = Gtk::make_managed<Gtk::Button>("Import");
+        m_boxes_import_button->add_css_class("suggested-action");
+        m_boxes_import_button->signal_clicked().connect(sigc::mem_fun(*this, &Editor::generate_boxes_geometry));
+        header->pack_end(*m_boxes_import_button);
+        m_boxes_generator_window->set_titlebar(*header);
+
+        auto root = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 12);
+        root->set_margin_start(12);
+        root->set_margin_end(12);
+        root->set_margin_top(12);
+        root->set_margin_bottom(12);
+        m_boxes_generator_window->set_child(*root);
+
+        auto left = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 12);
+        left->set_size_request(260, -1);
+        root->append(*left);
+
+        auto catalog_frame = Gtk::make_managed<Gtk::Frame>("Catalog");
+        catalog_frame->set_vexpand(false);
+        left->append(*catalog_frame);
+
+        auto catalog_root = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 8);
+        catalog_root->set_margin_start(8);
+        catalog_root->set_margin_end(8);
+        catalog_root->set_margin_top(8);
+        catalog_root->set_margin_bottom(8);
+        catalog_frame->set_child(*catalog_root);
+
+        auto catalog_header = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 6);
+        auto menu_button = Gtk::make_managed<Gtk::Button>();
+        menu_button->set_icon_name("open-menu-symbolic");
+        menu_button->set_has_frame(false);
+        menu_button->set_focusable(false);
+        menu_button->set_tooltip_text("Show categories");
+        catalog_header->append(*menu_button);
+        m_boxes_gallery_button = Gtk::make_managed<Gtk::Button>();
+        m_boxes_gallery_button->set_icon_name("view-grid-symbolic");
+        m_boxes_gallery_button->set_has_frame(false);
+        m_boxes_gallery_button->set_focusable(false);
+        m_boxes_gallery_button->set_tooltip_text("Open gallery");
+        m_boxes_gallery_button->signal_clicked().connect(sigc::mem_fun(*this, &Editor::open_boxes_gallery_window));
+        catalog_header->append(*m_boxes_gallery_button);
+        auto category_label = Gtk::make_managed<Gtk::Label>("Templates");
+        category_label->set_xalign(0.0f);
+        category_label->set_hexpand(true);
+        catalog_header->append(*category_label);
+        catalog_root->append(*catalog_header);
+
+        auto catalog_body = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 8);
+        catalog_root->append(*catalog_body);
+
+        m_boxes_category_revealer = Gtk::make_managed<Gtk::Revealer>();
+        m_boxes_category_revealer->set_transition_type(Gtk::RevealerTransitionType::SLIDE_RIGHT);
+        m_boxes_category_revealer->set_reveal_child(true);
+        auto category_scroll = Gtk::make_managed<Gtk::ScrolledWindow>();
+        category_scroll->set_policy(Gtk::PolicyType::NEVER, Gtk::PolicyType::AUTOMATIC);
+        category_scroll->set_min_content_width(170);
+        category_scroll->set_min_content_height(220);
+        m_boxes_category_list = Gtk::make_managed<Gtk::ListBox>();
+        m_boxes_category_list->set_selection_mode(Gtk::SelectionMode::SINGLE);
+        m_boxes_category_list->add_css_class("boxed-list");
+        category_scroll->set_child(*m_boxes_category_list);
+        m_boxes_category_revealer->set_child(*category_scroll);
+        catalog_body->append(*m_boxes_category_revealer);
+
+        auto template_scroll = Gtk::make_managed<Gtk::ScrolledWindow>();
+        template_scroll->set_policy(Gtk::PolicyType::NEVER, Gtk::PolicyType::AUTOMATIC);
+        template_scroll->set_min_content_height(220);
+        template_scroll->set_hexpand(true);
+        m_boxes_template_list = Gtk::make_managed<Gtk::ListBox>();
+        m_boxes_template_list->set_selection_mode(Gtk::SelectionMode::SINGLE);
+        m_boxes_template_list->add_css_class("boxed-list");
+        template_scroll->set_child(*m_boxes_template_list);
+        catalog_body->append(*template_scroll);
+
+        menu_button->signal_clicked().connect([this] {
+            if (m_boxes_category_revealer)
+                m_boxes_category_revealer->set_reveal_child(!m_boxes_category_revealer->get_reveal_child());
+        });
+
+        m_boxes_category_list->signal_row_selected().connect([this](Gtk::ListBoxRow *row) {
+            if (!row || m_boxes_syncing_catalog)
+                return;
+            const auto row_idx = row->get_index();
+            if (row_idx == 0)
+                m_boxes_current_category_id = "__favorites__";
+            else {
+                const auto category_idx = row_idx - 1;
+                if (category_idx >= 0 && category_idx < static_cast<int>(g_boxes_categories.size()))
+                    m_boxes_current_category_id = g_boxes_categories.at(static_cast<size_t>(category_idx)).id;
+            }
+            Glib::signal_idle().connect_once([this] {
+                rebuild_boxes_template_list();
+                sync_boxes_catalog_selection(false);
+                if (m_boxes_category_revealer)
+                    m_boxes_category_revealer->set_reveal_child(false);
+            });
+        });
+
+        auto settings_frame = Gtk::make_managed<Gtk::Frame>("Settings");
+        settings_frame->set_hexpand(true);
+        settings_frame->set_vexpand(true);
+        left->append(*settings_frame);
+
+        auto settings_scroll = Gtk::make_managed<Gtk::ScrolledWindow>();
+        settings_scroll->set_policy(Gtk::PolicyType::NEVER, Gtk::PolicyType::AUTOMATIC);
+        settings_frame->set_child(*settings_scroll);
+
+        m_boxes_settings_box = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 8);
+        m_boxes_settings_box->set_margin_start(10);
+        m_boxes_settings_box->set_margin_end(10);
+        m_boxes_settings_box->set_margin_top(10);
+        m_boxes_settings_box->set_margin_bottom(10);
+        settings_scroll->set_child(*m_boxes_settings_box);
+
+        m_boxes_preview_status_label = Gtk::make_managed<Gtk::Label>();
+        m_boxes_preview_status_label->set_xalign(0.0f);
+        m_boxes_preview_status_label->set_wrap(true);
+        m_boxes_preview_status_label->add_css_class("dim-label");
+
+        auto preview_column = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 8);
+        preview_column->set_hexpand(true);
+        preview_column->set_vexpand(true);
+        root->append(*preview_column);
+
+        auto preview_frame = Gtk::make_managed<Gtk::Frame>("Preview");
+        preview_frame->set_hexpand(true);
+        preview_frame->set_vexpand(true);
+        preview_column->append(*preview_frame);
+
+        auto preview_aspect = Gtk::make_managed<Gtk::AspectFrame>();
+        preview_aspect->set_obey_child(false);
+        preview_aspect->set_ratio(4.0f / 3.0f);
+        preview_aspect->set_xalign(0.5f);
+        preview_aspect->set_yalign(0.5f);
+        preview_aspect->set_hexpand(true);
+        preview_aspect->set_vexpand(true);
+        m_boxes_preview_area = Gtk::make_managed<Gtk::DrawingArea>();
+        m_boxes_preview_area->set_hexpand(true);
+        m_boxes_preview_area->set_vexpand(true);
+        m_boxes_preview_area->set_content_width(1);
+        m_boxes_preview_area->set_content_height(1);
+        m_boxes_preview_area->set_draw_func(sigc::mem_fun(*this, &Editor::draw_boxes_preview));
+        preview_aspect->set_child(*m_boxes_preview_area);
+        preview_frame->set_child(*preview_aspect);
+
+        m_boxes_template_list->signal_row_selected().connect([this](Gtk::ListBoxRow *row) {
+            if (!row || m_boxes_syncing_catalog)
+                return;
+            const auto it = m_boxes_template_indices_by_list.find(m_boxes_template_list);
+            if (it == m_boxes_template_indices_by_list.end())
+                return;
+            const auto row_idx = row->get_index();
+            if (row_idx < 0 || row_idx >= static_cast<int>(it->second.size()))
+                return;
+            m_boxes_template_index = it->second.at(static_cast<size_t>(row_idx));
+            std::fprintf(stderr, "[boxes] select template %s\n", get_boxes_template(m_boxes_template_index).label.c_str());
+            std::fflush(stderr);
+            m_boxes_preview_zoom = 1.0;
+            m_boxes_preview_pan_x = 0.0;
+            m_boxes_preview_pan_y = 0.0;
+            sync_boxes_catalog_selection(true);
+            Glib::signal_idle().connect_once([this] {
+                update_boxes_settings_visibility();
+                queue_boxes_preview_refresh(true);
+            });
+        });
+
+        auto motion = Gtk::EventControllerMotion::create();
+        motion->signal_motion().connect([this](double x, double y) {
+            m_boxes_preview_cursor_x = x;
+            m_boxes_preview_cursor_y = y;
+        });
+        m_boxes_preview_area->add_controller(motion);
+
+        auto scroll = Gtk::EventControllerScroll::create();
+        scroll->set_flags(Gtk::EventControllerScroll::Flags::VERTICAL);
+        scroll->signal_scroll().connect([this](double, double dy) {
+            if (!m_boxes_preview_area || m_boxes_preview_polylines.empty())
+                return false;
+            const auto width = m_boxes_preview_area->get_width();
+            const auto height = m_boxes_preview_area->get_height();
+            if (width <= 0 || height <= 0)
+                return false;
+
+            const auto before = get_boxes_preview_transform(m_boxes_preview_bbox_min, m_boxes_preview_bbox_max, width, height,
+                                                            m_boxes_preview_zoom, m_boxes_preview_pan_x, m_boxes_preview_pan_y);
+            if (before.scale <= 1e-9)
+                return false;
+
+            const auto world_x = (m_boxes_preview_cursor_x - before.ox) / before.scale;
+            const auto world_y = (before.oy - m_boxes_preview_cursor_y) / before.scale;
+            const auto factor = (dy < 0.0) ? 1.15 : (1.0 / 1.15);
+            m_boxes_preview_zoom = std::clamp(m_boxes_preview_zoom * factor, 0.1, 64.0);
+
+            const auto after = get_boxes_preview_transform(m_boxes_preview_bbox_min, m_boxes_preview_bbox_max, width, height,
+                                                           m_boxes_preview_zoom, m_boxes_preview_pan_x, m_boxes_preview_pan_y);
+            m_boxes_preview_pan_x = m_boxes_preview_cursor_x - ((world_x * after.scale)
+                                                                + (after.ox - m_boxes_preview_pan_x));
+            m_boxes_preview_pan_y = m_boxes_preview_cursor_y - (after.oy - m_boxes_preview_pan_y - world_y * after.scale);
+            m_boxes_preview_area->queue_draw();
+            return true;
+        },
+                                                  false);
+        m_boxes_preview_area->add_controller(scroll);
+
+        auto drag = Gtk::GestureDrag::create();
+        drag->set_button(1);
+        drag->signal_drag_begin().connect([this](double, double) {
+            m_boxes_preview_drag_pan_x = m_boxes_preview_pan_x;
+            m_boxes_preview_drag_pan_y = m_boxes_preview_pan_y;
+        });
+        drag->signal_drag_update().connect([this](double offset_x, double offset_y) {
+            m_boxes_preview_pan_x = m_boxes_preview_drag_pan_x + offset_x;
+            m_boxes_preview_pan_y = m_boxes_preview_drag_pan_y + offset_y;
+            if (m_boxes_preview_area)
+                m_boxes_preview_area->queue_draw();
+        });
+        m_boxes_preview_area->add_controller(drag);
+
+        auto click = Gtk::GestureClick::create();
+        click->set_button(1);
+        click->signal_pressed().connect([this](int n_press, double, double) {
+            if (n_press != 2)
+                return;
+            m_boxes_preview_zoom = 1.0;
+            m_boxes_preview_pan_x = 0.0;
+            m_boxes_preview_pan_y = 0.0;
+            if (m_boxes_preview_area)
+                m_boxes_preview_area->queue_draw();
+        });
+        m_boxes_preview_area->add_controller(click);
+
+        Glib::signal_idle().connect_once([this] {
+            sync_boxes_catalog_selection(true);
+            rebuild_boxes_catalog_lists();
+            sync_boxes_catalog_selection(true);
+            update_boxes_settings_visibility();
+            queue_boxes_preview_refresh(true);
+        });
+    }
+
+    if (!m_boxes_generator_window)
+        return;
+
+    m_boxes_generator_window->present();
+#endif
+}
+
+void Editor::rebuild_boxes_catalog_lists()
+{
+#ifdef DUNE_SKETCHER_ONLY
+    if (!m_boxes_category_list)
+        return;
+    while (auto *child = m_boxes_category_list->get_first_child())
+        m_boxes_category_list->remove(*child);
+
+    const auto append_category_row = [this](const std::string &title, const std::string &sample_image) {
+        auto row = Gtk::make_managed<Gtk::ListBoxRow>();
+        auto box = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 8);
+        box->set_margin_start(10);
+        box->set_margin_end(10);
+        box->set_margin_top(8);
+        box->set_margin_bottom(8);
+        if (get_boxes_sample_path(sample_image)) {
+            auto image = Gtk::make_managed<Gtk::Image>();
+            image->set_from_icon_name("image-x-generic-symbolic");
+            box->append(*image);
+        }
+        auto label = Gtk::make_managed<Gtk::Label>(title);
+        label->set_xalign(0.0f);
+        label->set_hexpand(true);
+        box->append(*label);
+        row->set_child(*box);
+        m_boxes_category_list->append(*row);
+    };
+
+    append_category_row("Favorites", "");
+    for (const auto &category : g_boxes_categories)
+        append_category_row(category.title, category.sample_image);
+
+    if (!g_boxes_templates.empty()) {
+        const auto &def = get_boxes_template(m_boxes_template_index);
+        const bool in_favorites = m_boxes_favorite_template_indices.contains(m_boxes_template_index);
+        m_boxes_current_category_id = in_favorites ? "__favorites__" : def.category;
+    }
+
+    rebuild_boxes_template_list();
+    rebuild_boxes_gallery();
+#endif
+}
+
+void Editor::rebuild_boxes_template_list()
+{
+#ifdef DUNE_SKETCHER_ONLY
+    if (!m_boxes_template_list)
+        return;
+    while (auto *child = m_boxes_template_list->get_first_child())
+        m_boxes_template_list->remove(*child);
+
+    auto &indices = m_boxes_template_indices_by_list[m_boxes_template_list];
+    indices.clear();
+    for (size_t i = 0; i < g_boxes_templates.size(); i++) {
+        const auto idx = static_cast<int>(i);
+        const auto &def = g_boxes_templates.at(i);
+        const bool matches = m_boxes_current_category_id == "__favorites__" ? m_boxes_favorite_template_indices.contains(idx)
+                                                                            : def.category == m_boxes_current_category_id;
+        if (!matches)
+            continue;
+
+        auto row = Gtk::make_managed<Gtk::ListBoxRow>();
+        auto box = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 2);
+        box->set_margin_start(10);
+        box->set_margin_end(10);
+        box->set_margin_top(8);
+        box->set_margin_bottom(8);
+        auto row_content = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 8);
+        auto label = Gtk::make_managed<Gtk::Label>(def.label);
+        label->set_hexpand(true);
+        label->set_xalign(0.0f);
+        const auto sample_path = get_boxes_sample_path(def);
+        if (sample_path) {
+            auto sample_button = Gtk::make_managed<Gtk::Button>();
+            sample_button->set_has_frame(false);
+            sample_button->set_focusable(false);
+            sample_button->set_valign(Gtk::Align::CENTER);
+            sample_button->set_icon_name("image-x-generic-symbolic");
+            sample_button->set_tooltip_text("Open sample photo");
+            sample_button->signal_clicked().connect([this, idx] { show_boxes_sample_preview(idx); });
+            row_content->append(*sample_button);
+        }
+        auto star_button = Gtk::make_managed<Gtk::Button>();
+        star_button->set_has_frame(false);
+        star_button->set_focusable(false);
+        star_button->set_valign(Gtk::Align::CENTER);
+        auto star_label = Gtk::make_managed<Gtk::Label>();
+        const bool favorite = m_boxes_favorite_template_indices.contains(idx);
+        star_label->set_use_markup(true);
+        star_label->set_markup(favorite ? "<span foreground='#f5c542' size='large'>★</span>"
+                                        : "<span foreground='#8a8a8a' size='large'>☆</span>");
+        star_button->set_child(*star_label);
+        star_button->signal_clicked().connect([this, idx] {
+            if (m_boxes_favorite_template_indices.contains(idx))
+                m_boxes_favorite_template_indices.erase(idx);
+            else
+                m_boxes_favorite_template_indices.insert(idx);
+            rebuild_boxes_template_list();
+            rebuild_boxes_gallery();
+            sync_boxes_catalog_selection(false);
+        });
+        row_content->append(*label);
+        row_content->append(*star_button);
+        box->append(*row_content);
+        row->set_child(*box);
+        m_boxes_template_list->append(*row);
+        indices.push_back(idx);
+    }
+#endif
+}
+
+void Editor::rebuild_boxes_gallery()
+{
+#ifdef DUNE_SKETCHER_ONLY
+    if (!m_boxes_gallery_flowbox)
+        return;
+    while (auto *child = m_boxes_gallery_flowbox->get_first_child())
+        m_boxes_gallery_flowbox->remove(*child);
+
+    for (size_t i = 0; i < g_boxes_templates.size(); i++) {
+        const auto idx = static_cast<int>(i);
+        const auto &def = g_boxes_templates.at(i);
+        const bool matches = m_boxes_current_category_id == "__favorites__" ? m_boxes_favorite_template_indices.contains(idx)
+                                                                            : def.category == m_boxes_current_category_id;
+        if (!matches)
+            continue;
+
+        auto button = Gtk::make_managed<Gtk::Button>();
+        button->set_has_frame(true);
+        button->set_focusable(false);
+        auto box = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 6);
+        box->set_margin_start(8);
+        box->set_margin_end(8);
+        box->set_margin_top(8);
+        box->set_margin_bottom(8);
+        auto sample_path = get_boxes_sample_path(!def.sample_thumbnail.empty() ? def.sample_thumbnail : def.sample_image);
+        if (sample_path) {
+            auto picture = Gtk::make_managed<Gtk::Picture>(path_to_string(*sample_path));
+            picture->set_size_request(160, 120);
+            picture->set_can_shrink(true);
+            picture->set_content_fit(Gtk::ContentFit::COVER);
+            box->append(*picture);
+        }
+        else {
+            auto image = Gtk::make_managed<Gtk::Image>();
+            image->set_from_icon_name("image-missing");
+            image->set_pixel_size(64);
+            box->append(*image);
+        }
+        auto label = Gtk::make_managed<Gtk::Label>(def.label);
+        label->set_wrap(true);
+        label->set_justify(Gtk::Justification::CENTER);
+        label->set_xalign(0.5f);
+        box->append(*label);
+        button->set_child(*box);
+        button->signal_clicked().connect([this, idx, category = def.category] {
+            m_boxes_template_index = idx;
+            m_boxes_current_category_id = category;
+            rebuild_boxes_template_list();
+            update_boxes_settings_visibility();
+            sync_boxes_catalog_selection(true);
+            queue_boxes_preview_refresh(true);
+            if (m_boxes_gallery_window)
+                m_boxes_gallery_window->hide();
+            if (m_boxes_generator_window)
+                m_boxes_generator_window->present();
+        });
+        m_boxes_gallery_flowbox->insert(*button, -1);
+    }
+#endif
+}
+
+void Editor::show_boxes_sample_preview(int template_index)
+{
+#ifdef DUNE_SKETCHER_ONLY
+    const auto &template_def = get_boxes_template(template_index);
+    const auto sample_path = get_boxes_sample_path(template_def);
+    if (!sample_path)
+        return;
+
+    if (!m_boxes_sample_window) {
+        m_boxes_sample_window = Gtk::make_managed<Gtk::Window>();
+        m_boxes_sample_window->set_default_size(960, 720);
+        if (m_boxes_generator_window)
+            m_boxes_sample_window->set_transient_for(*m_boxes_generator_window);
+        else
+            m_boxes_sample_window->set_transient_for(m_win);
+        m_boxes_sample_window->set_modal(false);
+        m_boxes_sample_window->set_hide_on_close(true);
+        m_boxes_sample_window->signal_close_request().connect(
+                [this] {
+                    if (m_boxes_sample_window)
+                        m_boxes_sample_window->hide();
+                    return true;
+                },
+                false);
+
+        auto root = Gtk::make_managed<Gtk::ScrolledWindow>();
+        root->set_policy(Gtk::PolicyType::AUTOMATIC, Gtk::PolicyType::AUTOMATIC);
+        root->set_min_content_width(640);
+        root->set_min_content_height(480);
+
+        m_boxes_sample_picture = Gtk::make_managed<Gtk::Picture>();
+        m_boxes_sample_picture->set_can_shrink(true);
+        m_boxes_sample_picture->set_content_fit(Gtk::ContentFit::CONTAIN);
+        root->set_child(*m_boxes_sample_picture);
+        m_boxes_sample_window->set_child(*root);
+    }
+
+    m_boxes_sample_window->set_title(std::string(template_def.label) + " sample");
+    if (m_boxes_sample_picture)
+        m_boxes_sample_picture->set_filename(path_to_string(*sample_path));
+    m_boxes_sample_window->present();
+#else
+    (void)template_index;
+#endif
+}
+
+void Editor::open_boxes_gallery_window()
+{
+#ifdef DUNE_SKETCHER_ONLY
+    if (!m_boxes_gallery_window) {
+        m_boxes_gallery_window = Gtk::make_managed<Gtk::Window>();
+        m_boxes_gallery_window->set_title("Boxes Gallery");
+        m_boxes_gallery_window->set_default_size(1100, 760);
+        if (m_boxes_generator_window)
+            m_boxes_gallery_window->set_transient_for(*m_boxes_generator_window);
+        else
+            m_boxes_gallery_window->set_transient_for(m_win);
+        m_boxes_gallery_window->set_hide_on_close(true);
+        m_boxes_gallery_window->signal_close_request().connect(
+                [this] {
+                    if (m_boxes_gallery_window)
+                        m_boxes_gallery_window->hide();
+                    return true;
+                },
+                false);
+
+        auto root = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 12);
+        root->set_margin_start(12);
+        root->set_margin_end(12);
+        root->set_margin_top(12);
+        root->set_margin_bottom(12);
+
+        auto category_scroll = Gtk::make_managed<Gtk::ScrolledWindow>();
+        category_scroll->set_policy(Gtk::PolicyType::NEVER, Gtk::PolicyType::AUTOMATIC);
+        category_scroll->set_min_content_width(220);
+        m_boxes_gallery_category_list = Gtk::make_managed<Gtk::ListBox>();
+        m_boxes_gallery_category_list->set_selection_mode(Gtk::SelectionMode::SINGLE);
+        category_scroll->set_child(*m_boxes_gallery_category_list);
+        root->append(*category_scroll);
+
+        auto gallery_scroll = Gtk::make_managed<Gtk::ScrolledWindow>();
+        gallery_scroll->set_policy(Gtk::PolicyType::AUTOMATIC, Gtk::PolicyType::AUTOMATIC);
+        gallery_scroll->set_hexpand(true);
+        gallery_scroll->set_vexpand(true);
+        m_boxes_gallery_flowbox = Gtk::make_managed<Gtk::FlowBox>();
+        m_boxes_gallery_flowbox->set_selection_mode(Gtk::SelectionMode::NONE);
+        m_boxes_gallery_flowbox->set_row_spacing(10);
+        m_boxes_gallery_flowbox->set_column_spacing(10);
+        m_boxes_gallery_flowbox->set_max_children_per_line(4);
+        gallery_scroll->set_child(*m_boxes_gallery_flowbox);
+        root->append(*gallery_scroll);
+        m_boxes_gallery_window->set_child(*root);
+
+        m_boxes_gallery_category_list->signal_row_selected().connect([this](Gtk::ListBoxRow *row) {
+            if (!row || m_boxes_syncing_catalog)
+                return;
+            const auto idx = row->get_index();
+            if (idx == 0)
+                m_boxes_current_category_id = "__favorites__";
+            else if (idx - 1 >= 0 && idx - 1 < static_cast<int>(g_boxes_categories.size()))
+                m_boxes_current_category_id = g_boxes_categories.at(static_cast<size_t>(idx - 1)).id;
+            rebuild_boxes_gallery();
+            sync_boxes_catalog_selection(false);
+        });
+    }
+
+    if (m_boxes_gallery_category_list) {
+        while (auto *child = m_boxes_gallery_category_list->get_first_child())
+            m_boxes_gallery_category_list->remove(*child);
+        const auto add_row = [this](const std::string &title) {
+            auto row = Gtk::make_managed<Gtk::ListBoxRow>();
+            auto label = Gtk::make_managed<Gtk::Label>(title);
+            label->set_margin_start(10);
+            label->set_margin_end(10);
+            label->set_margin_top(8);
+            label->set_margin_bottom(8);
+            label->set_xalign(0.0f);
+            row->set_child(*label);
+            m_boxes_gallery_category_list->append(*row);
+        };
+        add_row("Favorites");
+        for (const auto &category : g_boxes_categories)
+            add_row(category.title);
+    }
+    rebuild_boxes_gallery();
+    sync_boxes_catalog_selection(false);
+    m_boxes_gallery_window->present();
+#endif
+}
+
+void Editor::sync_boxes_catalog_selection(bool switch_to_category_page)
+{
+#ifdef DUNE_SKETCHER_ONLY
+    if (!m_boxes_template_list || !m_boxes_category_list)
+        return;
+
+    m_boxes_syncing_catalog = true;
+    const auto &def = get_boxes_template(m_boxes_template_index);
+    const bool in_favorites = m_boxes_favorite_template_indices.contains(m_boxes_template_index);
+    if (switch_to_category_page || (m_boxes_current_category_id == "__favorites__" && !in_favorites))
+        m_boxes_current_category_id = in_favorites ? "__favorites__" : def.category;
+
+    m_boxes_category_list->unselect_all();
+    if (m_boxes_current_category_id == "__favorites__") {
+        if (auto *row = m_boxes_category_list->get_row_at_index(0))
+            m_boxes_category_list->select_row(*row);
+    }
+    else {
+        for (size_t i = 0; i < g_boxes_categories.size(); i++) {
+            if (g_boxes_categories.at(i).id == m_boxes_current_category_id) {
+                if (auto *row = m_boxes_category_list->get_row_at_index(static_cast<int>(i) + 1))
+                    m_boxes_category_list->select_row(*row);
+                break;
+            }
+        }
+    }
+
+    m_boxes_template_list->unselect_all();
+    if (const auto it = m_boxes_template_indices_by_list.find(m_boxes_template_list);
+        it != m_boxes_template_indices_by_list.end()) {
+        const auto pos = std::find(it->second.begin(), it->second.end(), m_boxes_template_index);
+        if (pos != it->second.end()) {
+            if (auto *row = m_boxes_template_list->get_row_at_index(static_cast<int>(std::distance(it->second.begin(), pos))))
+                m_boxes_template_list->select_row(*row);
+        }
+    }
+
+    if (m_boxes_gallery_category_list) {
+        m_boxes_gallery_category_list->unselect_all();
+        if (m_boxes_current_category_id == "__favorites__") {
+            if (auto *row = m_boxes_gallery_category_list->get_row_at_index(0))
+                m_boxes_gallery_category_list->select_row(*row);
+        }
+        else {
+            for (size_t i = 0; i < g_boxes_categories.size(); i++) {
+                if (g_boxes_categories.at(i).id == m_boxes_current_category_id) {
+                    if (auto *row = m_boxes_gallery_category_list->get_row_at_index(static_cast<int>(i) + 1))
+                        m_boxes_gallery_category_list->select_row(*row);
+                    break;
+                }
+            }
+        }
+    }
+    m_boxes_syncing_catalog = false;
+#else
+    (void)switch_to_category_page;
+#endif
+}
+
+void Editor::update_boxes_settings_visibility()
+{
+#ifdef DUNE_SKETCHER_ONLY
+    if (!m_boxes_settings_box || !m_boxes_preview_status_label || m_boxes_rebuilding_settings)
+        return;
+    m_boxes_rebuilding_settings = true;
+
+    const auto &def = get_boxes_template(m_boxes_template_index);
+    while (auto *child = m_boxes_settings_box->get_first_child())
+        m_boxes_settings_box->remove(*child);
+
+    m_boxes_preview_status_label = Gtk::make_managed<Gtk::Label>();
+    m_boxes_preview_status_label->set_xalign(0.0f);
+    m_boxes_preview_status_label->set_wrap(true);
+    m_boxes_preview_status_label->add_css_class("dim-label");
+
+    m_boxes_setting_rows.clear();
+    m_boxes_spin_settings.clear();
+    m_boxes_entry_settings.clear();
+    m_boxes_dropdown_settings.clear();
+    m_boxes_switch_settings.clear();
+
+    const auto template_id = def.id;
+    const auto value_key = [template_id](const std::string &dest) {
+        return template_id + ":" + dest;
+    };
+    const auto get_value = [this, value_key](const BoxesTemplateDef::ArgDef &arg) {
+        if (const auto it = m_boxes_setting_values.find(value_key(arg.dest)); it != m_boxes_setting_values.end())
+            return it->second;
+        return arg.default_string;
+    };
+    const auto save_value = [this, value_key](const std::string &dest, std::string value) {
+        m_boxes_setting_values[value_key(dest)] = std::move(value);
+    };
+
+    for (const auto &group : def.arg_groups) {
+        auto frame = Gtk::make_managed<Gtk::Frame>(group.title);
+        auto group_box = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 6);
+        group_box->set_margin_start(8);
+        group_box->set_margin_end(8);
+        group_box->set_margin_top(8);
+        group_box->set_margin_bottom(8);
+        frame->set_child(*group_box);
+
+        bool has_rows = false;
+        for (const auto &dest : group.args) {
+            const auto it = std::find_if(def.args.begin(), def.args.end(),
+                                         [&dest](const auto &arg) { return arg.dest == dest; });
+            if (it == def.args.end())
+                continue;
+            const auto &arg = *it;
+            auto row = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 6);
+            auto label = Gtk::make_managed<Gtk::Label>(arg.label);
+            label->set_hexpand(true);
+            label->set_xalign(0.0f);
+            label->set_tooltip_text(arg.help);
+            row->append(*label);
+
+            if (arg.kind == BoxesTemplateDef::ArgKind::FLOAT || arg.kind == BoxesTemplateDef::ArgKind::INT) {
+                const auto digits = arg.kind == BoxesTemplateDef::ArgKind::INT ? 0 : 3;
+                const auto step = arg.kind == BoxesTemplateDef::ArgKind::INT ? 1.0 : 0.1;
+                auto spin = Gtk::make_managed<Gtk::SpinButton>();
+                spin->set_digits(digits);
+                spin->set_numeric(true);
+                spin->set_range(-1000000.0, 1000000.0);
+                spin->set_increments(step, step * 10.0);
+                spin->set_width_chars(8);
+                const auto value = get_value(arg);
+                try {
+                    spin->set_value(std::stod(value.empty() ? arg.default_string : value));
+                }
+                catch (...) {
+                    spin->set_value(arg.kind == BoxesTemplateDef::ArgKind::INT ? static_cast<double>(arg.default_int)
+                                                                               : arg.default_float);
+                }
+                spin->signal_value_changed().connect([this, save_value, dest = arg.dest, digits, spin] {
+                    if (m_boxes_rebuilding_settings)
+                        return;
+                    std::ostringstream ss;
+                    ss << std::fixed << std::setprecision(digits) << spin->get_value();
+                    save_value(dest, ss.str());
+                    queue_boxes_preview_refresh(false);
+                });
+                row->append(*spin);
+                m_boxes_spin_settings[arg.dest] = spin;
+            }
+            else if (arg.kind == BoxesTemplateDef::ArgKind::BOOL) {
+                auto sw = Gtk::make_managed<Gtk::Switch>();
+                const auto value = get_value(arg);
+                sw->set_active(value == "1" || value == "true" || (value.empty() && arg.default_bool));
+                sw->property_active().signal_changed().connect([this, save_value, dest = arg.dest, sw] {
+                    if (m_boxes_rebuilding_settings)
+                        return;
+                    save_value(dest, sw->get_active() ? "1" : "0");
+                    queue_boxes_preview_refresh(false);
+                });
+                row->append(*sw);
+                m_boxes_switch_settings[arg.dest] = sw;
+            }
+            else if (arg.kind == BoxesTemplateDef::ArgKind::CHOICE) {
+                auto model = Gtk::StringList::create();
+                for (const auto &choice : arg.choices)
+                    model->append(choice);
+                auto dropdown = Gtk::make_managed<Gtk::DropDown>(model, nullptr);
+                auto value = get_value(arg);
+                auto pos = std::find(arg.choices.begin(), arg.choices.end(), value);
+                if (pos == arg.choices.end())
+                    pos = arg.choices.begin();
+                if (pos != arg.choices.end())
+                    dropdown->set_selected(static_cast<unsigned int>(std::distance(arg.choices.begin(), pos)));
+                dropdown->property_selected().signal_changed().connect([this, save_value, arg, dropdown] {
+                    if (m_boxes_rebuilding_settings)
+                        return;
+                    if (!arg.choices.empty()) {
+                        const auto idx = std::min<size_t>(dropdown->get_selected(), arg.choices.size() - 1);
+                        save_value(arg.dest, arg.choices.at(idx));
+                    }
+                    queue_boxes_preview_refresh(false);
+                });
+                row->append(*dropdown);
+                m_boxes_dropdown_settings[arg.dest] = dropdown;
+            }
+            else {
+                auto entry = Gtk::make_managed<Gtk::Entry>();
+                entry->set_hexpand(true);
+                entry->set_width_chars(14);
+                entry->set_text(get_value(arg));
+                entry->set_tooltip_text(arg.help);
+                entry->signal_changed().connect([this, save_value, dest = arg.dest, entry] {
+                    if (m_boxes_rebuilding_settings)
+                        return;
+                    save_value(dest, entry->get_text());
+                    queue_boxes_preview_refresh(false);
+                });
+                row->append(*entry);
+                m_boxes_entry_settings[arg.dest] = entry;
+            }
+
+            m_boxes_setting_rows[arg.dest] = row;
+            group_box->append(*row);
+            has_rows = true;
+        }
+
+        if (has_rows)
+            m_boxes_settings_box->append(*frame);
+    }
+
+    if (!def.short_description.empty()) {
+        auto description = Gtk::make_managed<Gtk::Label>(def.short_description);
+        description->set_wrap(true);
+        description->set_xalign(0.0f);
+        description->add_css_class("dim-label");
+        m_boxes_settings_box->append(*description);
+    }
+
+    m_boxes_preview_status_label->set_text("Loading preview...");
+    m_boxes_settings_box->append(*m_boxes_preview_status_label);
+    m_boxes_rebuilding_settings = false;
+#endif
+}
+
+void Editor::queue_boxes_preview_refresh(bool reset_view)
+{
+#ifdef DUNE_SKETCHER_ONLY
+    if (!m_boxes_generator_window || !m_boxes_generator_window->get_visible() || m_boxes_rebuilding_settings)
+        return;
+    if (m_boxes_preview_debounce_connection.connected())
+        m_boxes_preview_debounce_connection.disconnect();
+    m_boxes_preview_debounce_connection = Glib::signal_timeout().connect(
+            [this, reset_view] {
+                update_boxes_preview(reset_view);
+                return false;
+            },
+            80);
+#else
+    (void)reset_view;
+#endif
+}
+
+void Editor::update_boxes_preview(bool reset_view)
+{
+#ifdef DUNE_SKETCHER_ONLY
+    if (!m_boxes_preview_status_label || !m_boxes_preview_area)
+        return;
+
+    const auto &template_def = get_boxes_template(m_boxes_template_index);
+    m_boxes_preview_status_label->set_text(std::string("Loading ") + template_def.label + " preview...");
+    const auto request_id = ++m_boxes_preview_request_serial;
+    const auto snapshot =
+            capture_boxes_values_snapshot(template_def, m_boxes_spin_settings, m_boxes_entry_settings, m_boxes_dropdown_settings,
+                                          m_boxes_switch_settings);
+
+    const auto start_job = [this, template_def, snapshot](int request_id_for_job, bool reset_view_for_job) {
+        m_boxes_preview_generation_running = true;
+        m_boxes_preview_future = std::async(std::launch::async, [template_def, snapshot, request_id_for_job] {
+            BoxesPreviewAsyncResult result;
+            result.request_id = request_id_for_job;
+            std::vector<BoxesSvgSegment> segments;
+            if (!generate_boxes_svg_segments(template_def, snapshot, segments, result.bbox_min, result.bbox_max, result.error))
+                return result;
+            result.polylines.reserve(segments.size());
+            for (const auto &seg : segments)
+                append_boxes_preview_polyline(result.polylines, seg);
+            return result;
+        });
+
+        if (m_boxes_preview_poll_connection.connected())
+            m_boxes_preview_poll_connection.disconnect();
+        m_boxes_preview_poll_connection = Glib::signal_timeout().connect(
+                [this, reset_view_for_job, label = template_def.label] {
+                    if (!m_boxes_preview_generation_running)
+                        return false;
+                    if (m_boxes_preview_future.valid()
+                        && m_boxes_preview_future.wait_for(std::chrono::milliseconds(0)) == std::future_status::ready) {
+                        m_boxes_ready_preview_result = m_boxes_preview_future.get();
+                        m_boxes_preview_generation_running = false;
+                        if (m_boxes_ready_preview_result.request_id == m_boxes_preview_request_serial) {
+                            if (!m_boxes_ready_preview_result.error.empty()) {
+                                m_boxes_preview_polylines.clear();
+                                m_boxes_preview_bbox_min = {0, 0};
+                                m_boxes_preview_bbox_max = {0, 0};
+                                m_boxes_preview_status_label->set_text(m_boxes_ready_preview_result.error);
+                            }
+                            else {
+                                m_boxes_preview_polylines = m_boxes_ready_preview_result.polylines;
+                                m_boxes_preview_bbox_min = m_boxes_ready_preview_result.bbox_min;
+                                m_boxes_preview_bbox_max = m_boxes_ready_preview_result.bbox_max;
+                                if (reset_view_for_job) {
+                                    m_boxes_preview_zoom = 1.0;
+                                    m_boxes_preview_pan_x = 0.0;
+                                    m_boxes_preview_pan_y = 0.0;
+                                }
+                                m_boxes_preview_status_label->set_text(label + " preview: "
+                                                                       + std::to_string(m_boxes_preview_polylines.size())
+                                                                       + " segments");
+                            }
+                            m_boxes_preview_area->queue_draw();
+                        }
+                        if (m_boxes_pending_preview_request_id) {
+                            const auto next_reset = m_boxes_pending_preview_reset_view;
+                            m_boxes_pending_preview_request_id.reset();
+                            update_boxes_preview(next_reset);
+                            return false;
+                        }
+                        return false;
+                    }
+                    return true;
+                },
+                30);
+    };
+
+    if (m_boxes_preview_generation_running) {
+        m_boxes_pending_preview_request_id = request_id;
+        m_boxes_pending_preview_reset_view = reset_view;
+    }
+    else {
+        start_job(request_id, reset_view);
+    }
+#else
+    (void)reset_view;
+#endif
+}
+
+void Editor::draw_boxes_preview(const Cairo::RefPtr<Cairo::Context> &cr, int w, int h)
+{
+#ifdef DUNE_SKETCHER_ONLY
+    cr->save();
+    cr->set_source_rgb(0.965, 0.965, 0.965);
+    cr->paint();
+
+    cr->set_source_rgb(0.90, 0.90, 0.90);
+    cr->rectangle(0.5, 0.5, std::max(0, w - 1), std::max(0, h - 1));
+    cr->stroke();
+
+    if (m_boxes_preview_polylines.empty()) {
+        cr->restore();
+        return;
+    }
+
+    const auto transform = get_boxes_preview_transform(m_boxes_preview_bbox_min, m_boxes_preview_bbox_max, w, h,
+                                                       m_boxes_preview_zoom, m_boxes_preview_pan_x, m_boxes_preview_pan_y);
+    cr->translate(transform.ox, transform.oy);
+    cr->scale(transform.scale, -transform.scale);
+    cr->set_line_width(1.4 / transform.scale);
+    cr->set_line_join(Cairo::Context::LineJoin::ROUND);
+    cr->set_line_cap(Cairo::Context::LineCap::ROUND);
+
+    for (const auto &polyline : m_boxes_preview_polylines) {
+        if (polyline.points.size() < 2)
+            continue;
+        switch (polyline.layer) {
+        case 0:
+            cr->set_source_rgb(0.08, 0.08, 0.08);
+            break;
+        case 1:
+            cr->set_source_rgb(0.28, 0.42, 0.95);
+            break;
+        case 2:
+            cr->set_source_rgb(0.10, 0.62, 0.18);
+            break;
+        case 3:
+            cr->set_source_rgb(0.00, 0.62, 0.62);
+            break;
+        case 4:
+            cr->set_source_rgb(0.86, 0.15, 0.15);
+            break;
+        default:
+            cr->set_source_rgb(0.12, 0.12, 0.12);
+            break;
+        }
+        cr->move_to(polyline.points.front().x, polyline.points.front().y);
+        for (size_t i = 1; i < polyline.points.size(); i++)
+            cr->line_to(polyline.points.at(i).x, polyline.points.at(i).y);
+        cr->stroke();
+    }
+
+    cr->restore();
+#else
+    (void)cr;
+    (void)w;
+    (void)h;
+#endif
+}
+
+bool Editor::commit_generator_polyline_groups(const std::vector<std::vector<std::vector<glm::dvec2>>> &polyline_groups, bool closed,
+                                              const std::string &rebuild_reason, bool clusterize_each_group)
+{
+#ifdef DUNE_SKETCHER_ONLY
+    if (!m_core.has_documents())
+        return false;
+    if (m_core.tool_is_active() && !force_end_tool())
+        return false;
+    if (polyline_groups.empty())
+        return false;
+
+    auto &doc = m_core.get_current_document();
+    auto &group = doc.get_group(m_core.get_current_group());
+    auto *sketch = dynamic_cast<GroupSketch *>(&group);
+    if (!sketch) {
+        m_workspace_browser->show_toast("Generator tools work in sketch groups");
+        return false;
+    }
+
+    const auto wrkpl_uu = m_core.get_current_workplane();
+    auto *wrkpl = doc.get_entity_ptr<EntityWorkplane>(wrkpl_uu);
+    if (!wrkpl) {
+        m_workspace_browser->show_toast("Current group needs an active workplane");
+        return false;
+    }
+
+    ensure_current_group_layers_initialized();
+    auto layer_uu = get_active_layer_for_current_group();
+    if (!layer_uu)
+        layer_uu = sketch->get_default_layer_uuid();
+
+    const auto cursor_world = get_canvas().get_cursor_pos_for_plane(wrkpl->m_origin, wrkpl->get_normal_vector());
+    const auto offset = wrkpl->project(cursor_world);
+
+    std::set<SelectableRef> selection;
+    bool changed = false;
+    for (const auto &group_polylines : polyline_groups) {
+        std::vector<UUID> created_entities;
+        for (const auto &polyline : group_polylines) {
+            if (polyline.size() < 2)
+                continue;
+            const auto segment_count = polyline.size() - 1 + (closed ? 1 : 0);
+            for (size_t i = 0; i < segment_count; i++) {
+                const auto p1 = polyline.at(i) + offset;
+                const auto p2 = polyline.at((i + 1) % polyline.size()) + offset;
+                if (glm::length(p2 - p1) < 1e-6)
+                    continue;
+                auto line = std::make_unique<EntityLine2D>(UUID::random());
+                line->m_group = group.m_uuid;
+                line->m_layer = layer_uu;
+                line->m_wrkpl = wrkpl_uu;
+                line->m_p1 = p1;
+                line->m_p2 = p2;
+                created_entities.push_back(line->m_uuid);
+                doc.m_entities.emplace(line->m_uuid, std::move(line));
+                changed = true;
+            }
+        }
+
+        if (clusterize_each_group && created_entities.size() >= 2) {
+            auto cluster = std::make_unique<EntityCluster>(UUID::random());
+            cluster->m_group = group.m_uuid;
+            cluster->m_layer = layer_uu;
+            cluster->m_wrkpl = wrkpl_uu;
+
+            auto content = ClusterContent::create();
+            const auto cloned_wrkpl_uu = doc.get_reference_group().get_workplane_xy_uuid();
+            for (const auto &uu : created_entities) {
+                auto *entity = doc.get_entity_ptr(uu);
+                if (!entity)
+                    continue;
+                auto clone = entity->clone();
+                if (auto *cluster_en = dynamic_cast<IEntityInWorkplaneSet *>(clone.get()))
+                    cluster_en->set_workplane(cloned_wrkpl_uu);
+                content->m_entities.emplace(uu, std::move(clone));
+            }
+            cluster->m_content = content;
+            const auto cluster_uu = cluster->m_uuid;
+            doc.m_entities.emplace(cluster_uu, std::move(cluster));
+
+            ItemsToDelete items_to_delete;
+            for (const auto &uu : created_entities)
+                items_to_delete.entities.insert(uu);
+            const auto extra_items = doc.get_additional_items_to_delete(items_to_delete);
+            items_to_delete.append(extra_items);
+            doc.delete_items(items_to_delete);
+
+            selection.emplace(SelectableRef::Type::ENTITY, cluster_uu, 0);
+        }
+        else {
+            for (const auto &uu : created_entities)
+                selection.emplace(SelectableRef::Type::ENTITY, uu, 0);
+        }
+    }
+
+    if (!changed)
+        return false;
+
+    m_core.set_needs_save();
+    m_core.rebuild(rebuild_reason);
+    get_canvas().set_selection(selection, false);
+    canvas_update_keep_selection();
+    update_action_sensitivity();
+    rebuild_layers_popover();
+    return true;
+#else
+    (void)polyline_groups;
+    (void)closed;
+    (void)rebuild_reason;
+    return false;
+#endif
+}
+
+bool Editor::commit_generator_polylines(const std::vector<std::vector<glm::dvec2>> &polylines, bool closed,
+                                        const std::string &rebuild_reason, bool clusterize)
+{
+#ifdef DUNE_SKETCHER_ONLY
+    if (polylines.empty())
+        return false;
+    std::vector<std::vector<std::vector<glm::dvec2>>> groups;
+    groups.push_back(polylines);
+    return commit_generator_polyline_groups(groups, closed, rebuild_reason, clusterize);
+#else
+    (void)polylines;
+    (void)closed;
+    (void)rebuild_reason;
+    (void)clusterize;
+    return false;
+#endif
+}
+
+bool Editor::generate_gears_from_selected_profile()
+{
+#ifdef DUNE_SKETCHER_ONLY
+    if (!m_core.has_documents())
+        return false;
+    if (m_core.tool_is_active() && !force_end_tool())
+        return true;
+    if (!m_gears_module_spin)
+        return false;
+
+    auto &doc = m_core.get_current_document();
+    auto &group = doc.get_group(m_core.get_current_group());
+    auto *sketch = dynamic_cast<GroupSketch *>(&group);
+    if (!sketch)
+        return false;
+
+    GearProfileSource source;
+    std::string error;
+    if (!collect_selected_gear_profile_source(doc, get_canvas().get_selection(), group.m_uuid, source, &error))
+        return false;
+
+    const auto module_mm = std::max(0.05, m_gears_module_spin->get_value());
+    const auto inward = m_gears_inward_switch && m_gears_inward_switch->get_active();
+
+    std::vector<glm::dvec2> profile;
+    bool closed = false;
+    switch (source.kind) {
+    case GearProfileSource::Kind::CIRCLE:
+        {
+            GearGeneratorParams params;
+            params.module = module_mm;
+            params.teeth = std::clamp(std::max(3, static_cast<int>(std::lround((2.0 * source.radius) / module_mm))), 3, 720);
+            params.pressure_angle_deg = m_gears_pressure_angle_spin ? m_gears_pressure_angle_spin->get_value() : 20.0;
+            params.backlash_mm = std::max(0.0, m_gears_backlash_spin ? m_gears_backlash_spin->get_value() : 0.0);
+            params.involute_segments =
+                    std::max(4, static_cast<int>(std::lround(m_gears_segments_spin ? m_gears_segments_spin->get_value() : 12.0)));
+            params.bore_diameter_mm = 0.0;
+
+            std::vector<glm::dvec2> outline;
+            if (!build_involute_gear_outline(params, outline))
+                outline = build_radial_teeth_profile({0, 0}, source.radius, 0.0, 2.0 * M_PI, true, module_mm, false);
+
+            const auto pitch_radius = params.module * static_cast<double>(params.teeth) * 0.5;
+            for (auto &p : outline) {
+                auto q = p;
+                if (inward) {
+                    const auto r = glm::length(q);
+                    if (r > 1e-9) {
+                        const auto dir = q / r;
+                        const auto mirrored_r = std::max(0.05, 2.0 * pitch_radius - r);
+                        q = dir * mirrored_r;
+                    }
+                }
+                q += source.center;
+                profile.push_back(q);
+            }
+        }
+        closed = true;
+        break;
+    case GearProfileSource::Kind::ARC:
+        profile = build_radial_teeth_profile(source.center, source.radius, source.start_angle, source.sweep_angle, false, module_mm,
+                                             inward);
+        closed = false;
+        break;
+    case GearProfileSource::Kind::BEZIER_CHAIN:
+        profile = build_polyline_teeth_profile(source.polyline, source.closed, module_mm, inward);
+        closed = source.closed;
+        break;
+    }
+    if (profile.size() < 2) {
+        if (m_workspace_browser)
+            m_workspace_browser->show_toast("Couldn't generate gears from selected profile");
+        return true;
+    }
+
+    std::vector<std::pair<std::vector<glm::dvec2>, bool>> output_paths;
+    output_paths.emplace_back(profile, closed);
+
+    if (m_gears_bore_spin && m_gears_material_thickness_spin) {
+        bool can_add_hole = false;
+        glm::dvec2 hole_center{0, 0};
+        if (source.kind == GearProfileSource::Kind::CIRCLE || source.kind == GearProfileSource::Kind::ARC) {
+            hole_center = source.center;
+            can_add_hole = true;
+        }
+        else if (source.kind == GearProfileSource::Kind::BEZIER_CHAIN && source.closed && !source.polyline.empty()) {
+            glm::dvec2 sum{0, 0};
+            for (const auto &p : source.polyline)
+                sum += p;
+            hole_center = sum / static_cast<double>(source.polyline.size());
+            can_add_hole = true;
+        }
+
+        if (can_add_hole) {
+        std::vector<std::vector<glm::dvec2>> holes;
+        const auto segments = std::max(24, m_gears_segments_spin ? static_cast<int>(std::lround(m_gears_segments_spin->get_value())) * 4 : 48);
+        append_gear_hole_polylines(holes, static_cast<int>(m_gears_hole_mode), std::max(0.0, m_gears_bore_spin->get_value()),
+                                   std::max(0.1, m_gears_material_thickness_spin->get_value()), hole_center, 0.0, segments);
+        for (auto &h : holes)
+            output_paths.emplace_back(std::move(h), true);
+        }
+    }
+
+    std::set<SelectableRef> selection;
+    std::vector<std::unique_ptr<EntityLine2D>> new_entities;
+    for (const auto &[path, path_closed] : output_paths) {
+        const auto seg_count = path.size() - 1 + (path_closed ? 1 : 0);
+        for (size_t i = 0; i < seg_count; i++) {
+            const auto &p1 = path.at(i);
+            const auto &p2 = path.at((i + 1) % path.size());
+            if (glm::length(p2 - p1) < 1e-6)
+                continue;
+            auto en = std::make_unique<EntityLine2D>(UUID::random());
+            en->m_group = group.m_uuid;
+            en->m_layer = source.layer;
+            en->m_wrkpl = source.wrkpl;
+            en->m_p1 = p1;
+            en->m_p2 = p2;
+            new_entities.push_back(std::move(en));
+        }
+    }
+    if (new_entities.empty()) {
+        if (m_workspace_browser)
+            m_workspace_browser->show_toast("Couldn't generate gears from selected profile");
+        return true;
+    }
+
+    get_canvas().set_selection({}, false);
+
+    ItemsToDelete items_to_delete;
+    for (const auto &uu : source.source_entities)
+        items_to_delete.entities.insert(uu);
+    const auto deleted_entities = items_to_delete.entities;
+    auto extra_items = doc.get_additional_items_to_delete(items_to_delete);
+    items_to_delete.append(extra_items);
+    doc.delete_items(items_to_delete);
+
+    for (auto &[uu, entity] : doc.m_entities) {
+        (void)uu;
+        if (entity->m_group != group.m_uuid)
+            continue;
+        for (auto it = entity->m_move_instead.begin(); it != entity->m_move_instead.end();) {
+            const auto &enp = it->second;
+            if (deleted_entities.contains(enp.entity) || !doc.get_entity_ptr(enp.entity))
+                it = entity->m_move_instead.erase(it);
+            else
+                ++it;
+        }
+    }
+
+    std::vector<UUID> created_entities;
+    created_entities.reserve(new_entities.size());
+    for (auto &en : new_entities) {
+        created_entities.push_back(en->m_uuid);
+        selection.emplace(SelectableRef::Type::ENTITY, en->m_uuid, 0);
+        doc.m_entities.emplace(en->m_uuid, std::move(en));
+    }
+
+    if (created_entities.size() >= 2) {
+        auto cluster = std::make_unique<EntityCluster>(UUID::random());
+        cluster->m_group = group.m_uuid;
+        cluster->m_layer = source.layer;
+        cluster->m_wrkpl = source.wrkpl;
+
+        auto content = ClusterContent::create();
+        const auto cloned_wrkpl_uu = doc.get_reference_group().get_workplane_xy_uuid();
+        for (const auto &uu : created_entities) {
+            auto *entity = doc.get_entity_ptr(uu);
+            if (!entity)
+                continue;
+            auto clone = entity->clone();
+            if (auto *cluster_en = dynamic_cast<IEntityInWorkplaneSet *>(clone.get()))
+                cluster_en->set_workplane(cloned_wrkpl_uu);
+            content->m_entities.emplace(uu, std::move(clone));
+        }
+        cluster->m_content = content;
+        const auto cluster_uu = cluster->m_uuid;
+        doc.m_entities.emplace(cluster_uu, std::move(cluster));
+
+        ItemsToDelete created_items;
+        for (const auto &uu : created_entities)
+            created_items.entities.insert(uu);
+        const auto created_extra = doc.get_additional_items_to_delete(created_items);
+        created_items.append(created_extra);
+        doc.delete_items(created_items);
+
+        selection.clear();
+        selection.emplace(SelectableRef::Type::ENTITY, cluster_uu, 0);
+    }
+
+    get_canvas().set_selection(selection, false);
+    m_core.set_needs_save();
+    m_core.rebuild("generate gears from selected profile");
+    canvas_update_keep_selection();
+    update_action_sensitivity();
+    rebuild_layers_popover();
+    if (m_workspace_browser)
+        m_workspace_browser->show_toast("Gears generated from selected profile");
+    return true;
+#else
+    return false;
+#endif
+}
+
+void Editor::generate_gears_geometry()
+{
+#ifdef DUNE_SKETCHER_ONLY
+    if (!m_gears_module_spin || !m_gears_teeth_spin || !m_gears_pressure_angle_spin || !m_gears_backlash_spin
+        || !m_gears_segments_spin || !m_gears_bore_spin)
+        return;
+
+    GearGeneratorParams params;
+    params.module = std::max(0.01, m_gears_module_spin->get_value());
+    params.teeth = std::max(3, static_cast<int>(std::lround(m_gears_teeth_spin->get_value())));
+    params.pressure_angle_deg = m_gears_pressure_angle_spin->get_value();
+    params.backlash_mm = std::max(0.0, m_gears_backlash_spin->get_value());
+    params.involute_segments = std::max(4, static_cast<int>(std::lround(m_gears_segments_spin->get_value())));
+    params.bore_diameter_mm = std::max(0.0, m_gears_bore_spin->get_value());
+
+    std::vector<glm::dvec2> outline;
+    if (!build_involute_gear_outline(params, outline)) {
+        m_workspace_browser->show_toast("Couldn't generate gear with current parameters");
+        return;
+    }
+
+    std::vector<std::vector<glm::dvec2>> polylines;
+    polylines.push_back(outline);
+
+    append_gear_hole_polylines(polylines, static_cast<int>(m_gears_hole_mode), params.bore_diameter_mm,
+                               std::max(0.1, m_gears_material_thickness_spin ? m_gears_material_thickness_spin->get_value() : 3.0),
+                               {0, 0}, 0.0, std::max(24, params.involute_segments * 4));
+
+    if (!commit_generator_polylines(polylines, true, "generate gear", true))
+        m_workspace_browser->show_toast("Gear generation failed");
+#endif
+}
+
+void Editor::generate_joints_geometry()
+{
+#ifdef DUNE_SKETCHER_ONLY
+    if (!generate_joints_from_selected_lines() && m_workspace_browser)
+        m_workspace_browser->show_toast("Select a valid edge selection for Edge Features");
+#endif
+}
+
+bool Editor::generate_joints_from_selected_lines()
+{
+#ifdef DUNE_SKETCHER_ONLY
+    try {
+    if (!m_core.has_documents())
+        return false;
+    if (m_core.tool_is_active() && !force_end_tool())
+        return true;
+
+    auto &doc = m_core.get_current_document();
+    auto &group = doc.get_group(m_core.get_current_group());
+    auto *sketch = dynamic_cast<GroupSketch *>(&group);
+    if (!sketch)
+        return false;
+
+    const auto selected = get_canvas().get_selection();
+    auto lines = selected_line_entities_in_group(doc, selected, group.m_uuid);
+    if (lines.empty())
+        return false;
+
+    struct LineData {
+        UUID uu;
+        UUID layer;
+        UUID wrkpl;
+        glm::dvec2 p1;
+        glm::dvec2 p2;
+    };
+
+    std::vector<LineData> line_data;
+    line_data.reserve(lines.size());
+    for (const auto &line_uu : lines) {
+        auto *line = doc.get_entity_ptr<EntityLine2D>(line_uu);
+        if (!line)
+            return true;
+        line_data.push_back({line->m_uuid, line->m_layer, line->m_wrkpl, line->m_p1, line->m_p2});
+    }
+
+    std::string metadata_error;
+    if (!ensure_joint_families_loaded(metadata_error)) {
+        if (m_workspace_browser)
+            m_workspace_browser->show_toast(metadata_error.empty() ? "Couldn't load edge feature families" : metadata_error);
+        return true;
+    }
+    if (g_joint_families.empty()) {
+        if (m_workspace_browser)
+            m_workspace_browser->show_toast("Edge Features catalog is empty");
+        return true;
+    }
+
+    const auto *family = get_selected_joint_family(m_joints_family_dropdown, m_joints_visible_family_indices);
+    if (!family) {
+        if (m_workspace_browser)
+            m_workspace_browser->show_toast("No edge feature family selected");
+        return true;
+    }
+    const auto *role = get_selected_joint_role(*family, m_joints_role_dropdown);
+    if (!role) {
+        if (m_workspace_browser)
+            m_workspace_browser->show_toast("No edge feature operation selected");
+        return true;
+    }
+    const auto snapshot = capture_joint_values_snapshot(*family, *role, m_joints_spin_settings, m_joints_entry_settings,
+                                                        m_joints_dropdown_settings, m_joints_switch_settings);
+    const auto thickness_mm = m_joints_thickness_spin ? std::max(0.1, m_joints_thickness_spin->get_value()) : 3.0;
+    const auto burn_mm = m_joints_burn_spin ? std::max(0.0, m_joints_burn_spin->get_value()) : 0.1;
+    const auto side_mode = joint_side_mode_from_index(m_joints_side_dropdown ? m_joints_side_dropdown->get_selected() : 0);
+    const auto flip_direction = m_joints_flip_direction_switch && m_joints_flip_direction_switch->get_active();
+    if (flip_direction) {
+        for (auto &line : line_data)
+            std::swap(line.p1, line.p2);
+    }
+
+    const auto pair_mode_candidate = line_data.size() == 2 && line_data[0].wrkpl == line_data[1].wrkpl;
+    const auto dir0 = line_data[0].p2 - line_data[0].p1;
+    const auto dir1 = pair_mode_candidate ? (line_data[1].p2 - line_data[1].p1) : glm::dvec2{0, 0};
+    const auto len0 = glm::length(dir0);
+    const auto len1 = pair_mode_candidate ? glm::length(dir1) : 0.0;
+    if (len0 < 1e-6 || (pair_mode_candidate && len1 < 1e-6)) {
+        if (m_workspace_browser)
+            m_workspace_browser->show_toast("Selected edges are too short for Edge Features");
+        return true;
+    }
+
+    auto dir0n = dir0 / len0;
+    auto dir1n = pair_mode_candidate ? (dir1 / len1) : glm::dvec2{0, 0};
+    if (pair_mode_candidate && glm::dot(dir0n, dir1n) < 0) {
+        std::swap(line_data[1].p1, line_data[1].p2);
+        dir1n = -dir1n;
+    }
+    const auto pair_mode = pair_mode_candidate;
+    const auto map_joint_segment = [](const BoxesSvgSegment &local_seg, const LineData &line, double side_sign) {
+        const auto delta = line.p2 - line.p1;
+        const auto length = glm::length(delta);
+        const auto tangent = delta / std::max(length, 1e-9);
+        const auto normal = normalize_dir(glm::dvec2{-tangent.y, tangent.x}) * side_sign;
+        const auto map_point = [&](const glm::dvec2 &p) { return line.p1 + tangent * p.x + normal * (-p.y); };
+        auto seg = local_seg;
+        seg.p1 = map_point(local_seg.p1);
+        seg.p2 = map_point(local_seg.p2);
+        if (seg.kind == BoxesSvgSegment::Kind::BEZIER) {
+            seg.c1 = map_point(local_seg.c1);
+            seg.c2 = map_point(local_seg.c2);
+        }
+        return seg;
+    };
+
+    struct GeneratedJointSegment {
+        BoxesSvgSegment seg;
+        LineData line;
+    };
+    std::vector<GeneratedJointSegment> generated_segments;
+    auto emit_edge = [&](const LineData &line, const JointEdgeDef *edge, double side_sign) {
+        if (!edge)
+            return false;
+        std::vector<BoxesSvgSegment> local_segments;
+        glm::dvec2 bbox_min{0, 0};
+        glm::dvec2 bbox_max{0, 0};
+        std::string error;
+        if (!generate_joint_edge_segments(*family, *edge, glm::length(line.p2 - line.p1), snapshot, thickness_mm, burn_mm,
+                                          local_segments, bbox_min, bbox_max, error)) {
+            if (m_workspace_browser)
+                m_workspace_browser->show_toast(error.empty() ? "Edge Features helper failed" : error);
+            return false;
+        }
+        for (const auto &seg : local_segments)
+            generated_segments.push_back({map_joint_segment(seg, line, side_sign), line});
+        return true;
+    };
+
+    if (pair_mode && role->pair) {
+        const auto c0 = (line_data[0].p1 + line_data[0].p2) * 0.5;
+        const auto c1 = (line_data[1].p1 + line_data[1].p2) * 0.5;
+        auto normal0 = normalize_dir(glm::dvec2{-dir0n.y, dir0n.x});
+        auto normal1 = normalize_dir(glm::dvec2{-dir1n.y, dir1n.x});
+        const auto side0_toward_pair = glm::dot(normal0, c1 - c0) >= 0 ? 1.0 : -1.0;
+        const auto side1_toward_pair = glm::dot(normal1, c0 - c1) >= 0 ? 1.0 : -1.0;
+        const auto side0_feature = side_mode == JointSideMode::OUTSIDE ? -side0_toward_pair : side0_toward_pair;
+        const auto side1_feature = side_mode == JointSideMode::OUTSIDE ? -side1_toward_pair : side1_toward_pair;
+        const auto side0_recess = -side0_feature;
+        const auto side1_recess = -side1_feature;
+
+        const auto *edge0 = find_joint_edge(*family, role->line0_edge);
+        const auto *edge1 = find_joint_edge(*family, role->line1_edge);
+        const auto line0_side = edge0 && edge0->side_mode == "recess" ? side0_recess : side0_feature;
+        const auto line1_side = edge1 && edge1->side_mode == "recess" ? side1_recess : side1_feature;
+        if (!emit_edge(line_data[0], edge0, line0_side) || !emit_edge(line_data[1], edge1, line1_side))
+            return true;
+    }
+    else {
+        if (role->pair) {
+            if (m_workspace_browser)
+                m_workspace_browser->show_toast(joint_selection_hint(*family, *role));
+            return true;
+        }
+        const auto *edge = find_joint_edge(*family, role->line0_edge);
+        if (!edge) {
+            if (m_workspace_browser)
+                m_workspace_browser->show_toast("Selected joint edge is missing");
+            return true;
+        }
+
+        for (const auto &line : line_data) {
+            const auto side_toward_center =
+                    infer_line_side_toward_closed_loop_center(doc, group.m_uuid, line.wrkpl, line.uu, line.p1, line.p2).value_or(1.0);
+            const auto outward_side = -side_toward_center;
+            const auto feature_side = side_mode == JointSideMode::OUTSIDE ? outward_side : side_toward_center;
+            const auto recess_side = side_toward_center;
+            const auto side_sign = edge->side_mode == "recess" ? recess_side : feature_side;
+            if (!emit_edge(line, edge, side_sign))
+                return true;
+        }
+    }
+
+    if (generated_segments.empty()) {
+        if (m_workspace_browser)
+            m_workspace_browser->show_toast("Couldn't generate joints from selected lines");
+        return true;
+    }
+
+    std::set<SelectableRef> selection;
+    std::vector<std::unique_ptr<Entity>> new_entities;
+    struct CoincidentCandidate {
+        EntityAndPoint ref;
+        UUID wrkpl;
+    };
+    std::map<LoopEndpointKey, std::vector<CoincidentCandidate>> coincident_candidates;
+    auto same_point = [](const glm::dvec2 &a, const glm::dvec2 &b) { return glm::length(a - b) < 1e-6; };
+    auto add_segment = [&](const BoxesSvgSegment &seg, const LineData &line) {
+        if (glm::length(seg.p2 - seg.p1) < 1e-6)
+            return;
+        if (seg.kind == BoxesSvgSegment::Kind::LINE) {
+            auto en = std::make_unique<EntityLine2D>(UUID::random());
+            en->m_group = group.m_uuid;
+            en->m_layer = line.layer;
+            en->m_wrkpl = line.wrkpl;
+            en->m_p1 = seg.p1;
+            en->m_p2 = seg.p2;
+            coincident_candidates[make_loop_endpoint_key(seg.p1)].push_back({{en->m_uuid, 1}, line.wrkpl});
+            coincident_candidates[make_loop_endpoint_key(seg.p2)].push_back({{en->m_uuid, 2}, line.wrkpl});
+            selection.emplace(SelectableRef::Type::ENTITY, en->m_uuid, 0);
+            new_entities.push_back(std::move(en));
+        }
+        else {
+            auto en = std::make_unique<EntityBezier2D>(UUID::random());
+            en->m_group = group.m_uuid;
+            en->m_layer = line.layer;
+            en->m_wrkpl = line.wrkpl;
+            en->m_p1 = seg.p1;
+            en->m_c1 = seg.c1;
+            en->m_c2 = seg.c2;
+            en->m_p2 = seg.p2;
+            coincident_candidates[make_loop_endpoint_key(seg.p1)].push_back({{en->m_uuid, 1}, line.wrkpl});
+            coincident_candidates[make_loop_endpoint_key(seg.p2)].push_back({{en->m_uuid, 2}, line.wrkpl});
+            selection.emplace(SelectableRef::Type::ENTITY, en->m_uuid, 0);
+            new_entities.push_back(std::move(en));
+        }
+    };
+    for (const auto &item : generated_segments)
+        add_segment(item.seg, item.line);
+
+    if (new_entities.empty()) {
+        if (m_workspace_browser)
+            m_workspace_browser->show_toast("Couldn't generate joints from selected lines");
+        return true;
+    }
+
+    get_canvas().set_selection({}, false);
+
+    ItemsToDelete items_to_delete;
+    for (const auto &line : line_data)
+        items_to_delete.entities.insert(line.uu);
+    const auto deleted_entities = items_to_delete.entities;
+    auto extra_items = doc.get_additional_items_to_delete(items_to_delete);
+    items_to_delete.append(extra_items);
+    doc.delete_items(items_to_delete);
+
+    for (auto &[uu, entity] : doc.m_entities) {
+        (void)uu;
+        if (entity->m_group != group.m_uuid)
+            continue;
+        for (auto it = entity->m_move_instead.begin(); it != entity->m_move_instead.end();) {
+            const auto &enp = it->second;
+            if (deleted_entities.contains(enp.entity) || !doc.get_entity_ptr(enp.entity))
+                it = entity->m_move_instead.erase(it);
+            else
+                ++it;
+        }
+    }
+
+    for (auto &en : new_entities)
+        doc.m_entities.emplace(en->m_uuid, std::move(en));
+
+    for (const auto &[key, refs] : coincident_candidates) {
+        (void)key;
+        if (refs.size() < 2)
+            continue;
+        const auto &anchor = refs.front();
+        for (size_t i = 1; i < refs.size(); i++) {
+            const auto &other = refs.at(i);
+            if (anchor.ref.entity == other.ref.entity && anchor.ref.point == other.ref.point)
+                continue;
+            if (anchor.wrkpl != other.wrkpl)
+                continue;
+            auto co = std::make_unique<ConstraintPointsCoincident>(UUID::random());
+            co->m_group = group.m_uuid;
+            co->m_wrkpl = anchor.wrkpl;
+            co->m_entity1 = anchor.ref;
+            co->m_entity2 = other.ref;
+            doc.m_constraints.emplace(co->m_uuid, std::move(co));
+        }
+    }
+
+    get_canvas().set_selection(selection, false);
+    m_core.set_needs_save();
+    m_core.rebuild("generate joints from selected lines");
+    canvas_update_keep_selection();
+    update_action_sensitivity();
+    rebuild_layers_popover();
+    if (m_workspace_browser)
+        m_workspace_browser->show_toast("Edge Features generated from selected lines");
+    return true;
+    }
+    catch (const std::exception &e) {
+        if (m_workspace_browser)
+            m_workspace_browser->show_toast(std::string("Edge Features failed: ") + e.what());
+        Logger::log_warning(std::string("Edge Features quick mode exception: ") + e.what());
+        return true;
+    }
+    catch (...) {
+        if (m_workspace_browser)
+            m_workspace_browser->show_toast("Edge Features failed with unknown error");
+        Logger::log_warning("Edge Features quick mode exception: unknown");
+        return true;
+    }
+#else
+    return false;
+#endif
+}
+
+void Editor::generate_boxes_geometry()
+{
+#ifdef DUNE_SKETCHER_ONLY
+    if (m_boxes_spin_settings.empty() && m_boxes_entry_settings.empty() && m_boxes_dropdown_settings.empty()
+        && m_boxes_switch_settings.empty())
+        return;
+    if (!m_core.has_documents())
+        return;
+    if (m_core.tool_is_active() && !force_end_tool())
+        return;
+    const auto wrkpl_uu = m_core.get_current_workplane();
+    if (!wrkpl_uu) {
+        m_workspace_browser->show_toast("Current group needs an active workplane");
+        return;
+    }
+    auto &doc = m_core.get_current_document();
+    auto &group = doc.get_group(m_core.get_current_group());
+    auto *sketch = dynamic_cast<GroupSketch *>(&group);
+    if (!sketch) {
+        m_workspace_browser->show_toast("Generator tools work in sketch groups");
+        return;
+    }
+    auto *wrkpl = doc.get_entity_ptr<EntityWorkplane>(wrkpl_uu);
+    if (!wrkpl) {
+        m_workspace_browser->show_toast("Current group needs an active workplane");
+        return;
+    }
+
+    const auto &template_def = get_boxes_template(m_boxes_template_index);
+    const auto snapshot =
+            capture_boxes_values_snapshot(template_def, m_boxes_spin_settings, m_boxes_entry_settings, m_boxes_dropdown_settings,
+                                          m_boxes_switch_settings);
+
+    std::vector<BoxesSvgSegment> imported_segments;
+    glm::dvec2 bbox_min{0, 0};
+    glm::dvec2 bbox_max{0, 0};
+    std::string error;
+    if (!generate_boxes_svg_segments(template_def, snapshot, imported_segments, bbox_min, bbox_max, error)) {
+        if (!error.empty())
+            Logger::get().log_warning(error, Logger::Domain::EDITOR);
+        m_workspace_browser->show_toast(error.empty() ? "Bundled boxes generation failed; check parameters" : error);
+        return;
+    }
+
+    ensure_current_group_layers_initialized();
+    auto layer_uu = get_active_layer_for_current_group();
+    if (!layer_uu)
+        layer_uu = sketch->get_default_layer_uuid();
+
+    const auto canvas_center_world = glm::dvec3(get_canvas().get_center());
+    const auto bbox_center = (bbox_min + bbox_max) * 0.5;
+    const auto offset = wrkpl->project(canvas_center_world) - bbox_center;
+
+    std::set<SelectableRef> imported_selection;
+    for (const auto &seg : imported_segments) {
+        if (seg.kind == BoxesSvgSegment::Kind::LINE) {
+            auto line = std::make_unique<EntityLine2D>(UUID::random());
+            line->m_group = group.m_uuid;
+            line->m_layer = layer_uu;
+            line->m_wrkpl = wrkpl_uu;
+            line->m_p1 = seg.p1 + offset;
+            line->m_p2 = seg.p2 + offset;
+            imported_selection.emplace(SelectableRef::Type::ENTITY, line->m_uuid, 0);
+            doc.m_entities.emplace(line->m_uuid, std::move(line));
+        }
+        else {
+            auto bezier = std::make_unique<EntityBezier2D>(UUID::random());
+            bezier->m_group = group.m_uuid;
+            bezier->m_layer = layer_uu;
+            bezier->m_wrkpl = wrkpl_uu;
+            bezier->m_p1 = seg.p1 + offset;
+            bezier->m_c1 = seg.c1 + offset;
+            bezier->m_c2 = seg.c2 + offset;
+            bezier->m_p2 = seg.p2 + offset;
+            imported_selection.emplace(SelectableRef::Type::ENTITY, bezier->m_uuid, 0);
+            doc.m_entities.emplace(bezier->m_uuid, std::move(bezier));
+        }
+    }
+
+    if (imported_selection.empty()) {
+        m_workspace_browser->show_toast("Bundled boxes ran, but no geometry was imported");
+        return;
+    }
+
+    doc.set_group_generate_pending(m_core.get_current_group());
+    m_core.set_needs_save();
+    m_core.rebuild("import boxes svg");
+    get_canvas().set_selection(imported_selection, false);
+    canvas_update_keep_selection();
+    update_action_sensitivity();
+    rebuild_layers_popover();
+    if (m_boxes_generator_window && m_boxes_generator_window->get_visible())
+        m_boxes_generator_window->hide();
+    m_workspace_browser->show_toast(std::string("Imported ") + template_def.label + " from bundled boxes");
+#endif
+}
+
 void Editor::ensure_current_group_layers_initialized()
 {
 #ifdef DUNE_SKETCHER_ONLY
@@ -2482,6 +9223,25 @@ void Editor::update_sketcher_toolbar_button_states()
             m_cup_template_button->remove_css_class("sketch-toolbar-active");
     }
 
+    if (m_gears_button) {
+        if (m_gears_mode_enabled || (m_gears_popover && m_gears_popover->get_visible()))
+            m_gears_button->add_css_class("sketch-toolbar-active");
+        else
+            m_gears_button->remove_css_class("sketch-toolbar-active");
+    }
+    if (m_joints_button) {
+        if (m_joints_mode_enabled || (m_joints_popover && m_joints_popover->get_visible()))
+            m_joints_button->add_css_class("sketch-toolbar-active");
+        else
+            m_joints_button->remove_css_class("sketch-toolbar-active");
+    }
+    if (m_boxes_button) {
+        if (m_boxes_generator_window && m_boxes_generator_window->get_visible())
+            m_boxes_button->add_css_class("sketch-toolbar-active");
+        else
+            m_boxes_button->remove_css_class("sketch-toolbar-active");
+    }
+
     if (m_grid_menu_button) {
         if (get_canvas().get_grid_enabled())
             m_grid_menu_button->add_css_class("sketch-toolbar-active");
@@ -2523,6 +9283,14 @@ void Editor::update_action_bar_buttons_sensitivity()
         m_layers_mode_button->set_sensitive(has_docs);
     if (m_cup_template_button)
         m_cup_template_button->set_sensitive(has_docs);
+    if (m_gears_button)
+        m_gears_button->set_sensitive(has_docs);
+    if (m_joints_button)
+        m_joints_button->set_sensitive(has_docs);
+    if (m_boxes_button)
+        m_boxes_button->set_sensitive(has_docs);
+    if (m_boxes_import_button)
+        m_boxes_import_button->set_sensitive(has_docs);
     if (m_grid_menu_button)
         m_grid_menu_button->set_sensitive(has_docs);
     if (m_symmetry_menu_button)
@@ -2574,7 +9342,8 @@ void Editor::init_canvas()
                 m_primary_button_pressed = true;
 #ifdef DUNE_SKETCHER_ONLY
             if (button == 2 && n_press == 1) {
-                activate_selection_mode();
+                m_middle_click_toggle_candidate = true;
+                m_middle_click_press_pos = {x, y};
                 return;
             }
 #else
@@ -2605,8 +9374,20 @@ void Editor::init_canvas()
         controller->signal_released().connect([this, controller](int n_press, double x, double y) {
             m_drag_tool = ToolID::NONE;
             const auto button = controller->get_current_button();
+            const auto state = controller->get_current_event_state();
             if (button == 1)
                 m_primary_button_pressed = false;
+#ifdef DUNE_SKETCHER_ONLY
+            if (button == 2) {
+                const auto dist = glm::length(glm::dvec2{x, y} - m_middle_click_press_pos);
+                const auto should_toggle = m_middle_click_toggle_candidate && n_press == 1 && dist <= 16.0;
+                m_middle_click_toggle_candidate = false;
+                if (should_toggle) {
+                    toggle_selection_mode_or_last_draw_tool();
+                    return;
+                }
+            }
+#endif
 #ifdef DUNE_SKETCHER_ONLY
             if (button == 1 && m_selection_transform_drag_active) {
                 end_selection_transform_drag();
@@ -2620,6 +9401,9 @@ void Editor::init_canvas()
                     args.action = InToolActionID::LMB;
                     ToolResponse r = tool_update_with_symmetry(args);
                     tool_process(r);
+                }
+                else if (m_joints_mode_enabled && static_cast<bool>(state & Gdk::ModifierType::SHIFT_MASK)) {
+                    update_joints_quick_popover(true);
                 }
             }
             else if (button == 3 && n_press == 1) {
@@ -2637,6 +9421,7 @@ void Editor::init_canvas()
                     open_context_menu();
             }
         });
+        controller->signal_cancel().connect([this](Gdk::EventSequence *) { m_middle_click_toggle_candidate = false; });
 
         get_canvas().add_controller(controller);
     }
@@ -3754,6 +10539,10 @@ void Editor::init_properties_notebook()
 
 void Editor::update_selection_editor()
 {
+#ifdef DUNE_SKETCHER_ONLY
+    if (sanitize_canvas_selection_if_needed())
+        return;
+#endif
     if (!m_selection_editor)
         return;
     if (get_canvas().get_selection_mode() == SelectionMode::HOVER)
@@ -4388,6 +11177,7 @@ void Editor::set_symmetry_enabled(bool enabled, bool reconfigure)
         m_symmetry_axes.clear();
         m_symmetry_capture_tool_id = ToolID::NONE;
         m_symmetry_pre_tool_entities.clear();
+        m_symmetry_pre_tool_constraints.clear();
         m_symmetry_pre_tool_entities_captured = false;
         m_symmetry_move_roots_before.clear();
         clear_symmetry_live_preview_entities();
@@ -4473,6 +11263,7 @@ void Editor::capture_symmetry_entities_before_tool(ToolID id)
     clear_symmetry_live_preview_entities();
     m_symmetry_capture_tool_id = id;
     m_symmetry_pre_tool_entities.clear();
+    m_symmetry_pre_tool_constraints.clear();
     m_symmetry_pre_tool_entities_captured = false;
     m_symmetry_move_roots_before.clear();
     if (!m_symmetry_enabled || !should_apply_symmetry_for_tool(id) || !m_core.has_documents())
@@ -4484,6 +11275,10 @@ void Editor::capture_symmetry_entities_before_tool(ToolID id)
     for (const auto &[uu, en] : doc.m_entities) {
         if (en->m_group == m_symmetry_group)
             m_symmetry_pre_tool_entities.insert(uu);
+    }
+    for (const auto &[uu, constr] : doc.m_constraints) {
+        if (constr->m_group == m_symmetry_group)
+            m_symmetry_pre_tool_constraints.insert(uu);
     }
     m_symmetry_pre_tool_entities_captured = true;
 
@@ -4892,6 +11687,10 @@ void Editor::apply_symmetry_to_new_entities_after_commit()
             if (en->m_group == m_symmetry_group)
                 m_symmetry_pre_tool_entities.insert(uu);
         }
+        for (const auto &[uu, constr] : doc.m_constraints) {
+            if (constr->m_group == m_symmetry_group)
+                m_symmetry_pre_tool_constraints.insert(uu);
+        }
         m_symmetry_pre_tool_entities_captured = true;
         return;
     }
@@ -4915,7 +11714,27 @@ void Editor::apply_symmetry_to_new_entities_after_commit()
         new_entities.push_back(uu);
     }
 
+    std::set<UUID> new_entities_set(new_entities.begin(), new_entities.end());
+    std::vector<UUID> new_constraints;
+    for (const auto &[uu, constr] : doc.m_constraints) {
+        if (constr->m_group != m_symmetry_group)
+            continue;
+        if (m_symmetry_pre_tool_constraints.contains(uu))
+            continue;
+        bool has_new_entity_ref = false;
+        for (const auto &enp : constr->get_referenced_entities_and_points()) {
+            if (new_entities_set.contains(enp.entity)) {
+                has_new_entity_ref = true;
+                break;
+            }
+        }
+        if (has_new_entity_ref)
+            new_constraints.push_back(uu);
+    }
+
     if (new_entities.empty()) {
+        for (const auto &uu : new_constraints)
+            m_symmetry_pre_tool_constraints.insert(uu);
         return;
     }
 
@@ -4954,13 +11773,19 @@ void Editor::apply_symmetry_to_new_entities_after_commit()
     };
 
     std::vector<std::unique_ptr<Entity>> clones;
+    struct SymmetryCloneMap {
+        std::map<UUID, UUID> entity_map;
+        bool mirrored = false;
+    };
+    std::vector<SymmetryCloneMap> clone_maps;
     if (m_symmetry_mode == SymmetryMode::RADIAL) {
         const auto center = m_symmetry_axes.front().first;
         const auto count = std::max(3u, m_symmetry_radial_axes);
         const auto phase = radial_rotation_deg_to_rad(m_symmetry_radial_rotation_deg);
-        for (const auto &uu : new_entities) {
-            const auto &src = doc.get_entity(uu);
-            for (unsigned int i = 1; i < count; i++) {
+        for (unsigned int i = 1; i < count; i++) {
+            std::map<UUID, UUID> id_map;
+            for (const auto &uu : new_entities) {
+                const auto &src = doc.get_entity(uu);
                 const auto angle = phase + 2.0 * M_PI * static_cast<double>(i) / static_cast<double>(count);
                 auto clone = src.clone();
                 transform_entity(*clone, src,
@@ -4971,14 +11796,17 @@ void Editor::apply_symmetry_to_new_entities_after_commit()
                 clone->m_generated_from = UUID();
                 clone->m_selection_invisible = false;
                 clone->m_move_instead.clear();
+                id_map.emplace(uu, clone->m_uuid);
                 clones.push_back(std::move(clone));
             }
+            clone_maps.push_back({std::move(id_map), false});
         }
     }
     else {
-        for (const auto &uu : new_entities) {
-            const auto &src = doc.get_entity(uu);
-            for (const auto &[axis_point, axis_dir] : m_symmetry_axes) {
+        for (const auto &[axis_point, axis_dir] : m_symmetry_axes) {
+            std::map<UUID, UUID> id_map;
+            for (const auto &uu : new_entities) {
+                const auto &src = doc.get_entity(uu);
                 auto clone = src.clone();
                 transform_entity(*clone, src,
                                  [&](const glm::dvec2 &p) { return reflect_point_2d(p, axis_point, axis_dir); }, true);
@@ -4988,14 +11816,18 @@ void Editor::apply_symmetry_to_new_entities_after_commit()
                 clone->m_generated_from = UUID();
                 clone->m_selection_invisible = false;
                 clone->m_move_instead.clear();
+                id_map.emplace(uu, clone->m_uuid);
                 clones.push_back(std::move(clone));
             }
+            clone_maps.push_back({std::move(id_map), true});
         }
     }
 
     if (clones.empty()) {
         for (const auto &uu : new_entities)
             m_symmetry_pre_tool_entities.insert(uu);
+        for (const auto &uu : new_constraints)
+            m_symmetry_pre_tool_constraints.insert(uu);
         return;
     }
 
@@ -5005,6 +11837,52 @@ void Editor::apply_symmetry_to_new_entities_after_commit()
     }
     for (const auto &uu : new_entities)
         m_symmetry_pre_tool_entities.insert(uu);
+    for (const auto &uu : new_constraints)
+        m_symmetry_pre_tool_constraints.insert(uu);
+
+    for (const auto &clone_map : clone_maps) {
+        for (const auto &constraint_uu : new_constraints) {
+            const auto *src_constr = doc.get_constraint_ptr(constraint_uu);
+            if (!src_constr)
+                continue;
+
+            auto constr_clone = src_constr->clone();
+            bool has_mapped_ref = false;
+            bool unsupported_ref = false;
+            for (const auto &enp : src_constr->get_referenced_entities_and_points()) {
+                if (auto it = clone_map.entity_map.find(enp.entity); it != clone_map.entity_map.end()) {
+                    auto mapped_enp = EntityAndPoint{it->second, enp.point};
+                    if (clone_map.mirrored) {
+                        if (const auto *arc = doc.get_entity_ptr<EntityArc2D>(enp.entity)) {
+                            (void)arc;
+                            if (enp.point == 1)
+                                mapped_enp.point = 2;
+                            else if (enp.point == 2)
+                                mapped_enp.point = 1;
+                        }
+                    }
+                    if (!constr_clone->replace_point(enp, mapped_enp)) {
+                        unsupported_ref = true;
+                        break;
+                    }
+                    has_mapped_ref = true;
+                    continue;
+                }
+                const auto *ref_en = doc.get_entity_ptr(enp.entity);
+                if (!ref_en || !ref_en->of_type(Entity::Type::WORKPLANE)) {
+                    unsupported_ref = true;
+                    break;
+                }
+            }
+            if (unsupported_ref || !has_mapped_ref)
+                continue;
+
+            constr_clone->m_uuid = UUID::random();
+            constr_clone->m_group = m_symmetry_group;
+            m_symmetry_pre_tool_constraints.insert(constr_clone->m_uuid);
+            doc.m_constraints.emplace(constr_clone->m_uuid, std::move(constr_clone));
+        }
+    }
 
     m_core.set_needs_save();
     m_core.rebuild("symmetry clone");
@@ -5970,10 +12848,11 @@ void Editor::render_document(const IDocumentInfo &doc)
     Renderer renderer(get_canvas(), m_core);
     renderer.m_solid_model_edge_select_mode = m_solid_model_edge_select_mode;
     renderer.m_show_entity_points = m_show_technical_markers;
+    renderer.m_show_constraints = m_show_technical_markers;
     renderer.m_connect_curvature_comb = m_preferences.canvas.connect_curvature_combs;
     renderer.m_first_group = m_update_groups_after;
 
-    if (doc.get_uuid() == m_core.get_current_idocument_info().get_uuid()) {
+    if (doc.get_uuid() == m_core.get_current_idocument_info().get_uuid() && m_show_technical_markers) {
         renderer.add_constraint_icons(m_constraint_tip_pos, m_constraint_tip_vec, m_constraint_tip_icons);
         renderer.m_overlay_construction_lines = get_symmetry_overlay_lines_world();
         renderer.m_overlay_construction_lines.insert(renderer.m_overlay_construction_lines.end(),
@@ -5993,7 +12872,7 @@ void Editor::render_document(const IDocumentInfo &doc)
 void Editor::draw_cup_template_overlay()
 {
 #ifdef DUNE_SKETCHER_ONLY
-    if (!m_cup_template_enabled || !m_core.has_documents())
+    if (!m_show_technical_markers || !m_cup_template_enabled || !m_core.has_documents())
         return;
     const auto wrkpl_uu = m_core.get_current_workplane();
     if (!wrkpl_uu)
@@ -6053,7 +12932,7 @@ void Editor::draw_cup_template_overlay()
 void Editor::draw_layer_glow_overlay()
 {
 #ifdef DUNE_SKETCHER_ONLY
-    if (!m_layers_mode_enabled || !m_core.has_documents())
+    if (!m_show_technical_markers || !m_layers_mode_enabled || !m_core.has_documents())
         return;
 
     auto &doc = m_core.get_current_document();

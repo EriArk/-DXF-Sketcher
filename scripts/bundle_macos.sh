@@ -20,6 +20,8 @@ echo "APPL????" > "$app_dir/Contents/PkgInfo"
 cp -r $brew_prefix/share/icons/Adwaita "$res_dir/share/icons"
 cp -r $brew_prefix/share/glib-2.0/schemas "$res_dir/share/glib-2.0"
 
+python3 scripts/bundle_boxes_runtime.py --dest "$res_dir/share/dxfsketcher/pyvendor"
+
 loaders_dir="$lib_dir/gdk-pixbuf-2.0/2.10.0/loaders"
 rm -rf "$loaders_dir" "$loaders_dir.cache"
 mkdir -p "$loaders_dir"

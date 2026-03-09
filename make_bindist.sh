@@ -124,6 +124,8 @@ rm $DISTDIR/lib/gdk-pixbuf-*/*/loaders/*.a
 mkdir -p $DISTDIR/share/glib-2.0/schemas
 cp /mingw64/share/glib-2.0/schemas/gschemas.compiled $DISTDIR/share/glib-2.0/schemas
 
+python3 scripts/bundle_boxes_runtime.py --dest "$DISTDIR/share/dxfsketcher/pyvendor"
+
 git log -10 | unix2dos > dist/log.txt
 if [ "$1" != "-n" ]; then
 	cd dist

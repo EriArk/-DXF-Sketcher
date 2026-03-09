@@ -17,7 +17,7 @@ BUNDLE_FILE="$OUT_DIR/${APP_ID}-${VERSION}-${BRANCH}.flatpak"
 
 cd "$ROOT_DIR"
 
-for cmd in flatpak flatpak-builder meson ldconfig; do
+for cmd in flatpak flatpak-builder meson ldconfig python3; do
     if ! command -v "$cmd" >/dev/null 2>&1; then
         echo "Required command not found: $cmd"
         exit 1
@@ -36,6 +36,7 @@ mkdir -p "$STAGE_DIR" "$BUILD_STATE_DIR" "$REPO_DIR"
 meson configure "$BUILD_DIR" --prefix /app >/dev/null
 meson compile -C "$BUILD_DIR" >/dev/null
 meson install -C "$BUILD_DIR" --destdir "$STAGE_DIR"
+python3 "$ROOT_DIR/scripts/bundle_boxes_runtime.py" --dest "$STAGE_DIR/app/share/dxfsketcher/pyvendor"
 
 if [ ! -x "$STAGE_DIR/app/bin/dxfsketcher" ]; then
     echo "Expected flatpak payload binary not found: $STAGE_DIR/app/bin/dxfsketcher"

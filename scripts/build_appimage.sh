@@ -15,7 +15,7 @@ OUT_FILE="$OUT_DIR/${PKG_NAME}-${VERSION}-${ARCH}.AppImage"
 
 cd "$ROOT_DIR"
 
-for cmd in meson linuxdeploy appimagetool convert; do
+for cmd in meson linuxdeploy appimagetool convert python3; do
     if ! command -v "$cmd" >/dev/null 2>&1; then
         echo "Required command not found: $cmd"
         exit 1
@@ -34,6 +34,7 @@ mkdir -p "$APPDIR"
 meson configure "$BUILD_DIR" --prefix /usr >/dev/null
 meson compile -C "$BUILD_DIR" >/dev/null
 meson install -C "$BUILD_DIR" --destdir "$APPDIR"
+bash "$ROOT_DIR/scripts/bundle_appimage_python.sh" "$APPDIR"
 
 BIN_PATH="$APPDIR/usr/bin/$PKG_NAME"
 DESKTOP_FILE="$APPDIR/usr/share/applications/io.github.eriark.dxfsketcher.desktop"

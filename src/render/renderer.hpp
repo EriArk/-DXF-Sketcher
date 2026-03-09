@@ -34,6 +34,7 @@ public:
 
     bool m_solid_model_edge_select_mode = false;
     bool m_show_entity_points = true;
+    bool m_show_constraints = true;
     bool m_connect_curvature_comb = true;
     UUID m_first_group;
     std::vector<OverlayLine> m_overlay_construction_lines;

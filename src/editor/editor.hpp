@@ -13,6 +13,10 @@
 #include "idocument_view_provider.hpp"
 #include "core/tool_id.hpp"
 #include <array>
+#include <future>
+#include <optional>
+#include <map>
+#include <vector>
 
 namespace dune3d {
 
@@ -89,6 +93,19 @@ public:
     ~Editor();
 
 private:
+    struct BoxesPreviewPolyline {
+        std::vector<glm::dvec2> points;
+        int layer = 0;
+    };
+
+    struct BoxesPreviewAsyncResult {
+        std::vector<BoxesPreviewPolyline> polylines;
+        glm::dvec2 bbox_min = {0, 0};
+        glm::dvec2 bbox_max = {0, 0};
+        std::string error;
+        int request_id = 0;
+    };
+
     std::optional<std::filesystem::path> get_group_export_path(const UUID &group) const;
     void set_group_export_path(const UUID &group, const std::filesystem::path &path);
 
@@ -101,6 +118,8 @@ private:
     void apply_symmetry_live_from_popover(bool show_toast_on_fail);
     void activate_selection_mode();
     void sync_selection_mode_popover();
+    bool sanitize_canvas_selection_if_needed();
+    bool expand_selection_to_closed_loops_if_needed();
     std::optional<UUID> get_single_selected_text_entity();
     void sync_draw_text_popover_from_font_desc();
     void sync_draw_text_popover_from_selection(bool show_popover);
@@ -115,6 +134,42 @@ private:
     void apply_active_layer_to_new_entities_after_commit();
     void init_cup_template_popover();
     void draw_cup_template_overlay();
+    void init_gears_popover();
+    void update_gears_quick_popover();
+    void open_gears_generator_window();
+    void update_gears_generator_ui();
+    void update_gears_generator_preview();
+    void draw_gears_generator_preview(const Cairo::RefPtr<Cairo::Context> &cr, int w, int h);
+    bool build_gears_generator_polylines(std::vector<std::vector<glm::dvec2>> &polylines) const;
+    bool import_gears_generator_to_document();
+    void init_joints_popover();
+    void update_joints_quick_popover(bool request_popup = false);
+    void sync_joints_popover_controls();
+    void update_joints_summary();
+    void rebuild_joints_family_dropdown();
+    void rebuild_joints_settings_ui();
+    void rebuild_joints_role_dropdowns();
+    void init_boxes_popover();
+    void open_boxes_generator_window();
+    void queue_boxes_preview_refresh(bool reset_view = false);
+    void update_boxes_preview(bool reset_view = false);
+    void draw_boxes_preview(const Cairo::RefPtr<Cairo::Context> &cr, int w, int h);
+    void rebuild_boxes_catalog_lists();
+    void rebuild_boxes_template_list();
+    void rebuild_boxes_gallery();
+    void sync_boxes_catalog_selection(bool switch_to_category_page);
+    void update_boxes_settings_visibility();
+    void show_boxes_sample_preview(int template_index);
+    void open_boxes_gallery_window();
+    bool commit_generator_polyline_groups(const std::vector<std::vector<std::vector<glm::dvec2>>> &polyline_groups,
+                                          bool closed, const std::string &rebuild_reason, bool clusterize_each_group = false);
+    bool commit_generator_polylines(const std::vector<std::vector<glm::dvec2>> &polylines, bool closed,
+                                    const std::string &rebuild_reason, bool clusterize = false);
+    void generate_gears_geometry();
+    bool generate_gears_from_selected_profile();
+    void generate_joints_geometry();
+    bool generate_joints_from_selected_lines();
+    void generate_boxes_geometry();
     void open_layer_edit_popover(const UUID &layer_uu);
     void refresh_layer_edit_popover();
     void draw_layer_glow_overlay();
@@ -124,6 +179,9 @@ private:
     void end_selection_transform_drag();
     void update_sketcher_toolbar_button_states();
     bool is_sticky_draw_tool(ToolID id) const;
+    bool is_middle_toggle_draw_tool(ToolID id) const;
+    void remember_last_draw_tool(ToolID id);
+    void toggle_selection_mode_or_last_draw_tool();
     bool configure_symmetry_from_current_context(bool show_toast_on_fail);
     void set_symmetry_enabled(bool enabled, bool reconfigure);
     bool should_apply_symmetry_for_tool(ToolID id) const;
@@ -239,6 +297,7 @@ private:
     std::vector<std::pair<glm::dvec2, glm::dvec2>> m_symmetry_axes;
     ToolID m_symmetry_capture_tool_id = ToolID::NONE;
     std::set<UUID> m_symmetry_pre_tool_entities;
+    std::set<UUID> m_symmetry_pre_tool_constraints;
     bool m_symmetry_pre_tool_entities_captured = false;
     std::map<UUID, std::unique_ptr<Entity>> m_symmetry_move_roots_before;
     std::set<UUID> m_symmetry_live_preview_entities;
@@ -295,6 +354,163 @@ private:
     Gtk::SpinButton *m_cup_template_circumference_spin = nullptr;
     Gtk::SpinButton *m_cup_template_diameter_spin = nullptr;
     Gtk::SpinButton *m_cup_template_segments_spin = nullptr;
+    Gtk::Button *m_gears_button = nullptr;
+    Gtk::Popover *m_gears_popover = nullptr;
+    Gtk::Popover *m_gears_quick_popover = nullptr;
+    Gtk::SpinButton *m_gears_module_spin = nullptr;
+    Gtk::SpinButton *m_gears_teeth_spin = nullptr;
+    Gtk::SpinButton *m_gears_pressure_angle_spin = nullptr;
+    Gtk::SpinButton *m_gears_backlash_spin = nullptr;
+    Gtk::SpinButton *m_gears_segments_spin = nullptr;
+    Gtk::SpinButton *m_gears_bore_spin = nullptr;
+    Gtk::SpinButton *m_gears_material_thickness_spin = nullptr;
+    Gtk::Button *m_gears_hole_mode_prev_button = nullptr;
+    Gtk::Button *m_gears_hole_mode_next_button = nullptr;
+    Gtk::Label *m_gears_hole_mode_label = nullptr;
+    Gtk::Switch *m_gears_inward_switch = nullptr;
+    Gtk::Switch *m_gears_quick_inward_switch = nullptr;
+    Gtk::Button *m_gears_quick_apply_button = nullptr;
+    bool m_gears_mode_enabled = false;
+    bool m_updating_gears_inward_switches = false;
+    enum class GearHoleMode {
+        CIRCLE = 0,
+        CROSS = 1,
+        SLOT = 2,
+    };
+    GearHoleMode m_gears_hole_mode = GearHoleMode::CIRCLE;
+    Gtk::Window *m_gears_generator_window = nullptr;
+    Gtk::DrawingArea *m_gears_generator_preview_area = nullptr;
+    Gtk::Scale *m_gears_generator_rotation_slider = nullptr;
+    Gtk::SpinButton *m_gears_generator_module_spin = nullptr;
+    Gtk::SpinButton *m_gears_generator_teeth_spin = nullptr;
+    Gtk::SpinButton *m_gears_generator_pressure_spin = nullptr;
+    Gtk::SpinButton *m_gears_generator_backlash_spin = nullptr;
+    Gtk::SpinButton *m_gears_generator_segments_spin = nullptr;
+    Gtk::SpinButton *m_gears_generator_bore_spin = nullptr;
+    Gtk::SpinButton *m_gears_generator_material_thickness_spin = nullptr;
+    Gtk::Button *m_gears_generator_hole_mode_prev_button = nullptr;
+    Gtk::Button *m_gears_generator_hole_mode_next_button = nullptr;
+    Gtk::Label *m_gears_generator_hole_mode_label = nullptr;
+    Gtk::Switch *m_gears_generator_pair_switch = nullptr;
+    Gtk::Switch *m_gears_generator_ratio_degrees_switch = nullptr;
+    Gtk::Box *m_gears_generator_pair_box = nullptr;
+    Gtk::Label *m_gears_generator_ratio_label = nullptr;
+    Gtk::SpinButton *m_gears_generator_diameter1_spin = nullptr;
+    Gtk::SpinButton *m_gears_generator_ratio_spin = nullptr;
+    Gtk::Label *m_gears_generator_summary_label = nullptr;
+    Gtk::Button *m_gears_generator_import_button = nullptr;
+    mutable std::vector<std::vector<glm::dvec2>> m_gears_generator_preview_polylines;
+    bool m_updating_gears_generator_ui = false;
+    Gtk::Button *m_joints_button = nullptr;
+    Gtk::Popover *m_joints_popover = nullptr;
+    Gtk::Popover *m_joints_quick_popover = nullptr;
+    Gtk::DropDown *m_joints_category_dropdown = nullptr;
+    Gtk::Button *m_joints_category_prev_button = nullptr;
+    Gtk::Label *m_joints_category_label = nullptr;
+    Gtk::Button *m_joints_category_next_button = nullptr;
+    Gtk::DropDown *m_joints_family_dropdown = nullptr;
+    Gtk::Button *m_joints_family_prev_button = nullptr;
+    Gtk::Label *m_joints_family_label = nullptr;
+    Gtk::Button *m_joints_family_next_button = nullptr;
+    Gtk::DropDown *m_joints_variant_dropdown = nullptr;
+    Gtk::DropDown *m_joints_role_dropdown = nullptr;
+    Gtk::Button *m_joints_role_prev_button = nullptr;
+    Gtk::Label *m_joints_role_label = nullptr;
+    Gtk::Button *m_joints_role_next_button = nullptr;
+    Gtk::Label *m_joints_family_description_label = nullptr;
+    Gtk::Label *m_joints_selection_hint_label = nullptr;
+    Gtk::Label *m_joints_summary_label = nullptr;
+    Gtk::Expander *m_joints_advanced_expander = nullptr;
+    Gtk::Button *m_joints_apply_button = nullptr;
+    Gtk::Switch *m_joints_auto_size_switch = nullptr;
+    Gtk::Box *m_joints_settings_box = nullptr;
+    Gtk::Button *m_joints_quick_role_prev_button = nullptr;
+    Gtk::Label *m_joints_quick_role_label = nullptr;
+    Gtk::Button *m_joints_quick_role_next_button = nullptr;
+    Gtk::Label *m_joints_quick_hint_label = nullptr;
+    Gtk::Button *m_joints_quick_side_prev_button = nullptr;
+    Gtk::Label *m_joints_quick_side_label = nullptr;
+    Gtk::Button *m_joints_quick_side_next_button = nullptr;
+    Gtk::Switch *m_joints_quick_flip_direction_switch = nullptr;
+    Gtk::Button *m_joints_quick_swap_roles_button = nullptr;
+    Gtk::Button *m_joints_quick_apply_button = nullptr;
+    Gtk::SpinButton *m_joints_finger_spin = nullptr;
+    Gtk::SpinButton *m_joints_space_spin = nullptr;
+    Gtk::SpinButton *m_joints_width_spin = nullptr;
+    Gtk::SpinButton *m_joints_edge_width_spin = nullptr;
+    Gtk::SpinButton *m_joints_surroundingspaces_spin = nullptr;
+    Gtk::SpinButton *m_joints_play_spin = nullptr;
+    Gtk::SpinButton *m_joints_extra_length_spin = nullptr;
+    Gtk::DropDown *m_joints_side_dropdown = nullptr;
+    Gtk::Button *m_joints_side_prev_button = nullptr;
+    Gtk::Label *m_joints_side_label = nullptr;
+    Gtk::Button *m_joints_side_next_button = nullptr;
+    Gtk::Switch *m_joints_flip_direction_switch = nullptr;
+    Gtk::Button *m_joints_swap_roles_button = nullptr;
+    Gtk::SpinButton *m_joints_thickness_spin = nullptr;
+    Gtk::SpinButton *m_joints_burn_spin = nullptr;
+    std::vector<unsigned int> m_joints_visible_family_indices;
+    std::map<std::string, std::string> m_joints_setting_values;
+    std::map<std::string, Gtk::Widget *> m_joints_setting_rows;
+    std::map<std::string, Gtk::SpinButton *> m_joints_spin_settings;
+    std::map<std::string, Gtk::Entry *> m_joints_entry_settings;
+    std::map<std::string, Gtk::DropDown *> m_joints_dropdown_settings;
+    std::map<std::string, Gtk::Switch *> m_joints_switch_settings;
+    bool m_joints_mode_enabled = false;
+    bool m_updating_joints_ui = false;
+    bool m_joints_rebuilding_settings = false;
+    bool m_updating_joints_role_controls = false;
+    bool m_updating_joints_side_controls = false;
+    Gtk::Button *m_boxes_button = nullptr;
+    Gtk::Window *m_boxes_generator_window = nullptr;
+    Gtk::Window *m_boxes_sample_window = nullptr;
+    Gtk::Window *m_boxes_loading_window = nullptr;
+    Gtk::Window *m_boxes_gallery_window = nullptr;
+    Gtk::ListBox *m_boxes_category_list = nullptr;
+    Gtk::ListBox *m_boxes_template_list = nullptr;
+    Gtk::ListBox *m_boxes_gallery_category_list = nullptr;
+    Gtk::FlowBox *m_boxes_gallery_flowbox = nullptr;
+    Gtk::Revealer *m_boxes_category_revealer = nullptr;
+    Gtk::Box *m_boxes_settings_box = nullptr;
+    Gtk::DrawingArea *m_boxes_preview_area = nullptr;
+    Gtk::Picture *m_boxes_sample_picture = nullptr;
+    Gtk::Label *m_boxes_preview_status_label = nullptr;
+    Gtk::Button *m_boxes_import_button = nullptr;
+    Gtk::Button *m_boxes_gallery_button = nullptr;
+    int m_boxes_template_index = 0;
+    std::map<Gtk::ListBox *, std::vector<int>> m_boxes_template_indices_by_list;
+    std::set<int> m_boxes_favorite_template_indices;
+    std::map<std::string, std::string> m_boxes_setting_values;
+    std::map<std::string, Gtk::Widget *> m_boxes_setting_rows;
+    std::map<std::string, Gtk::SpinButton *> m_boxes_spin_settings;
+    std::map<std::string, Gtk::Entry *> m_boxes_entry_settings;
+    std::map<std::string, Gtk::DropDown *> m_boxes_dropdown_settings;
+    std::map<std::string, Gtk::Switch *> m_boxes_switch_settings;
+    std::vector<BoxesPreviewPolyline> m_boxes_preview_polylines;
+    glm::dvec2 m_boxes_preview_bbox_min = {0, 0};
+    glm::dvec2 m_boxes_preview_bbox_max = {0, 0};
+    double m_boxes_preview_zoom = 1.0;
+    double m_boxes_preview_pan_x = 0.0;
+    double m_boxes_preview_pan_y = 0.0;
+    double m_boxes_preview_drag_pan_x = 0.0;
+    double m_boxes_preview_drag_pan_y = 0.0;
+    double m_boxes_preview_cursor_x = 0.0;
+    double m_boxes_preview_cursor_y = 0.0;
+    sigc::connection m_boxes_preview_debounce_connection;
+    sigc::connection m_boxes_preview_poll_connection;
+    sigc::connection m_boxes_catalog_poll_connection;
+    bool m_boxes_syncing_catalog = false;
+    bool m_boxes_catalog_loading = false;
+    bool m_boxes_rebuilding_settings = false;
+    bool m_boxes_suspend_joints_active = false;
+    bool m_boxes_preview_generation_running = false;
+    int m_boxes_preview_request_serial = 0;
+    std::string m_boxes_current_category_id = "__favorites__";
+    std::future<std::pair<bool, std::string>> m_boxes_catalog_future;
+    std::future<BoxesPreviewAsyncResult> m_boxes_preview_future;
+    std::optional<int> m_boxes_pending_preview_request_id;
+    bool m_boxes_pending_preview_reset_view = false;
+    BoxesPreviewAsyncResult m_boxes_ready_preview_result;
     Gtk::Popover *m_layer_edit_popover = nullptr;
     Gtk::Entry *m_layer_edit_name_entry = nullptr;
     Gtk::Switch *m_layer_edit_icon_switch = nullptr;
@@ -306,6 +522,7 @@ private:
     Gtk::Switch *m_selection_transform_switch = nullptr;
     Gtk::Switch *m_selection_markers_switch = nullptr;
     Gtk::Switch *m_selection_snap_switch = nullptr;
+    Gtk::Switch *m_selection_closed_loop_switch = nullptr;
     Gtk::Popover *m_draw_text_popover = nullptr;
     Gtk::Button *m_draw_text_font_button = nullptr;
     Gtk::Switch *m_draw_text_bold_switch = nullptr;
@@ -318,6 +535,10 @@ private:
     bool m_selection_transform_enabled = false;
     bool m_show_technical_markers = true;
     bool m_selection_snap_enabled = false;
+    bool m_selection_closed_loop_enabled = false;
+    bool m_applying_closed_loop_selection = false;
+    bool m_sanitizing_selection = false;
+    std::set<SelectableRef> m_closed_loop_previous_selection;
     std::vector<std::pair<glm::dvec3, glm::dvec3>> m_selection_snap_overlay_lines_world;
     enum class SelectionTransformDragMode { NONE, ROTATE, SCALE };
     SelectionTransformDragMode m_selection_transform_drag_mode = SelectionTransformDragMode::NONE;
@@ -349,6 +570,9 @@ private:
     bool m_selection_transform_overlay_valid = false;
     bool m_primary_button_pressed = false;
     ToolID m_sticky_draw_tool = ToolID::NONE;
+    ToolID m_last_middle_toggle_draw_tool = ToolID::NONE;
+    bool m_middle_click_toggle_candidate = false;
+    glm::dvec2 m_middle_click_press_pos = {0, 0};
     bool m_layers_mode_enabled = false;
     bool m_cup_template_enabled = false;
     bool m_updating_cup_template_popover = false;

@@ -93,6 +93,7 @@ fi
 %files
 /usr/bin/$PKG_NAME
 /usr/share/applications/io.github.eriark.dxfsketcher.desktop
+/usr/share/dxfsketcher
 /usr/share/metainfo/io.github.eriark.dxfsketcher.metainfo.xml
 /usr/share/icons/hicolor/scalable/apps/dxfsketcher.png
 EOF
