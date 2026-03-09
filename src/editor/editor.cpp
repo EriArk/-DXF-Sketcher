@@ -7573,6 +7573,128 @@ void Editor::rebuild_boxes_gallery()
 #endif
 }
 
+void Editor::ensure_boxes_importing_window()
+{
+#ifdef DUNE_SKETCHER_ONLY
+    if (m_boxes_importing_window)
+        return;
+
+    m_boxes_importing_window = Gtk::make_managed<Gtk::Window>();
+    m_boxes_importing_window->set_title("Importing");
+    m_boxes_importing_window->set_default_size(320, 120);
+    m_boxes_importing_window->set_transient_for(m_win);
+    m_boxes_importing_window->set_modal(true);
+    m_boxes_importing_window->set_resizable(false);
+    m_boxes_importing_window->set_hide_on_close(true);
+    m_boxes_importing_window->signal_close_request().connect(
+            [] {
+                // Keep this visible while the async import is running.
+                return true;
+            },
+            false);
+
+    auto box = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 10);
+    box->set_margin_start(16);
+    box->set_margin_end(16);
+    box->set_margin_top(16);
+    box->set_margin_bottom(16);
+
+    auto spinner = Gtk::make_managed<Gtk::Spinner>();
+    spinner->start();
+    spinner->set_halign(Gtk::Align::CENTER);
+    box->append(*spinner);
+
+    m_boxes_importing_label = Gtk::make_managed<Gtk::Label>("Importing...");
+    m_boxes_importing_label->set_wrap(true);
+    m_boxes_importing_label->set_justify(Gtk::Justification::CENTER);
+    box->append(*m_boxes_importing_label);
+
+    m_boxes_importing_progress = Gtk::make_managed<Gtk::ProgressBar>();
+    m_boxes_importing_progress->set_pulse_step(0.08);
+    box->append(*m_boxes_importing_progress);
+
+    m_boxes_importing_window->set_child(*box);
+#endif
+}
+
+void Editor::finish_boxes_geometry_import()
+{
+#ifdef DUNE_SKETCHER_ONLY
+    if (m_boxes_import_poll_connection.connected())
+        m_boxes_import_poll_connection.disconnect();
+    m_boxes_import_generation_running = false;
+
+    if (m_boxes_import_button)
+        m_boxes_import_button->set_sensitive(m_core.has_documents());
+    if (m_boxes_importing_window)
+        m_boxes_importing_window->hide();
+
+    if (!m_boxes_ready_import_result.error.empty()) {
+        Logger::get().log_warning(m_boxes_ready_import_result.error, Logger::Domain::EDITOR);
+        m_workspace_browser->show_toast(m_boxes_ready_import_result.error);
+        if (m_boxes_generator_window)
+            m_boxes_generator_window->present();
+        return;
+    }
+
+    auto &doc = m_core.get_current_document();
+    auto &group = doc.get_group(m_boxes_import_group);
+    auto *sketch = dynamic_cast<GroupSketch *>(&group);
+    auto *wrkpl = doc.get_entity_ptr<EntityWorkplane>(m_boxes_import_workplane);
+    if (!sketch || !wrkpl) {
+        m_workspace_browser->show_toast("Boxes import target is no longer available");
+        if (m_boxes_generator_window)
+            m_boxes_generator_window->present();
+        return;
+    }
+
+    const auto bbox_center = (m_boxes_ready_import_result.bbox_min + m_boxes_ready_import_result.bbox_max) * 0.5;
+    const auto offset = m_boxes_import_target_center - bbox_center;
+
+    std::set<SelectableRef> imported_selection;
+    for (const auto &seg : m_boxes_ready_import_result.segments) {
+        if (!seg.bezier) {
+            auto line = std::make_unique<EntityLine2D>(UUID::random());
+            line->m_group = group.m_uuid;
+            line->m_layer = m_boxes_import_layer;
+            line->m_wrkpl = m_boxes_import_workplane;
+            line->m_p1 = seg.p1 + offset;
+            line->m_p2 = seg.p2 + offset;
+            imported_selection.emplace(SelectableRef::Type::ENTITY, line->m_uuid, 0);
+            doc.m_entities.emplace(line->m_uuid, std::move(line));
+        }
+        else {
+            auto bezier = std::make_unique<EntityBezier2D>(UUID::random());
+            bezier->m_group = group.m_uuid;
+            bezier->m_layer = m_boxes_import_layer;
+            bezier->m_wrkpl = m_boxes_import_workplane;
+            bezier->m_p1 = seg.p1 + offset;
+            bezier->m_c1 = seg.c1 + offset;
+            bezier->m_c2 = seg.c2 + offset;
+            bezier->m_p2 = seg.p2 + offset;
+            imported_selection.emplace(SelectableRef::Type::ENTITY, bezier->m_uuid, 0);
+            doc.m_entities.emplace(bezier->m_uuid, std::move(bezier));
+        }
+    }
+
+    if (imported_selection.empty()) {
+        m_workspace_browser->show_toast("Bundled boxes ran, but no geometry was imported");
+        if (m_boxes_generator_window)
+            m_boxes_generator_window->present();
+        return;
+    }
+
+    doc.set_group_generate_pending(m_boxes_import_group);
+    m_core.set_needs_save();
+    m_core.rebuild("import boxes svg");
+    get_canvas().set_selection(imported_selection, false);
+    canvas_update_keep_selection();
+    update_action_sensitivity();
+    rebuild_layers_popover();
+    m_workspace_browser->show_toast(std::string("Imported ") + m_boxes_import_template_label + " from bundled boxes");
+#endif
+}
+
 void Editor::show_boxes_sample_preview(int template_index)
 {
 #ifdef DUNE_SKETCHER_ONLY
@@ -8764,6 +8886,8 @@ bool Editor::generate_joints_from_selected_lines()
 void Editor::generate_boxes_geometry()
 {
 #ifdef DUNE_SKETCHER_ONLY
+    if (m_boxes_import_generation_running)
+        return;
     if (m_boxes_spin_settings.empty() && m_boxes_entry_settings.empty() && m_boxes_dropdown_settings.empty()
         && m_boxes_switch_settings.empty())
         return;
@@ -8794,67 +8918,65 @@ void Editor::generate_boxes_geometry()
             capture_boxes_values_snapshot(template_def, m_boxes_spin_settings, m_boxes_entry_settings, m_boxes_dropdown_settings,
                                           m_boxes_switch_settings);
 
-    std::vector<BoxesSvgSegment> imported_segments;
-    glm::dvec2 bbox_min{0, 0};
-    glm::dvec2 bbox_max{0, 0};
-    std::string error;
-    if (!generate_boxes_svg_segments(template_def, snapshot, imported_segments, bbox_min, bbox_max, error)) {
-        if (!error.empty())
-            Logger::get().log_warning(error, Logger::Domain::EDITOR);
-        m_workspace_browser->show_toast(error.empty() ? "Bundled boxes generation failed; check parameters" : error);
-        return;
-    }
-
     ensure_current_group_layers_initialized();
     auto layer_uu = get_active_layer_for_current_group();
     if (!layer_uu)
         layer_uu = sketch->get_default_layer_uuid();
 
-    const auto canvas_center_world = glm::dvec3(get_canvas().get_center());
-    const auto bbox_center = (bbox_min + bbox_max) * 0.5;
-    const auto offset = wrkpl->project(canvas_center_world) - bbox_center;
+    m_boxes_import_group = group.m_uuid;
+    m_boxes_import_workplane = wrkpl_uu;
+    m_boxes_import_layer = layer_uu;
+    m_boxes_import_target_center = wrkpl->project(glm::dvec3(get_canvas().get_center()));
+    m_boxes_import_template_label = template_def.label;
 
-    std::set<SelectableRef> imported_selection;
-    for (const auto &seg : imported_segments) {
-        if (seg.kind == BoxesSvgSegment::Kind::LINE) {
-            auto line = std::make_unique<EntityLine2D>(UUID::random());
-            line->m_group = group.m_uuid;
-            line->m_layer = layer_uu;
-            line->m_wrkpl = wrkpl_uu;
-            line->m_p1 = seg.p1 + offset;
-            line->m_p2 = seg.p2 + offset;
-            imported_selection.emplace(SelectableRef::Type::ENTITY, line->m_uuid, 0);
-            doc.m_entities.emplace(line->m_uuid, std::move(line));
-        }
-        else {
-            auto bezier = std::make_unique<EntityBezier2D>(UUID::random());
-            bezier->m_group = group.m_uuid;
-            bezier->m_layer = layer_uu;
-            bezier->m_wrkpl = wrkpl_uu;
-            bezier->m_p1 = seg.p1 + offset;
-            bezier->m_c1 = seg.c1 + offset;
-            bezier->m_c2 = seg.c2 + offset;
-            bezier->m_p2 = seg.p2 + offset;
-            imported_selection.emplace(SelectableRef::Type::ENTITY, bezier->m_uuid, 0);
-            doc.m_entities.emplace(bezier->m_uuid, std::move(bezier));
-        }
-    }
-
-    if (imported_selection.empty()) {
-        m_workspace_browser->show_toast("Bundled boxes ran, but no geometry was imported");
-        return;
-    }
-
-    doc.set_group_generate_pending(m_core.get_current_group());
-    m_core.set_needs_save();
-    m_core.rebuild("import boxes svg");
-    get_canvas().set_selection(imported_selection, false);
-    canvas_update_keep_selection();
-    update_action_sensitivity();
-    rebuild_layers_popover();
+    ensure_boxes_importing_window();
+    if (m_boxes_importing_label)
+        m_boxes_importing_label->set_text(std::string("Importing ") + template_def.label + "...");
+    if (m_boxes_importing_progress)
+        m_boxes_importing_progress->set_fraction(0.0);
+    if (m_boxes_importing_window)
+        m_boxes_importing_window->present();
     if (m_boxes_generator_window && m_boxes_generator_window->get_visible())
         m_boxes_generator_window->hide();
-    m_workspace_browser->show_toast(std::string("Imported ") + template_def.label + " from bundled boxes");
+    if (m_boxes_import_button)
+        m_boxes_import_button->set_sensitive(false);
+
+    m_boxes_import_generation_running = true;
+    m_boxes_import_future = std::async(std::launch::async, [template_def, snapshot] {
+        BoxesImportAsyncResult result;
+        std::vector<BoxesSvgSegment> segments;
+        if (!generate_boxes_svg_segments(template_def, snapshot, segments, result.bbox_min, result.bbox_max, result.error))
+            return result;
+        result.segments.reserve(segments.size());
+        for (const auto &seg : segments) {
+            BoxesImportSegment converted;
+            converted.bezier = seg.kind == BoxesSvgSegment::Kind::BEZIER;
+            converted.p1 = seg.p1;
+            converted.c1 = seg.c1;
+            converted.c2 = seg.c2;
+            converted.p2 = seg.p2;
+            result.segments.push_back(std::move(converted));
+        }
+        return result;
+    });
+
+    if (m_boxes_import_poll_connection.connected())
+        m_boxes_import_poll_connection.disconnect();
+    m_boxes_import_poll_connection = Glib::signal_timeout().connect(
+            [this] {
+                if (!m_boxes_import_generation_running)
+                    return false;
+                if (m_boxes_importing_progress)
+                    m_boxes_importing_progress->pulse();
+                if (m_boxes_import_future.valid()
+                    && m_boxes_import_future.wait_for(std::chrono::milliseconds(0)) == std::future_status::ready) {
+                    m_boxes_ready_import_result = m_boxes_import_future.get();
+                    finish_boxes_geometry_import();
+                    return false;
+                }
+                return true;
+            },
+            40);
 #endif
 }
 
@@ -9290,7 +9412,7 @@ void Editor::update_action_bar_buttons_sensitivity()
     if (m_boxes_button)
         m_boxes_button->set_sensitive(has_docs);
     if (m_boxes_import_button)
-        m_boxes_import_button->set_sensitive(has_docs);
+        m_boxes_import_button->set_sensitive(has_docs && !m_boxes_import_generation_running);
     if (m_grid_menu_button)
         m_grid_menu_button->set_sensitive(has_docs);
     if (m_symmetry_menu_button)

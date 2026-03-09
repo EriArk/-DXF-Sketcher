@@ -106,6 +106,21 @@ private:
         int request_id = 0;
     };
 
+    struct BoxesImportSegment {
+        bool bezier = false;
+        glm::dvec2 p1 = {0, 0};
+        glm::dvec2 c1 = {0, 0};
+        glm::dvec2 c2 = {0, 0};
+        glm::dvec2 p2 = {0, 0};
+    };
+
+    struct BoxesImportAsyncResult {
+        std::vector<BoxesImportSegment> segments;
+        glm::dvec2 bbox_min = {0, 0};
+        glm::dvec2 bbox_max = {0, 0};
+        std::string error;
+    };
+
     std::optional<std::filesystem::path> get_group_export_path(const UUID &group) const;
     void set_group_export_path(const UUID &group, const std::filesystem::path &path);
 
@@ -159,6 +174,8 @@ private:
     void rebuild_boxes_gallery();
     void sync_boxes_catalog_selection(bool switch_to_category_page);
     void update_boxes_settings_visibility();
+    void ensure_boxes_importing_window();
+    void finish_boxes_geometry_import();
     void show_boxes_sample_preview(int template_index);
     void open_boxes_gallery_window();
     bool commit_generator_polyline_groups(const std::vector<std::vector<std::vector<glm::dvec2>>> &polyline_groups,
@@ -466,6 +483,7 @@ private:
     Gtk::Window *m_boxes_sample_window = nullptr;
     Gtk::Window *m_boxes_loading_window = nullptr;
     Gtk::Window *m_boxes_gallery_window = nullptr;
+    Gtk::Window *m_boxes_importing_window = nullptr;
     Gtk::ListBox *m_boxes_category_list = nullptr;
     Gtk::ListBox *m_boxes_template_list = nullptr;
     Gtk::ListBox *m_boxes_gallery_category_list = nullptr;
@@ -475,6 +493,8 @@ private:
     Gtk::DrawingArea *m_boxes_preview_area = nullptr;
     Gtk::Picture *m_boxes_sample_picture = nullptr;
     Gtk::Label *m_boxes_preview_status_label = nullptr;
+    Gtk::Label *m_boxes_importing_label = nullptr;
+    Gtk::ProgressBar *m_boxes_importing_progress = nullptr;
     Gtk::Button *m_boxes_import_button = nullptr;
     Gtk::Button *m_boxes_gallery_button = nullptr;
     int m_boxes_template_index = 0;
@@ -499,18 +519,27 @@ private:
     sigc::connection m_boxes_preview_debounce_connection;
     sigc::connection m_boxes_preview_poll_connection;
     sigc::connection m_boxes_catalog_poll_connection;
+    sigc::connection m_boxes_import_poll_connection;
     bool m_boxes_syncing_catalog = false;
     bool m_boxes_catalog_loading = false;
     bool m_boxes_rebuilding_settings = false;
     bool m_boxes_suspend_joints_active = false;
     bool m_boxes_preview_generation_running = false;
+    bool m_boxes_import_generation_running = false;
     int m_boxes_preview_request_serial = 0;
     std::string m_boxes_current_category_id = "__favorites__";
     std::future<std::pair<bool, std::string>> m_boxes_catalog_future;
     std::future<BoxesPreviewAsyncResult> m_boxes_preview_future;
+    std::future<BoxesImportAsyncResult> m_boxes_import_future;
     std::optional<int> m_boxes_pending_preview_request_id;
     bool m_boxes_pending_preview_reset_view = false;
     BoxesPreviewAsyncResult m_boxes_ready_preview_result;
+    BoxesImportAsyncResult m_boxes_ready_import_result;
+    UUID m_boxes_import_group;
+    UUID m_boxes_import_workplane;
+    UUID m_boxes_import_layer;
+    glm::dvec2 m_boxes_import_target_center = {0, 0};
+    std::string m_boxes_import_template_label;
     Gtk::Popover *m_layer_edit_popover = nullptr;
     Gtk::Entry *m_layer_edit_name_entry = nullptr;
     Gtk::Switch *m_layer_edit_icon_switch = nullptr;

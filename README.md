@@ -7,7 +7,7 @@ It keeps the parametric core from [dune3d](https://github.com/dune3d/dune3d), bu
 Repository: <https://github.com/EriArk/-DXF-Sketcher>
 
 <p align="center">
-  <img src="screenshot.png" alt="DXF Sketcher editor" width="900">
+  <img src="screenshots/main.png" alt="DXF Sketcher editor" width="900">
 </p>
 
 ## Why DXF Sketcher
