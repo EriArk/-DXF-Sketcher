@@ -11,9 +11,7 @@ new file mode 100644
 +
 +Repository: <https://github.com/EriArk/-DXF-Sketcher>
 +
-+<p align="center">
-+  <img src="screenshot.png" alt="DXF Sketcher editor" width="900">
-+</p>
+
 +
 +## What It Does
 +
