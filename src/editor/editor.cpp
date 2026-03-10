@@ -29,6 +29,7 @@
 #include "document/constraint/constraint.hpp"
 #include "document/constraint/constraint_points_coincident.hpp"
 #include "util/fs_util.hpp"
+#include "util/sketch_theme.hpp"
 #include "util/util.hpp"
 #include "selection_editor.hpp"
 #include "preferences/color_presets.hpp"
@@ -110,18 +111,46 @@ std::string format_line_width_multiplier(double line_width)
     return ss.str();
 }
 
-constexpr std::array<CanvasPreferences::ThemeVariant, 4> kSketchThemeOrder = {
+constexpr std::array<CanvasPreferences::ThemeVariant, 5> kSketchThemeOrder = {
         CanvasPreferences::ThemeVariant::LIGHT,
+        CanvasPreferences::ThemeVariant::MIX,
         CanvasPreferences::ThemeVariant::DARK,
-        CanvasPreferences::ThemeVariant::DARK_BLUE,
         CanvasPreferences::ThemeVariant::HEAVEN,
+        CanvasPreferences::ThemeVariant::DARK_BLUE,
 };
+
+constexpr std::array<CanvasPreferences::AccentVariant, 5> kSketchAccentOrder = {
+        CanvasPreferences::AccentVariant::BLUE,
+        CanvasPreferences::AccentVariant::ORANGE,
+        CanvasPreferences::AccentVariant::TEAL,
+        CanvasPreferences::AccentVariant::PINK,
+        CanvasPreferences::AccentVariant::LIME,
+};
+
+const char *sketch_accent_css_class(CanvasPreferences::AccentVariant accent)
+{
+    switch (accent) {
+    case CanvasPreferences::AccentVariant::BLUE:
+        return "sketch-accent-blue";
+    case CanvasPreferences::AccentVariant::ORANGE:
+        return "sketch-accent-orange";
+    case CanvasPreferences::AccentVariant::TEAL:
+        return "sketch-accent-teal";
+    case CanvasPreferences::AccentVariant::PINK:
+        return "sketch-accent-pink";
+    case CanvasPreferences::AccentVariant::LIME:
+        return "sketch-accent-lime";
+    default:
+        return "sketch-accent-blue";
+    }
+}
 
 CanvasPreferences::ThemeVariant normalize_sketch_theme_variant(CanvasPreferences::ThemeVariant variant)
 {
     switch (variant) {
     case CanvasPreferences::ThemeVariant::DARK:
     case CanvasPreferences::ThemeVariant::LIGHT:
+    case CanvasPreferences::ThemeVariant::MIX:
     case CanvasPreferences::ThemeVariant::DARK_BLUE:
     case CanvasPreferences::ThemeVariant::HEAVEN:
         return variant;
@@ -148,12 +177,14 @@ const char *sketch_theme_variant_name(CanvasPreferences::ThemeVariant variant)
     switch (normalize_sketch_theme_variant(variant)) {
     case CanvasPreferences::ThemeVariant::LIGHT:
         return "Light";
+    case CanvasPreferences::ThemeVariant::MIX:
+        return "Mix";
     case CanvasPreferences::ThemeVariant::DARK:
         return "Dark";
     case CanvasPreferences::ThemeVariant::DARK_BLUE:
-        return "Dark-Blue";
+        return "Blue";
     case CanvasPreferences::ThemeVariant::HEAVEN:
-        return "Heaven";
+        return "Light-Blue";
     case CanvasPreferences::ThemeVariant::AUTO:
     default:
         return "Light";
@@ -411,7 +442,7 @@ double radial_rotation_deg_to_rad(double deg)
 
 constexpr int sketch_popover_content_width = 193;
 constexpr int sketch_popover_total_width = sketch_popover_content_width + 24;
-constexpr int edge_features_popover_content_width = 145;
+constexpr int edge_features_popover_content_width = 128;
 constexpr int edge_features_popover_total_width = edge_features_popover_content_width + 24;
 
 std::string format_text_font_label(const Pango::FontDescription &desc)
@@ -5562,6 +5593,7 @@ void Editor::open_gears_generator_window()
         m_gears_generator_window->set_title("Gear Generator");
         m_gears_generator_window->set_default_size(1020, 640);
         m_gears_generator_window->set_transient_for(m_win);
+        sync_sketch_theme_classes(m_win, *m_gears_generator_window);
         m_gears_generator_window->set_modal(false);
         m_gears_generator_window->set_hide_on_close(true);
         m_gears_generator_window->signal_close_request().connect(
@@ -6499,7 +6531,7 @@ void Editor::init_joints_popover()
 #ifdef DUNE_SKETCHER_ONLY
     m_joints_button = Gtk::make_managed<Gtk::Button>();
     m_joints_button->set_icon_name("insert-link-symbolic");
-    m_joints_button->set_tooltip_text("Edge Features: joints, hinges, lids, grooves, and utility edge cuts");
+    m_joints_button->set_tooltip_text("Edge Tools: joints, hinges, lids, grooves, and utility edge cuts");
     m_joints_button->set_has_frame(true);
     m_joints_button->set_focusable(false);
     m_joints_button->add_css_class("sketch-toolbar-button");
@@ -6583,7 +6615,7 @@ void Editor::init_joints_popover()
         prev_button->set_has_frame(false);
         prev_button->set_focusable(false);
         value_label = Gtk::make_managed<Gtk::Label>("-");
-        value_label->set_hexpand(true);
+        value_label->set_width_chars(8);
         value_label->set_xalign(0.5f);
         value_label->set_ellipsize(Pango::EllipsizeMode::END);
         next_button = Gtk::make_managed<Gtk::Button>();
@@ -6646,18 +6678,21 @@ void Editor::init_joints_popover()
     m_joints_family_description_label = Gtk::make_managed<Gtk::Label>();
     m_joints_family_description_label->set_xalign(0);
     m_joints_family_description_label->set_wrap(true);
+    m_joints_family_description_label->set_max_width_chars(24);
     m_joints_family_description_label->add_css_class("dim-label");
     root->append(*m_joints_family_description_label);
 
     m_joints_selection_hint_label = Gtk::make_managed<Gtk::Label>();
     m_joints_selection_hint_label->set_xalign(0);
     m_joints_selection_hint_label->set_wrap(true);
+    m_joints_selection_hint_label->set_max_width_chars(24);
     m_joints_selection_hint_label->add_css_class("dim-label");
     root->append(*m_joints_selection_hint_label);
 
     m_joints_summary_label = Gtk::make_managed<Gtk::Label>();
     m_joints_summary_label->set_xalign(0);
     m_joints_summary_label->set_wrap(true);
+    m_joints_summary_label->set_max_width_chars(24);
     m_joints_summary_label->add_css_class("dim-label");
     root->append(*m_joints_summary_label);
 
@@ -7061,6 +7096,7 @@ void Editor::open_boxes_generator_window()
             m_boxes_loading_window->set_title("Loading Boxes");
             m_boxes_loading_window->set_default_size(320, 110);
             m_boxes_loading_window->set_transient_for(m_win);
+            sync_sketch_theme_classes(m_win, *m_boxes_loading_window);
             m_boxes_loading_window->set_modal(true);
             m_boxes_loading_window->set_hide_on_close(true);
             auto box = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 10);
@@ -7122,6 +7158,7 @@ void Editor::open_boxes_generator_window()
         m_boxes_generator_window->set_title("Boxes");
         m_boxes_generator_window->set_default_size(1320, 820);
         m_boxes_generator_window->set_transient_for(m_win);
+        sync_sketch_theme_classes(m_win, *m_boxes_generator_window);
         m_boxes_generator_window->set_modal(true);
         m_boxes_generator_window->set_hide_on_close(true);
         m_boxes_generator_window->signal_close_request().connect(
@@ -7583,6 +7620,7 @@ void Editor::ensure_boxes_importing_window()
     m_boxes_importing_window->set_title("Importing");
     m_boxes_importing_window->set_default_size(320, 120);
     m_boxes_importing_window->set_transient_for(m_win);
+    sync_sketch_theme_classes(m_win, *m_boxes_importing_window);
     m_boxes_importing_window->set_modal(true);
     m_boxes_importing_window->set_resizable(false);
     m_boxes_importing_window->set_hide_on_close(true);
@@ -7710,6 +7748,7 @@ void Editor::show_boxes_sample_preview(int template_index)
             m_boxes_sample_window->set_transient_for(*m_boxes_generator_window);
         else
             m_boxes_sample_window->set_transient_for(m_win);
+        sync_sketch_theme_classes(m_win, *m_boxes_sample_window);
         m_boxes_sample_window->set_modal(false);
         m_boxes_sample_window->set_hide_on_close(true);
         m_boxes_sample_window->signal_close_request().connect(
@@ -7752,6 +7791,7 @@ void Editor::open_boxes_gallery_window()
             m_boxes_gallery_window->set_transient_for(*m_boxes_generator_window);
         else
             m_boxes_gallery_window->set_transient_for(m_win);
+        sync_sketch_theme_classes(m_win, *m_boxes_gallery_window);
         m_boxes_gallery_window->set_hide_on_close(true);
         m_boxes_gallery_window->signal_close_request().connect(
                 [this] {
@@ -12099,7 +12139,8 @@ void Editor::init_settings_popover()
         const auto normalized = normalize_sketch_theme_variant(variant);
         m_preferences.canvas.theme_variant = normalized;
         m_preferences.canvas.dark_theme = (normalized == CanvasPreferences::ThemeVariant::DARK
-                                           || normalized == CanvasPreferences::ThemeVariant::DARK_BLUE);
+                                           || normalized == CanvasPreferences::ThemeVariant::DARK_BLUE
+                                           || normalized == CanvasPreferences::ThemeVariant::MIX);
         m_preferences.signal_changed().emit();
         if (keep_open) {
             Glib::signal_idle().connect_once([popover] {
@@ -12112,6 +12153,46 @@ void Editor::init_settings_popover()
             [this, set_theme_variant] { set_theme_variant(cycle_sketch_theme_variant(m_preferences.canvas.theme_variant, -1)); });
     m_theme_next_button->signal_clicked().connect(
             [this, set_theme_variant] { set_theme_variant(cycle_sketch_theme_variant(m_preferences.canvas.theme_variant, +1)); });
+
+    m_theme_accent_section = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 6);
+    root->append(*m_theme_accent_section);
+
+    auto accent_title = Gtk::make_managed<Gtk::Label>("Accent");
+    accent_title->set_halign(Gtk::Align::CENTER);
+    accent_title->add_css_class("dim-label");
+    m_theme_accent_section->append(*accent_title);
+
+    m_theme_accent_row = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 8);
+    m_theme_accent_row->set_halign(Gtk::Align::CENTER);
+    m_theme_accent_section->append(*m_theme_accent_row);
+
+    const auto set_accent_variant = [this](CanvasPreferences::AccentVariant accent) {
+        m_preferences.canvas.accent_variant = accent;
+        m_preferences.signal_changed().emit();
+    };
+    struct AccentButtonDef {
+        CanvasPreferences::AccentVariant accent;
+        const char *css_class;
+        const char *tooltip;
+    };
+    constexpr std::array<AccentButtonDef, 5> accent_buttons = {{
+            {CanvasPreferences::AccentVariant::BLUE, "sketch-accent-chip-blue", "Blue accent"},
+            {CanvasPreferences::AccentVariant::ORANGE, "sketch-accent-chip-orange", "Orange accent"},
+            {CanvasPreferences::AccentVariant::TEAL, "sketch-accent-chip-teal", "Teal accent"},
+            {CanvasPreferences::AccentVariant::PINK, "sketch-accent-chip-pink", "Pink accent"},
+            {CanvasPreferences::AccentVariant::LIME, "sketch-accent-chip-lime", "Lime accent"},
+    }};
+    for (const auto &def : accent_buttons) {
+        auto button = Gtk::make_managed<Gtk::Button>();
+        button->set_has_frame(false);
+        button->set_focusable(false);
+        button->set_tooltip_text(def.tooltip);
+        button->add_css_class("sketch-accent-chip");
+        button->add_css_class(def.css_class);
+        button->signal_clicked().connect([set_accent_variant, accent = def.accent] { set_accent_variant(accent); });
+        m_theme_accent_row->append(*button);
+        m_theme_accent_buttons.emplace(def.accent, button);
+    }
 
     auto width_title = Gtk::make_managed<Gtk::Label>("Line Thickness");
     width_title->set_halign(Gtk::Align::CENTER);
@@ -12197,12 +12278,21 @@ void Editor::init_settings_popover()
 
 void Editor::sync_settings_popover_from_preferences()
 {
-    if (!m_theme_prev_button || !m_theme_next_button || !m_theme_value_label || !m_line_width_scale
+    if (!m_theme_prev_button || !m_theme_next_button || !m_theme_value_label || !m_theme_accent_section
+        || !m_theme_accent_row || !m_line_width_scale
         || !m_line_width_value_label || !m_right_click_popovers_switch)
         return;
     m_updating_settings_popover = true;
     const auto variant = normalize_sketch_theme_variant(m_preferences.canvas.theme_variant);
     m_theme_value_label->set_text(sketch_theme_variant_name(variant));
+    for (const auto &[accent, button] : m_theme_accent_buttons) {
+        if (!button)
+            continue;
+        if (accent == m_preferences.canvas.accent_variant)
+            button->add_css_class("sketch-accent-chip-active");
+        else
+            button->remove_css_class("sketch-accent-chip-active");
+    }
     m_line_width_scale->set_value(m_preferences.canvas.appearance.line_width);
     m_line_width_value_label->set_text(format_line_width_multiplier(m_preferences.canvas.appearance.line_width));
     m_right_click_popovers_switch->set_active(m_right_click_popovers_only);
@@ -12378,6 +12468,7 @@ void Editor::on_trace_image_button()
             if (!m_image_trace_dialog) {
                 m_image_trace_dialog = std::make_unique<ImageTraceDialog>();
                 m_image_trace_dialog->set_transient_for(m_win);
+                sync_sketch_theme_classes(m_win, *m_image_trace_dialog);
                 m_image_trace_dialog->signal_apply().connect(sigc::mem_fun(*this, &Editor::apply_traced_svg));
             }
 
@@ -12411,6 +12502,7 @@ void Editor::open_trace_image_dialog(const std::shared_ptr<const PictureData> &p
     if (!m_image_trace_dialog) {
         m_image_trace_dialog = std::make_unique<ImageTraceDialog>();
         m_image_trace_dialog->set_transient_for(m_win);
+        sync_sketch_theme_classes(m_win, *m_image_trace_dialog);
         m_image_trace_dialog->signal_apply().connect(sigc::mem_fun(*this, &Editor::apply_traced_svg));
     }
 
@@ -12851,26 +12943,38 @@ void Editor::apply_preferences()
     }
 
     auto dark = Gtk::Settings::get_default()->property_gtk_application_prefer_dark_theme().get_value();
+    bool appearance_dark = dark;
     bool dark_blue = false;
     bool heaven = false;
+    bool light = false;
 #ifdef DUNE_SKETCHER_ONLY
     // In sketcher mode, Theme Variant drives both GTK and canvas theme.
     switch (m_preferences.canvas.theme_variant) {
     case CanvasPreferences::ThemeVariant::AUTO:
+        appearance_dark = dark;
+        break;
+    case CanvasPreferences::ThemeVariant::MIX:
+        dark = true;
+        appearance_dark = false;
         break;
     case CanvasPreferences::ThemeVariant::HEAVEN:
         dark = false;
+        appearance_dark = false;
         heaven = true;
         break;
     case CanvasPreferences::ThemeVariant::DARK_BLUE:
         dark = true;
+        appearance_dark = true;
         dark_blue = true;
         break;
     case CanvasPreferences::ThemeVariant::DARK:
         dark = true;
+        appearance_dark = true;
         break;
     case CanvasPreferences::ThemeVariant::LIGHT:
         dark = false;
+        appearance_dark = false;
+        light = true;
         break;
     }
     if (Gtk::Settings::get_default()->property_gtk_application_prefer_dark_theme().get_value() != dark)
@@ -12882,22 +12986,35 @@ void Editor::apply_preferences()
     dark = Gtk::Settings::get_default()->property_gtk_application_prefer_dark_theme().get_value();
     switch (m_preferences.canvas.theme_variant) {
     case CanvasPreferences::ThemeVariant::AUTO:
+        appearance_dark = dark;
+        break;
+    case CanvasPreferences::ThemeVariant::MIX:
+        dark = true;
+        appearance_dark = false;
         break;
     case CanvasPreferences::ThemeVariant::HEAVEN:
         dark = false;
+        appearance_dark = false;
         break;
     case CanvasPreferences::ThemeVariant::DARK_BLUE:
         dark = true;
+        appearance_dark = true;
         break;
     case CanvasPreferences::ThemeVariant::DARK:
         dark = true;
+        appearance_dark = true;
         break;
     case CanvasPreferences::ThemeVariant::LIGHT:
         dark = false;
+        appearance_dark = false;
         break;
     }
 #endif
 #ifdef DUNE_SKETCHER_ONLY
+    if (light)
+        m_win.add_css_class("sketch-light");
+    else
+        m_win.remove_css_class("sketch-light");
     if (dark_blue)
         m_win.add_css_class("sketch-dark-blue");
     else
@@ -12906,10 +13023,26 @@ void Editor::apply_preferences()
         m_win.add_css_class("sketch-heaven");
     else
         m_win.remove_css_class("sketch-heaven");
+    m_win.remove_css_class("sketch-mix");
+    for (const auto accent : kSketchAccentOrder)
+        m_win.remove_css_class(sketch_accent_css_class(accent));
+    m_win.add_css_class(sketch_accent_css_class(m_preferences.canvas.accent_variant));
+
+    const auto sync_aux_window_theme = [this](Gtk::Window *window) {
+        if (window)
+            sync_sketch_theme_classes(m_win, *window);
+    };
+    sync_aux_window_theme(m_gears_generator_window);
+    sync_aux_window_theme(m_boxes_loading_window);
+    sync_aux_window_theme(m_boxes_generator_window);
+    sync_aux_window_theme(m_boxes_importing_window);
+    sync_aux_window_theme(m_boxes_sample_window);
+    sync_aux_window_theme(m_boxes_gallery_window);
+    sync_aux_window_theme(m_image_trace_dialog.get());
 #endif
     if (color_themes.contains(m_preferences.canvas.theme)) {
         Appearance appearance = m_preferences.canvas.appearance;
-        appearance.colors = color_themes.at(m_preferences.canvas.theme).get(dark);
+        appearance.colors = color_themes.at(m_preferences.canvas.theme).get(appearance_dark);
         get_canvas().set_appearance(appearance);
     }
     else {

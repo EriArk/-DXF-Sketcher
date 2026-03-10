@@ -26,8 +26,10 @@ public:
     bool connect_curvature_combs = true;
     RotationScheme rotation_scheme = RotationScheme::ARCBALL;
     std::string theme = "Default";
-    enum class ThemeVariant { AUTO, DARK, LIGHT, DARK_BLUE, HEAVEN };
+    enum class ThemeVariant { AUTO, DARK, LIGHT, MIX, DARK_BLUE, HEAVEN };
     ThemeVariant theme_variant = ThemeVariant::AUTO;
+    enum class AccentVariant { BLUE, ORANGE, TEAL, PINK, LIME };
+    AccentVariant accent_variant = AccentVariant::BLUE;
     fs::path pick_path;
 
     void load_from_json(const json &j);

@@ -305,9 +305,19 @@ static const LutEnumStr<ColorP> colorp_lut = {
 static const LutEnumStr<CanvasPreferences::ThemeVariant> theme_variant_lut = {
         {"auto", CanvasPreferences::ThemeVariant::AUTO},
         {"light", CanvasPreferences::ThemeVariant::LIGHT},
+        {"mix", CanvasPreferences::ThemeVariant::MIX},
         {"dark", CanvasPreferences::ThemeVariant::DARK},
         {"dark_blue", CanvasPreferences::ThemeVariant::DARK_BLUE},
+        {"light_blue", CanvasPreferences::ThemeVariant::HEAVEN},
         {"heaven", CanvasPreferences::ThemeVariant::HEAVEN},
+};
+
+static const LutEnumStr<CanvasPreferences::AccentVariant> accent_variant_lut = {
+        {"blue", CanvasPreferences::AccentVariant::BLUE},
+        {"orange", CanvasPreferences::AccentVariant::ORANGE},
+        {"teal", CanvasPreferences::AccentVariant::TEAL},
+        {"pink", CanvasPreferences::AccentVariant::PINK},
+        {"lime", CanvasPreferences::AccentVariant::LIME},
 };
 
 static const LutEnumStr<RotationScheme> rotation_scheme_lut = {
@@ -326,6 +336,7 @@ json CanvasPreferences::serialize() const
     j["connect_curvature_combs"] = connect_curvature_combs;
     j["theme"] = theme;
     j["theme_variant"] = theme_variant_lut.lookup_reverse(theme_variant);
+    j["accent_variant"] = accent_variant_lut.lookup_reverse(accent_variant);
     j["dark_theme"] = dark_theme;
     j["pick_path"] = path_to_string(pick_path);
     j["error_overlay"] = error_overlay;
@@ -366,6 +377,8 @@ void CanvasPreferences::load_from_json(const json &j)
     theme = j.value("theme", "Default");
     if (j.contains("theme_variant"))
         theme_variant = theme_variant_lut.lookup(j.at("theme_variant"), ThemeVariant::AUTO);
+    if (j.contains("accent_variant"))
+        accent_variant = accent_variant_lut.lookup(j.at("accent_variant"), AccentVariant::BLUE);
     dark_theme = j.value("dark_theme", false);
     pick_path = path_from_string(j.value("pick_path", ""));
     error_overlay = j.value("error_overlay", true);

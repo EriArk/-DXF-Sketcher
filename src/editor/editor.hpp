@@ -273,6 +273,9 @@ private:
     Gtk::Button *m_theme_prev_button = nullptr;
     Gtk::Button *m_theme_next_button = nullptr;
     Gtk::Label *m_theme_value_label = nullptr;
+    Gtk::Box *m_theme_accent_section = nullptr;
+    Gtk::Box *m_theme_accent_row = nullptr;
+    std::map<CanvasPreferences::AccentVariant, Gtk::Button *> m_theme_accent_buttons;
     Gtk::Scale *m_line_width_scale = nullptr;
     Gtk::Label *m_line_width_value_label = nullptr;
     Gtk::Switch *m_right_click_popovers_switch = nullptr;

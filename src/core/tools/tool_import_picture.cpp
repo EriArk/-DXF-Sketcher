@@ -13,6 +13,7 @@
 #include "core/tool_data_path.hpp"
 #include "in_tool_action/in_tool_action.hpp"
 #include "util/action_label.hpp"
+#include "util/sketch_theme.hpp"
 #include "core/tool_id.hpp"
 #include "document/entity/entity_line2d.hpp"
 #include "document/entity/entity_bezier2d.hpp"
@@ -355,6 +356,7 @@ ToolResponse ToolImportPicture::update(const ToolArgs &args)
                 if (!m_image_import_dialog) {
                     m_image_import_dialog = std::make_unique<ImageImportDialog>();
                     m_image_import_dialog->set_transient_for(m_intf.get_dialogs().get_parent());
+                    sync_sketch_theme_classes(m_intf.get_dialogs().get_parent(), *m_image_import_dialog);
                     auto handled = std::make_shared<bool>(false);
                     m_image_import_dialog->signal_apply().connect([this, handled](const ImageImportPreparedData &prepared) {
                         *handled = true;

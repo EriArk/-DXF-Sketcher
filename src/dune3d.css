@@ -38,6 +38,9 @@
 
 .sketch-toolbar-button {
   color: @theme_fg_color;
+  min-width: 30px;
+  min-height: 30px;
+  padding: 4px;
 }
 
 .sketch-toolbar-divider {
@@ -47,7 +50,7 @@
 
 .sketch-toolbar-divider-vertical {
   min-width: 1px;
-  min-height: 22px;
+  min-height: 24px;
 }
 
 .sketch-toolbar-divider-horizontal {
@@ -108,6 +111,93 @@ button.osd:disabled:backdrop {background-image: image(rgba(53, 53, 53, 0.7));}
 
 .context-menu-button {padding-left: 11px; padding-top:2px; padding-bottom:2px;}
 .context-menu-button-3d {padding-left: 4px; padding-right: 4px; padding-top:2px; padding-bottom:2px;}
+
+.sketch-accent-chip {
+  min-width: 18px;
+  min-height: 18px;
+  padding: 0;
+  border-radius: 999px;
+  border: 2px solid alpha(@theme_fg_color, 0.16);
+  box-shadow: none;
+}
+
+.sketch-accent-chip-active {
+  box-shadow: 0 0 0 2px alpha(@theme_fg_color, 0.18);
+}
+
+.sketch-accent-chip-blue { background-image: linear-gradient(90deg, #59b4ff, #2f6fa8); }
+.sketch-accent-chip-orange { background-image: linear-gradient(90deg, #ffc15d, #db8d2b); }
+.sketch-accent-chip-teal { background-image: linear-gradient(90deg, #3bd0c7, #218f87); }
+.sketch-accent-chip-pink { background-image: linear-gradient(90deg, #ff78cb, #ca56a3); }
+.sketch-accent-chip-lime { background-image: linear-gradient(90deg, #bde765, #77aa33); }
+
+.sketch-light headerbar {
+  background-image: linear-gradient(to bottom, #ffffff, #f7f7f7 58%, #f0f0f0);
+  border-bottom: 1px solid #dbdbdb;
+  box-shadow:
+    inset 0 1px alpha(#ffffff, 0.82),
+    inset 0 -1px alpha(#d7d7d7, 0.50);
+}
+
+.sketch-light headerbar label {
+  color: #202226;
+}
+
+.sketch-light headerbar button,
+.sketch-light headerbar menubutton > button,
+.sketch-light .sketch-toolbar-button {
+  background-image: none;
+  background-color: transparent;
+  border-color: alpha(#000000, 0);
+  box-shadow: none;
+  color: #202226;
+}
+
+.sketch-light headerbar button:hover,
+.sketch-light headerbar menubutton > button:hover,
+.sketch-light .sketch-toolbar-button:hover {
+  background-image: none;
+  background-color: alpha(#111111, 0.06);
+  border-color: alpha(#000000, 0);
+  box-shadow: none;
+}
+
+.sketch-light headerbar button:active,
+.sketch-light headerbar button:checked,
+.sketch-light headerbar menubutton > button:active,
+.sketch-light headerbar menubutton > button:checked,
+.sketch-light .sketch-toolbar-button:active,
+.sketch-light .sketch-toolbar-button:checked {
+  background-image: none;
+  background-color: alpha(#111111, 0.10);
+  border-color: alpha(#000000, 0);
+  box-shadow: none;
+}
+
+.sketch-light .sketch-toolbar-divider {
+  background-color: alpha(#111111, 0.20);
+}
+
+.sketch-light .sketch-theme-value {
+  border-color: #d7d7d7;
+  background-image: linear-gradient(to bottom, #ffffff, #f4f4f4);
+  color: #202226;
+}
+
+.sketch-light popover contents,
+.sketch-light .selection-menu contents,
+.sketch-light .selection-menu arrow,
+.sketch-light .sketch-sidebar-popover contents,
+.sketch-light .sketch-sidebar-popover arrow,
+.sketch-light .sketch-grid-popover contents,
+.sketch-light .sketch-grid-popover arrow {
+  background-image: linear-gradient(to bottom, #ffffff, #f7f7f7 62%, #f2f2f2);
+  border-color: #d9d9d9;
+  color: #202226;
+  box-shadow:
+    inset 0 1px alpha(#ffffff, 0.82),
+    0 8px 22px alpha(#000000, 0.08);
+}
 
 .sketch-dark-blue {
   background-image:
@@ -414,4 +504,157 @@ button.osd:disabled:backdrop {background-image: image(rgba(53, 53, 53, 0.7));}
 
 .sketch-heaven .suggested-action {
   color: #173a62;
+}
+
+.sketch-accent-blue switch:checked,
+.sketch-accent-blue scale highlight,
+.sketch-accent-blue progressbar progress {
+  background-color: #4f9df2;
+}
+
+.sketch-accent-orange switch:checked,
+.sketch-accent-orange scale highlight,
+.sketch-accent-orange progressbar progress {
+  background-color: #e7922e;
+}
+
+.sketch-accent-teal switch:checked,
+.sketch-accent-teal scale highlight,
+.sketch-accent-teal progressbar progress {
+  background-color: #2ca598;
+}
+
+.sketch-accent-pink switch:checked,
+.sketch-accent-pink scale highlight,
+.sketch-accent-pink progressbar progress {
+  background-color: #d95fae;
+}
+
+.sketch-accent-lime switch:checked,
+.sketch-accent-lime scale highlight,
+.sketch-accent-lime progressbar progress {
+  background-color: #7aac32;
+}
+
+.sketch-accent-blue .suggested-action {
+  background-image: none;
+  background-color: #4f9df2;
+  color: #f7fbff;
+}
+
+.sketch-accent-orange .suggested-action {
+  background-image: none;
+  background-color: #e7922e;
+  color: #fffaf2;
+}
+
+.sketch-accent-teal .suggested-action {
+  background-image: none;
+  background-color: #2ca598;
+  color: #f5fffd;
+}
+
+.sketch-accent-pink .suggested-action {
+  background-image: none;
+  background-color: #d95fae;
+  color: #fff9fd;
+}
+
+.sketch-accent-lime .suggested-action {
+  background-image: none;
+  background-color: #7aac32;
+  color: #f8fff2;
+}
+
+.sketch-accent-blue .sketch-toolbar-button.sketch-toolbar-active {
+  color: #2f7fd8;
+  box-shadow: 0 0 6px alpha(#4f9df2, 0.35);
+}
+
+.sketch-accent-orange .sketch-toolbar-button.sketch-toolbar-active {
+  color: #c67218;
+  box-shadow: 0 0 6px alpha(#e7922e, 0.35);
+}
+
+.sketch-accent-teal .sketch-toolbar-button.sketch-toolbar-active {
+  color: #238d82;
+  box-shadow: 0 0 6px alpha(#2ca598, 0.35);
+}
+
+.sketch-accent-pink .sketch-toolbar-button.sketch-toolbar-active {
+  color: #bd4d97;
+  box-shadow: 0 0 6px alpha(#d95fae, 0.35);
+}
+
+.sketch-accent-lime .sketch-toolbar-button.sketch-toolbar-active {
+  color: #6c992d;
+  box-shadow: 0 0 6px alpha(#7aac32, 0.35);
+}
+
+.sketch-accent-blue .sketch-toolbar-button.sketch-toolbar-active image { color: #2f7fd8; }
+.sketch-accent-orange .sketch-toolbar-button.sketch-toolbar-active image { color: #c67218; }
+.sketch-accent-teal .sketch-toolbar-button.sketch-toolbar-active image { color: #238d82; }
+.sketch-accent-pink .sketch-toolbar-button.sketch-toolbar-active image { color: #bd4d97; }
+.sketch-accent-lime .sketch-toolbar-button.sketch-toolbar-active image { color: #6c992d; }
+
+button.sketch-accent-chip,
+.sketch-light button.sketch-accent-chip,
+.sketch-heaven button.sketch-accent-chip,
+.sketch-dark-blue button.sketch-accent-chip,
+.sketch-mix button.sketch-accent-chip {
+  min-width: 18px;
+  min-height: 18px;
+  padding: 0;
+  border-radius: 999px;
+  border: 2px solid alpha(@theme_fg_color, 0.16);
+  box-shadow: none;
+  background-color: transparent;
+}
+
+button.sketch-accent-chip.sketch-accent-chip-blue,
+.sketch-light button.sketch-accent-chip.sketch-accent-chip-blue,
+.sketch-heaven button.sketch-accent-chip.sketch-accent-chip-blue,
+.sketch-dark-blue button.sketch-accent-chip.sketch-accent-chip-blue,
+.sketch-mix button.sketch-accent-chip.sketch-accent-chip-blue {
+  background-image: linear-gradient(90deg, #59b4ff, #2f6fa8);
+}
+
+button.sketch-accent-chip.sketch-accent-chip-orange,
+.sketch-light button.sketch-accent-chip.sketch-accent-chip-orange,
+.sketch-heaven button.sketch-accent-chip.sketch-accent-chip-orange,
+.sketch-dark-blue button.sketch-accent-chip.sketch-accent-chip-orange,
+.sketch-mix button.sketch-accent-chip.sketch-accent-chip-orange {
+  background-image: linear-gradient(90deg, #ffc15d, #db8d2b);
+}
+
+button.sketch-accent-chip.sketch-accent-chip-teal,
+.sketch-light button.sketch-accent-chip.sketch-accent-chip-teal,
+.sketch-heaven button.sketch-accent-chip.sketch-accent-chip-teal,
+.sketch-dark-blue button.sketch-accent-chip.sketch-accent-chip-teal,
+.sketch-mix button.sketch-accent-chip.sketch-accent-chip-teal {
+  background-image: linear-gradient(90deg, #3bd0c7, #218f87);
+}
+
+button.sketch-accent-chip.sketch-accent-chip-pink,
+.sketch-light button.sketch-accent-chip.sketch-accent-chip-pink,
+.sketch-heaven button.sketch-accent-chip.sketch-accent-chip-pink,
+.sketch-dark-blue button.sketch-accent-chip.sketch-accent-chip-pink,
+.sketch-mix button.sketch-accent-chip.sketch-accent-chip-pink {
+  background-image: linear-gradient(90deg, #ff78cb, #ca56a3);
+}
+
+button.sketch-accent-chip.sketch-accent-chip-lime,
+.sketch-light button.sketch-accent-chip.sketch-accent-chip-lime,
+.sketch-heaven button.sketch-accent-chip.sketch-accent-chip-lime,
+.sketch-dark-blue button.sketch-accent-chip.sketch-accent-chip-lime,
+.sketch-mix button.sketch-accent-chip.sketch-accent-chip-lime {
+  background-image: linear-gradient(90deg, #bde765, #77aa33);
+}
+
+button.sketch-accent-chip.sketch-accent-chip-active,
+.sketch-light button.sketch-accent-chip.sketch-accent-chip-active,
+.sketch-heaven button.sketch-accent-chip.sketch-accent-chip-active,
+.sketch-dark-blue button.sketch-accent-chip.sketch-accent-chip-active,
+.sketch-mix button.sketch-accent-chip.sketch-accent-chip-active {
+  box-shadow: 0 0 0 2px alpha(@theme_fg_color, 0.18);
 }

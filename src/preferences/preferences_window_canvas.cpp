@@ -163,6 +163,9 @@ CanvasPreferencesEditor::CanvasPreferencesEditor(BaseObjectType *cobject, const 
         switch (m_preferences.canvas.theme_variant) {
         case CanvasPreferences::ThemeVariant::AUTO:
             break;
+        case CanvasPreferences::ThemeVariant::MIX:
+            dark = false;
+            break;
         case CanvasPreferences::ThemeVariant::HEAVEN:
             dark = false;
             break;
@@ -197,6 +200,7 @@ CanvasPreferencesEditor::CanvasPreferencesEditor(BaseObjectType *cobject, const 
         case CanvasPreferences::ThemeVariant::DARK_BLUE:
             m_theme_variant_dark_button->set_active(true);
             break;
+        case CanvasPreferences::ThemeVariant::MIX:
         case CanvasPreferences::ThemeVariant::LIGHT:
         case CanvasPreferences::ThemeVariant::HEAVEN:
             m_theme_variant_light_button->set_active(true);
