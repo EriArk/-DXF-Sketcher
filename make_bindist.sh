@@ -1,8 +1,12 @@
 #!/usr/bin/env bash
+set -euo pipefail
+
+BUILD_DIR="${1:-build-sketcher}"
 DISTDIR=dist/dxfsketcher
+ZIP_MODE="${2:-}"
 rm -rf dist
 mkdir -p $DISTDIR
-cp build/dxfsketcher.exe $DISTDIR
+cp "$BUILD_DIR/dxfsketcher.exe" $DISTDIR
 strip $DISTDIR/dxfsketcher.exe
 LIBS=(
 	libwinpthread-1.dll\
@@ -127,7 +131,7 @@ cp /mingw64/share/glib-2.0/schemas/gschemas.compiled $DISTDIR/share/glib-2.0/sch
 python3 scripts/bundle_boxes_runtime.py --dest "$DISTDIR/share/dxfsketcher/pyvendor"
 
 git log -10 | unix2dos > dist/log.txt
-if [ "$1" != "-n" ]; then
+if [ "$ZIP_MODE" != "-n" ]; then
 	cd dist
 	zip -r dxfsketcher-$(date +%Y-%m-%d-%H%M).zip dxfsketcher log.txt
 fi

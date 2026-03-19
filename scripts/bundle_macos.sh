@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 
+set -euo pipefail
 shopt -s extglob
 
+BUILD_DIR="${1:-build-sketcher}"
 app_dir="./dist/DXF Sketcher.app"
 bin_dir="$app_dir/Contents/MacOS"
 res_dir="$app_dir/Contents/Resources"
@@ -9,7 +11,7 @@ lib_dir="$res_dir/lib"
 brew_prefix="$(brew --prefix)"
 
 mkdir -p "$bin_dir" "$lib_dir" "$res_dir/share/icons" "$res_dir/share/glib-2.0"
-cp build/dxfsketcher "$bin_dir/dxfsketcher-bin"
+cp "$BUILD_DIR/dxfsketcher" "$bin_dir/dxfsketcher-bin"
 cp Info.plist "$app_dir/Contents"
 cp macos-launcher.sh "$bin_dir/dxfsketcher"
 chmod +x "$bin_dir/dxfsketcher"
