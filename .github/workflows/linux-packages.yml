@@ -62,7 +62,7 @@ jobs:
         run: meson setup $BUILD_DIR -Dsketcher_only=true
 
       - name: Build Debian package
-        run: bash scripts/build_deb.sh $BUILD_DIR
+        run: bash -x scripts/build_deb.sh $BUILD_DIR
 
       - name: Build AppImage
         run: bash scripts/build_appimage.sh $BUILD_DIR
