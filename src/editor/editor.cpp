@@ -71,13 +71,13 @@
 #include <fstream>
 #include <cstdint>
 #include <chrono>
-#include <sys/wait.h>
 #include <glib.h>
 #include <glm/gtx/quaternion.hpp>
 
 #ifdef _WIN32
 #include <windows.h>
 #else
+#include <sys/wait.h>
 #include <unistd.h>
 #if defined(__APPLE__)
 #include <mach-o/dyld.h>
