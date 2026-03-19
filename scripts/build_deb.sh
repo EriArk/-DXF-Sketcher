@@ -27,7 +27,7 @@ mkdir -p "$STAGE_DIR"
 
 # Debian packages should install under /usr, not /usr/local.
 meson configure "$BUILD_DIR" --prefix /usr >/dev/null
-meson compile -C "$BUILD_DIR" >/dev/null
+meson compile -C "$BUILD_DIR"
 meson install -C "$BUILD_DIR" --destdir "$STAGE_DIR"
 
 BIN_PATH="$STAGE_DIR/usr/bin/$PKG_NAME"
