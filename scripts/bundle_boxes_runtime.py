@@ -116,16 +116,41 @@ def bundle_posix_python(dest_pyvendor: Path) -> None:
     write_posix_wrapper(runtime_root / "bin" / "python", "libexec/python3-real")
 
 
-def find_windows_dll(bin_dir: Path) -> Path | None:
+def find_windows_dlls(bin_dir: Path) -> list[Path]:
+    version = f"{sys.version_info.major}.{sys.version_info.minor}"
     version_tag = f"{sys.version_info.major}{sys.version_info.minor}"
-    for candidate in (
-        bin_dir / f"python{version_tag}.dll",
-        Path(sys.base_prefix) / f"python{version_tag}.dll",
-        Path(sys.base_prefix) / "DLLs" / f"python{version_tag}.dll",
-    ):
-        if candidate.exists():
-            return candidate
-    return None
+    search_roots = [
+        bin_dir,
+        Path(sys.base_prefix),
+        Path(sys.base_prefix) / "bin",
+        Path(sys.base_prefix) / "DLLs",
+        Path(sys.base_prefix) / "lib",
+    ]
+    exact_candidates = (
+        f"python{version_tag}.dll",
+        f"libpython{version}.dll",
+        f"libpython{version_tag}.dll",
+    )
+
+    found: list[Path] = []
+    seen: set[Path] = set()
+    for root in search_roots:
+        if not root.exists():
+            continue
+
+        for name in exact_candidates:
+            candidate = root / name
+            if candidate.exists() and candidate not in seen:
+                found.append(candidate)
+                seen.add(candidate)
+
+        for pattern in (f"*python{version_tag}*.dll", f"*python{version}*.dll"):
+            for candidate in sorted(root.glob(pattern)):
+                if candidate.exists() and candidate not in seen:
+                    found.append(candidate)
+                    seen.add(candidate)
+
+    return found
 
 
 def bundle_windows_python(dest_pyvendor: Path) -> None:
@@ -140,8 +165,7 @@ def bundle_windows_python(dest_pyvendor: Path) -> None:
     else:
         copy_file(exe_src, runtime_root / "python3.exe")
 
-    dll = find_windows_dll(bin_src)
-    if dll:
+    for dll in find_windows_dlls(bin_src):
         copy_file(dll, runtime_root / dll.name)
 
     for helper in ("pythonw.exe",):

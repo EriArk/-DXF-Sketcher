@@ -4,7 +4,7 @@ import sys
 import subprocess
 from string import Template
 
-rc_template = """2 ICON "src/icons/dune3d.ico"
+rc_template = """2 ICON "src/icons/dxfsketcher.ico"
 
 1 VERSIONINFO
 FILEVERSION     $major,$minor,$micro,0

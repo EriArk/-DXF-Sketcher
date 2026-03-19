@@ -34,7 +34,7 @@
 			</Component>
 		</DirectoryRef>
 
-		<Feature Id='Dune3D' Level='1' Absent="disallow" Display="expand" ConfigurableDirectory='INSTALLDIR' AllowAdvertise='no'
+		<Feature Id='DXFSketcher' Level='1' Absent="disallow" Display="expand" ConfigurableDirectory='INSTALLDIR' AllowAdvertise='no'
 				 Title="$(var.FullProductName)"
 				 Description='DXF Sketcher core files and shortcuts'>
 			<!-- core files, i.e. everything that does not fit into any of the other features -->
@@ -68,7 +68,7 @@
 		</UI>
 
 
-		<Icon Id="dune3d.ico" SourceFile="..\src\icons\dune3d.ico" />
-		<Property Id="ARPPRODUCTICON" Value="dune3d.ico" />
+		<Icon Id="dxfsketcher.ico" SourceFile="..\src\icons\dxfsketcher.ico" />
+		<Property Id="ARPPRODUCTICON" Value="dxfsketcher.ico" />
 	</Product>
 </Wix>
