@@ -477,6 +477,7 @@ private:
     std::map<std::string, Gtk::DropDown *> m_joints_dropdown_settings;
     std::map<std::string, Gtk::Switch *> m_joints_switch_settings;
     bool m_joints_mode_enabled = false;
+    bool m_joints_runtime_requested = false;
     bool m_updating_joints_ui = false;
     bool m_joints_rebuilding_settings = false;
     bool m_updating_joints_role_controls = false;

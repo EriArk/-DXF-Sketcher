@@ -6448,6 +6448,10 @@ void Editor::sync_joints_popover_controls()
 #ifdef DUNE_SKETCHER_ONLY
     if (m_updating_joints_ui || m_joints_rebuilding_settings)
         return;
+    if (!m_joints_runtime_requested && g_joint_families.empty()) {
+        update_joints_summary();
+        return;
+    }
     m_updating_joints_ui = true;
     std::string error;
     if (ensure_joint_families_loaded(error)) {
@@ -6465,6 +6469,10 @@ void Editor::update_joints_summary()
 #ifdef DUNE_SKETCHER_ONLY
     if (!m_joints_summary_label)
         return;
+    if (!m_joints_runtime_requested && g_joint_families.empty()) {
+        m_joints_summary_label->set_text("Edge Features load when you open the panel.");
+        return;
+    }
 
     std::string error;
     if (!ensure_joint_families_loaded(error)) {
@@ -6549,6 +6557,7 @@ void Editor::init_joints_popover()
     install_hover_popover(*m_joints_button, *m_joints_popover, [this] { return !m_primary_button_pressed; },
                           [this] { return m_right_click_popovers_only; });
     m_joints_popover->signal_show().connect([this] {
+        m_joints_runtime_requested = true;
         sync_joints_popover_controls();
         update_sketcher_toolbar_button_states();
     });
@@ -6643,8 +6652,6 @@ void Editor::init_joints_popover()
         parent.append(*row);
     };
 
-    std::string joints_error;
-    ensure_joint_families_loaded(joints_error);
     auto category_model = Gtk::StringList::create();
     for (const auto &category : joint_ui_categories())
         category_model->append(category.label);
@@ -6988,14 +6995,13 @@ void Editor::init_joints_popover()
     });
 
     m_joints_button->signal_clicked().connect([this] {
+        m_joints_runtime_requested = true;
         m_joints_mode_enabled = !m_joints_mode_enabled;
         update_joints_quick_popover(false);
         update_sketcher_toolbar_button_states();
     });
 
-    if (!joints_error.empty() && m_workspace_browser)
-        m_workspace_browser->show_toast(joints_error);
-    sync_joints_popover_controls();
+    update_joints_summary();
 #endif
 }
 
@@ -7025,6 +7031,7 @@ void Editor::update_joints_quick_popover(bool request_popup)
         return;
     }
 
+    m_joints_runtime_requested = true;
     std::string error;
     if (!ensure_joint_families_loaded(error) || g_joint_families.empty()) {
         hide_quick();
