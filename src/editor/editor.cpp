@@ -5145,7 +5145,7 @@ void Editor::init_layers_popover()
         auto *layer_now = sketch_now->get_layer_ptr(m_layer_editing_uuid);
         if (!layer_now)
             return;
-        const auto new_name = m_layer_edit_name_entry->get_text();
+        const auto new_name = m_layer_edit_name_entry->get_text().raw();
         if (new_name.empty() || new_name == layer_now->m_name)
             return;
         layer_now->m_name = new_name;
