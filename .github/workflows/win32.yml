@@ -1,5 +1,8 @@
 name: Build Windows binaries
 
+permissions:
+  contents: write
+
 on:
   push:
     branches:
@@ -10,6 +13,12 @@ on:
     tags: [ '*' ]
   pull_request:
     branches: [ main ]
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Existing release tag to upload assets to
+        required: false
+        type: string
 
 jobs:
   build-win32:
@@ -17,6 +26,7 @@ jobs:
     env:
       BUILD_DIR: build-sketcher
       DIST_DIR: dist/dxfsketcher
+      RELEASE_TAG: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || inputs.release_tag }}
     steps:
     - name: Check tag
       if: startsWith(github.ref, 'refs/tags/')
@@ -69,17 +79,31 @@ jobs:
         name: ${{ env.artifact_name }}
         path: dist/*.zip
     - name: Build MSI
-      if: startsWith(github.ref, 'refs/tags/') || github.ref == 'refs/heads/win32-installer'
+      if: env.RELEASE_TAG != '' || github.ref == 'refs/heads/win32-installer'
       run: |
         $env:PATH += ";$($Env:WIX)\bin"
         cd wix
         .\install.bat
     - name: Print MSI checksum
-      if: startsWith(github.ref, 'refs/tags/') || github.ref == 'refs/heads/win32-installer'
+      if: env.RELEASE_TAG != '' || github.ref == 'refs/heads/win32-installer'
       shell: msys2 {0}
       run: sha256sum wix/*.msi
     - uses: actions/upload-artifact@v4
-      if: startsWith(github.ref, 'refs/tags/') || github.ref == 'refs/heads/win32-installer'
+      if: env.RELEASE_TAG != '' || github.ref == 'refs/heads/win32-installer'
       with:
         name: dxfsketcher-win64-installer
         path: wix/*.msi
+    - name: Upload release ZIP
+      if: ${{ env.RELEASE_TAG != '' }}
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      shell: pwsh
+      run: |
+        gh release upload $env:RELEASE_TAG dist/*.zip --repo "${{ github.repository }}" --clobber
+    - name: Upload release MSI
+      if: ${{ env.RELEASE_TAG != '' }}
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      shell: pwsh
+      run: |
+        gh release upload $env:RELEASE_TAG wix/*.msi --repo "${{ github.repository }}" --clobber
