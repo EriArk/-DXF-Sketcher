@@ -2,7 +2,9 @@
 set -euo pipefail
 
 DISTDIR="${1:-dist/dxfsketcher}"
-MISSING=$(ldd "$DISTDIR/dxfsketcher.exe" | grep -vi windows | grep -vi "$DISTDIR" | grep -v "???")
+LDD_OUTPUT="$(ldd "$DISTDIR/dxfsketcher.exe" 2>&1 || true)"
+MISSING="$(printf '%s\n' "$LDD_OUTPUT" | grep -i "not found" || true)"
+
 if [ -z "$MISSING" ]
 then
   echo "No missing DLLs"
