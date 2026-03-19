@@ -49,7 +49,8 @@ DEPENDS="$(
     done \
     | sed '/^$/d' \
     | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' \
-    | grep -E '^[a-z0-9][a-z0-9+.-]+$' \
+    | sed 's/:[[:alnum:]_+-]\+$//' \
+    | awk '/^[a-z0-9][a-z0-9+.-]+$/' \
     | sort -u \
     | paste -sd',' - \
     | sed 's/,/, /g'
