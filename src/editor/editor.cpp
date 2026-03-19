@@ -2033,12 +2033,16 @@ bool spawn_sync_argv(const std::vector<std::string> &argv, std::string &stdout_t
         return false;
     }
 
+    #ifdef _WIN32
+    exit_code = wait_status;
+    #else
     if (WIFEXITED(wait_status))
         exit_code = WEXITSTATUS(wait_status);
     else if (WIFSIGNALED(wait_status))
         exit_code = 128 + WTERMSIG(wait_status);
     else
         exit_code = wait_status;
+    #endif
 
     return true;
 }
