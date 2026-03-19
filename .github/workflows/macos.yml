@@ -4,16 +4,7 @@ permissions:
   contents: write
 
 on:
-  push:
-    branches:
-      - '**'
-      - '!appveyor-*'
-      - '!freebsd-*'
-      - '!pr-review*'
-      - '!win32-*'
-    tags: [ '*' ]
-  pull_request:
-    branches: [ main ]
+  # macOS packaging is temporarily manual-only until runtime issues are resolved.
   workflow_dispatch:
     inputs:
       release_tag:

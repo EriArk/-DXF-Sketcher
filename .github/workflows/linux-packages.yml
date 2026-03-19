@@ -58,7 +58,8 @@ jobs:
             patchelf \
             pkg-config \
             python3 \
-            python3-gi-cairo
+            python3-gi-cairo \
+            rpm
 
       - name: Install linuxdeploy tooling
         run: |
@@ -72,6 +73,9 @@ jobs:
 
       - name: Build Debian package
         run: bash -x scripts/build_deb.sh $BUILD_DIR
+
+      - name: Build RPM package
+        run: bash scripts/build_rpm.sh $BUILD_DIR
 
       - name: Build AppImage
         run: bash scripts/build_appimage.sh $BUILD_DIR
@@ -90,6 +94,13 @@ jobs:
           path: dist/appimage/*.AppImage
           if-no-files-found: error
 
+      - name: Upload RPM package
+        uses: actions/upload-artifact@v4
+        with:
+          name: dxfsketcher-rpm
+          path: dist/rpm/*.rpm
+          if-no-files-found: error
+
       - name: Upload release assets
         if: ${{ env.RELEASE_TAG != '' }}
         env:
@@ -97,6 +108,7 @@ jobs:
         run: |
           gh release upload "$RELEASE_TAG" \
             dist/deb/*.deb \
+            dist/rpm/*.rpm \
             dist/appimage/*.AppImage \
             --repo "${{ github.repository }}" \
             --clobber
