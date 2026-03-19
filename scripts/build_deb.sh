@@ -43,7 +43,7 @@ DEPENDS="$(
     | awk '/=> \//{print $3}' \
     | sort -u \
     | while read -r so; do
-        dpkg-query -S "$so" 2>/dev/null \
+        (dpkg-query -S "$so" 2>/dev/null || true) \
         | awk -F: '{print $1}' \
         | tr ',' '\n'
     done \
