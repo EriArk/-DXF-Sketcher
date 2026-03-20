@@ -265,6 +265,7 @@ json EditorPreferences::serialize() const
     j["constraint_trailing_zeros"] = trailing_zeros_lut.lookup_reverse(constraint_trailing_zeros);
     j["radial_menu_trigger"] = radial_menu_trigger_lut.lookup_reverse(radial_menu_trigger);
     j["tool_hints"] = tool_hints;
+    j["show_support_button"] = show_support_button;
     return j;
 }
 
@@ -277,6 +278,7 @@ void EditorPreferences::load_from_json(const json &j)
     radial_menu_trigger =
             radial_menu_trigger_lut.lookup(j.value("radial_menu_trigger", "shift_rmb"), RadialMenuTrigger::SHIFT_RMB);
     tool_hints = j.value("tool_hints", true);
+    show_support_button = j.value("show_support_button", true);
 }
 
 

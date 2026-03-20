@@ -12426,6 +12426,23 @@ void Editor::init_settings_popover()
         m_preferences.signal_changed().emit();
     });
 
+    auto support_button_row = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 8);
+    auto support_button_label = Gtk::make_managed<Gtk::Label>("Support button");
+    support_button_label->set_hexpand(true);
+    support_button_label->set_xalign(0);
+    m_support_button_switch = Gtk::make_managed<Gtk::Switch>();
+    support_button_row->append(*support_button_label);
+    support_button_row->append(*m_support_button_switch);
+    root->append(*support_button_row);
+
+    m_support_button_switch->property_active().signal_changed().connect([this] {
+        if (m_updating_settings_popover || !m_support_button_switch)
+            return;
+        m_preferences.editor.show_support_button = m_support_button_switch->get_active();
+        m_win.set_welcome_support_button_visible(m_preferences.editor.show_support_button);
+        m_preferences.signal_changed().emit();
+    });
+
     auto pref_button = Gtk::make_managed<Gtk::Button>("Preferences");
     pref_button->set_hexpand(true);
     root->append(*pref_button);
@@ -12468,7 +12485,8 @@ void Editor::sync_settings_popover_from_preferences()
 {
     if (!m_theme_prev_button || !m_theme_next_button || !m_theme_value_label || !m_theme_accent_section
         || !m_theme_accent_row || !m_line_width_scale
-        || !m_line_width_value_label || !m_right_click_popovers_switch || !m_tool_hints_switch)
+        || !m_line_width_value_label || !m_right_click_popovers_switch || !m_tool_hints_switch
+        || !m_support_button_switch)
         return;
     m_updating_settings_popover = true;
     const auto variant = normalize_sketch_theme_variant(m_preferences.canvas.theme_variant);
@@ -12485,6 +12503,7 @@ void Editor::sync_settings_popover_from_preferences()
     m_line_width_value_label->set_text(format_line_width_multiplier(m_preferences.canvas.appearance.line_width));
     m_right_click_popovers_switch->set_active(m_right_click_popovers_only);
     m_tool_hints_switch->set_active(m_tool_hints_enabled);
+    m_support_button_switch->set_active(m_preferences.editor.show_support_button);
     m_updating_settings_popover = false;
 }
 
@@ -13579,6 +13598,7 @@ void Editor::apply_preferences()
 
     m_tool_hints_enabled = m_preferences.editor.tool_hints;
     refresh_tool_hints();
+    m_win.set_welcome_support_button_visible(m_preferences.editor.show_support_button);
 
     for (auto &[id, conn] : m_action_connections) {
         auto &act = action_catalog.at(id);

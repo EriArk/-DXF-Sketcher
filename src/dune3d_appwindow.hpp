@@ -160,6 +160,7 @@ public:
     void set_selection_mode_label_text(const std::string &s);
 
     void set_welcome_box_visible(bool v);
+    void set_welcome_support_button_visible(bool v);
 
     void add_action_button(Gtk::Widget &widget);
     void set_action_bar_visible(bool v);
@@ -256,10 +257,12 @@ private:
     Gtk::Box *m_welcome_box = nullptr;
     Gtk::SearchEntry *m_welcome_recent_search_entry = nullptr;
     Gtk::ListBox *m_welcome_recent_listbox = nullptr;
+    Gtk::MenuButton *m_welcome_support_button = nullptr;
     Gtk::Button *m_welcome_new_button = nullptr;
     Gtk::Button *m_welcome_open_button = nullptr;
     Gtk::Button *m_welcome_open_folder_button = nullptr;
     Gtk::Button *m_welcome_open_project_button = nullptr;
+    bool m_welcome_support_button_enabled = true;
 
     std::vector<std::pair<Gtk::Widget *, bool>> m_header_widgets_visibility_before_welcome;
     bool m_header_compact_for_welcome = false;

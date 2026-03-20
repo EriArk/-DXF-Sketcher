@@ -381,6 +381,7 @@ private:
     std::map<Gtk::Widget *, Gtk::Popover *> m_tool_hint_popovers;
     std::map<Gtk::Widget *, Gtk::Label *> m_tool_hint_labels;
     Gtk::Switch *m_tool_hints_switch = nullptr;
+    Gtk::Switch *m_support_button_switch = nullptr;
     bool m_tool_hints_enabled = true;
     Gtk::Button *m_selection_mode_button = nullptr;
     Gtk::Popover *m_selection_mode_popover = nullptr;

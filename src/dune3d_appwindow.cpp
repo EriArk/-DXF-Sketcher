@@ -275,10 +275,12 @@ Dune3DAppWindow::Dune3DAppWindow(BaseObjectType *cobject, const Glib::RefPtr<Gtk
     m_welcome_box = refBuilder->get_widget<Gtk::Box>("welcome_box");
     m_welcome_recent_listbox = refBuilder->get_widget<Gtk::ListBox>("welcome_recent_listbox");
     m_welcome_recent_search_entry = refBuilder->get_widget<Gtk::SearchEntry>("welcome_recent_search_entry");
+    m_welcome_support_button = refBuilder->get_widget<Gtk::MenuButton>("welcome_support_button");
     m_welcome_new_button = refBuilder->get_widget<Gtk::Button>("welcome_new_button");
     m_welcome_open_button = refBuilder->get_widget<Gtk::Button>("welcome_open_button");
     m_welcome_open_folder_button = refBuilder->get_widget<Gtk::Button>("welcome_open_folder_button");
     m_welcome_open_project_button = refBuilder->get_widget<Gtk::Button>("welcome_open_project_button");
+    set_welcome_support_button_visible(app.get_preferences().editor.show_support_button);
 
     {
         auto sg = Gtk::SizeGroup::create(Gtk::SizeGroup::Mode::VERTICAL);
@@ -472,6 +474,8 @@ bool Dune3DAppWindow::has_file(const std::filesystem::path &path)
 void Dune3DAppWindow::set_welcome_box_visible(bool v)
 {
     m_welcome_box->set_visible(v);
+    if (m_welcome_support_button)
+        m_welcome_support_button->set_visible(v && m_welcome_support_button_enabled);
     if (v) {
         m_welcome_recent_search_entry->set_text("");
         update_recent_listbox_two_columns(*m_welcome_recent_listbox, m_app,
@@ -525,6 +529,13 @@ void Dune3DAppWindow::set_welcome_box_visible(bool v)
         m_header_compact_for_welcome = false;
     }
 #endif
+}
+
+void Dune3DAppWindow::set_welcome_support_button_visible(bool v)
+{
+    m_welcome_support_button_enabled = v;
+    if (m_welcome_support_button)
+        m_welcome_support_button->set_visible(v && m_welcome_box && m_welcome_box->get_visible());
 }
 
 void Dune3DAppWindow::add_action_button(Gtk::Widget &widget)

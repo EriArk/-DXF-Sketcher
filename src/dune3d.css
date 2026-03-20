@@ -32,6 +32,32 @@
   min-height: 36px;
 }
 
+.welcome-support-button {
+  min-width: 22px;
+  min-height: 22px;
+  padding: 0;
+  border-radius: 999px;
+  opacity: 0.68;
+}
+
+.welcome-support-button:hover,
+.welcome-support-button:checked {
+  opacity: 1;
+}
+
+.welcome-support-button > label {
+  font-weight: 700;
+}
+
+.welcome-support-popover contents,
+.welcome-support-popover arrow {
+  border-radius: 12px;
+}
+
+.welcome-support-title {
+  font-weight: 700;
+}
+
 .welcome-title {font-weight: 800; font-size: 150%;}
 
 .action-button {padding: 4px;}

@@ -54,6 +54,7 @@ public:
     TrailingZeros constraint_trailing_zeros = TrailingZeros::ONE_DECIMAL;
     RadialMenuTrigger radial_menu_trigger = RadialMenuTrigger::SHIFT_RMB;
     bool tool_hints = true;
+    bool show_support_button = true;
 
     void load_from_json(const json &j);
     json serialize() const;

@@ -169,6 +169,71 @@ welcome-box</property>
                             <property name="spacing">8</property>
                             <child>
                               <object class="GtkBox">
+                                <property name="halign">end</property>
+                                <child>
+                                  <object class="GtkMenuButton" id="welcome_support_button">
+                                    <property name="css-classes">flat
+welcome-support-button</property>
+                                    <property name="tooltip-text">Support DXF Sketcher</property>
+                                    <property name="popover">
+                                      <object class="GtkPopover">
+                                        <property name="css-classes">welcome-support-popover</property>
+                                        <child>
+                                          <object class="GtkBox">
+                                            <property name="orientation">vertical</property>
+                                            <property name="margin-bottom">12</property>
+                                            <property name="margin-end">12</property>
+                                            <property name="margin-start">12</property>
+                                            <property name="margin-top">12</property>
+                                            <property name="spacing">8</property>
+                                            <child>
+                                              <object class="GtkLabel">
+                                                <property name="css-classes">welcome-support-title</property>
+                                                <property name="halign">start</property>
+                                                <property name="label">&lt;b&gt;Support DXF Sketcher&lt;/b&gt;</property>
+                                                <property name="use-markup">True</property>
+                                                <property name="xalign">0</property>
+                                              </object>
+                                            </child>
+                                            <child>
+                                              <object class="GtkLabel">
+                                                <property name="css-classes">dim-label</property>
+                                                <property name="halign">start</property>
+                                                <property name="label">If the program is useful to you, you can support its development here.</property>
+                                                <property name="max-width-chars">28</property>
+                                                <property name="wrap">True</property>
+                                                <property name="xalign">0</property>
+                                              </object>
+                                            </child>
+                                            <child>
+                                              <object class="GtkLinkButton">
+                                                <property name="halign">fill</property>
+                                                <property name="label">Patreon</property>
+                                                <property name="uri">https://patreon.com/AbyssTail</property>
+                                              </object>
+                                            </child>
+                                            <child>
+                                              <object class="GtkLinkButton">
+                                                <property name="halign">fill</property>
+                                                <property name="label">Ko-fi</property>
+                                                <property name="uri">https://ko-fi.com/abysstail</property>
+                                              </object>
+                                            </child>
+                                          </object>
+                                        </child>
+                                      </object>
+                                    </property>
+                                    <property name="child">
+                                      <object class="GtkLabel">
+                                        <property name="label">$</property>
+                                      </object>
+                                    </property>
+                                  </object>
+                                </child>
+                              </object>
+                            </child>
+                            <child>
+                              <object class="GtkBox">
                                 <property name="orientation">vertical</property>
                                 <property name="spacing">6</property>
                                 <child>
