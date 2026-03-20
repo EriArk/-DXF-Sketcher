@@ -171,6 +171,15 @@ Linux is the main release target right now.
 
 Windows and macOS versions will arrive a little later. They are planned, but there are still a few platform-specific issues we want to sort out before shipping builds there.
 
+## Support
+
+If DXF Sketcher is useful to you and you'd like to support its development, you can do that here:
+
+- Patreon: https://patreon.com/AbyssTail
+- Ko-fi: https://ko-fi.com/abysstail
+
+Feedback, bug reports, and feature ideas also help a lot.
+
 ## Build From Source
 
 ```bash
