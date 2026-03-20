@@ -224,6 +224,13 @@ welcome-support-button</property>
                                                 <child>
                                                   <object class="GtkLinkButton">
                                                     <property name="halign">fill</property>
+                                                    <property name="label">GitHub Sponsors</property>
+                                                    <property name="uri">https://github.com/sponsors/EriArk</property>
+                                                  </object>
+                                                </child>
+                                                <child>
+                                                  <object class="GtkLinkButton">
+                                                    <property name="halign">fill</property>
                                                     <property name="label">Patreon</property>
                                                     <property name="uri">https://patreon.com/AbyssTail</property>
                                                   </object>
