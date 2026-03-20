@@ -86,6 +86,7 @@ static void update_recent_listbox_two_columns(Gtk::ListBox &lb, Dune3DApplicatio
     for (size_t i = 0; i < recent_items_sorted.size(); i += 2) {
         auto row_box = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 8);
         row_box->set_homogeneous(true);
+        row_box->add_css_class("welcome-recent-row");
 
         for (size_t j = 0; j < 2 && (i + j) < recent_items_sorted.size(); ++j) {
             const auto &it = recent_items_sorted.at(i + j);
@@ -94,6 +95,7 @@ static void update_recent_listbox_two_columns(Gtk::ListBox &lb, Dune3DApplicatio
             auto button = Gtk::make_managed<Gtk::Button>();
             button->set_has_frame(false);
             button->add_css_class("flat");
+            button->add_css_class("welcome-recent-button");
             button->set_hexpand(true);
 
             auto box = Gtk::make_managed<RecentItemBox>(name, it.path, it.time, it.is_folder);
@@ -177,12 +179,15 @@ Dune3DAppWindow::Dune3DAppWindow(BaseObjectType *cobject, const Glib::RefPtr<Gtk
     m_open_button = refBuilder->get_widget<Gtk::Button>("open_button");
     m_open_popover = refBuilder->get_widget<Gtk::Popover>("open_popover");
     m_open_popover->set_autohide(true);
+    m_open_popover->add_css_class("recent-popover");
     m_open_menu_button = refBuilder->get_widget<Gtk::MenuButton>("open_menu_button");
     m_new_button = refBuilder->get_widget<Gtk::Button>("new_button");
     m_save_button = refBuilder->get_widget<Gtk::Button>("save_button");
     m_save_as_button = refBuilder->get_widget<Gtk::Button>("save_as_button");
     m_open_recent_listbox = refBuilder->get_widget<Gtk::ListBox>("open_recent_listbox");
+    m_open_recent_listbox->add_css_class("recent-listbox");
     m_open_recent_search_entry = refBuilder->get_widget<Gtk::SearchEntry>("open_recent_search_entry");
+    m_open_recent_search_entry->add_css_class("recent-search-entry");
     m_open_recent_listbox->set_header_func(sigc::ptr_fun(header_func_separator));
     m_open_recent_listbox->signal_row_activated().connect([this](Gtk::ListBoxRow *row) {
         auto &ch = dynamic_cast<RecentItemBox &>(*row->get_child());
@@ -269,11 +274,11 @@ Dune3DAppWindow::Dune3DAppWindow(BaseObjectType *cobject, const Glib::RefPtr<Gtk
 
     m_welcome_box = refBuilder->get_widget<Gtk::Box>("welcome_box");
     m_welcome_recent_listbox = refBuilder->get_widget<Gtk::ListBox>("welcome_recent_listbox");
-    m_welcome_recent_listbox->set_header_func(sigc::ptr_fun(header_func_separator));
     m_welcome_recent_search_entry = refBuilder->get_widget<Gtk::SearchEntry>("welcome_recent_search_entry");
     m_welcome_new_button = refBuilder->get_widget<Gtk::Button>("welcome_new_button");
     m_welcome_open_button = refBuilder->get_widget<Gtk::Button>("welcome_open_button");
     m_welcome_open_folder_button = refBuilder->get_widget<Gtk::Button>("welcome_open_folder_button");
+    m_welcome_open_project_button = refBuilder->get_widget<Gtk::Button>("welcome_open_project_button");
 
     {
         auto sg = Gtk::SizeGroup::create(Gtk::SizeGroup::Mode::VERTICAL);

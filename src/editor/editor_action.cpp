@@ -6,6 +6,11 @@
 #include "dune3d_application.hpp"
 #include "preferences/preferences_window.hpp"
 #include "canvas/canvas.hpp"
+#include "document/entity/entity_arc2d.hpp"
+#include "document/entity/entity_bezier2d.hpp"
+#include "document/entity/entity_circle2d.hpp"
+#include "document/entity/entity_line2d.hpp"
+#include "document/entity/entity_point2d.hpp"
 #include "document/entity/entity_workplane.hpp"
 #include "document/entity/ientity_in_workplane_set.hpp"
 #include "document/constraint/iconstraint_datum.hpp"
@@ -49,6 +54,43 @@ static const std::map<ActionID, Document::MoveGroup> move_group_action_map = {
         {ActionID::MOVE_GROUP_TO_END_OF_DOCUMENT, Document::MoveGroup::END_OF_DOCUMENT},
 };
 
+void transform_cluster_content_entity(Entity &dst, const Entity &src,
+                                      const std::function<glm::dvec2(const glm::dvec2 &)> &transform,
+                                      double uniform_scale)
+{
+    if (auto *line = dynamic_cast<EntityLine2D *>(&dst)) {
+        if (const auto *src_line = dynamic_cast<const EntityLine2D *>(&src)) {
+            line->m_p1 = transform(src_line->m_p1);
+            line->m_p2 = transform(src_line->m_p2);
+        }
+    }
+    else if (auto *arc = dynamic_cast<EntityArc2D *>(&dst)) {
+        if (const auto *src_arc = dynamic_cast<const EntityArc2D *>(&src)) {
+            arc->m_from = transform(src_arc->m_from);
+            arc->m_to = transform(src_arc->m_to);
+            arc->m_center = transform(src_arc->m_center);
+        }
+    }
+    else if (auto *circle = dynamic_cast<EntityCircle2D *>(&dst)) {
+        if (const auto *src_circle = dynamic_cast<const EntityCircle2D *>(&src)) {
+            circle->m_center = transform(src_circle->m_center);
+            circle->m_radius = std::max(1e-9, src_circle->m_radius * uniform_scale);
+        }
+    }
+    else if (auto *bezier = dynamic_cast<EntityBezier2D *>(&dst)) {
+        if (const auto *src_bezier = dynamic_cast<const EntityBezier2D *>(&src)) {
+            bezier->m_p1 = transform(src_bezier->m_p1);
+            bezier->m_p2 = transform(src_bezier->m_p2);
+            bezier->m_c1 = transform(src_bezier->m_c1);
+            bezier->m_c2 = transform(src_bezier->m_c2);
+        }
+    }
+    else if (auto *point = dynamic_cast<EntityPoint2D *>(&dst)) {
+        if (const auto *src_point = dynamic_cast<const EntityPoint2D *>(&src))
+            point->m_p = transform(src_point->m_p);
+    }
+}
+
 void Editor::init_actions()
 {
     connect_action(ActionID::SAVE_ALL, [this](auto &a) {
@@ -63,6 +105,10 @@ void Editor::init_actions()
     });
     connect_action(ActionID::SAVE, [this](auto &a) {
 #ifdef DUNE_SKETCHER_ONLY
+        if (m_sketcher_project_path.has_value()) {
+            save_project_to(*m_sketcher_project_path);
+            return;
+        }
         const auto group_uu = m_core.get_current_group();
         if (auto group_path = get_group_export_path(group_uu)) {
             auto path = *group_path;
@@ -81,7 +127,7 @@ void Editor::init_actions()
             auto &group = m_core.get_current_document().get_group(group_uu);
             group.m_name = path_to_string(path.filename());
             set_group_export_path(group_uu, path);
-            m_core.set_current_document_path(path);
+            refresh_sketcher_document_path();
             m_core.clear_needs_save();
             m_win.get_app().add_recent_item(path);
             save_workspace_view(m_core.get_current_idocument_info().get_uuid());
@@ -131,7 +177,12 @@ void Editor::init_actions()
         update_title();
         update_workspace_view_names();
 #ifdef DUNE_SKETCHER_ONLY
-        m_workspace_browser->set_sketcher_folder_mode({});
+        m_group_export_paths.clear();
+        m_sketcher_folder_paths.clear();
+        m_sketcher_opening_folder_group.reset();
+        m_sketcher_project_path.reset();
+        m_sketcher_opening_project = false;
+        sync_sketcher_folder_groups();
         activate_selection_mode();
 #endif
     });
@@ -1001,27 +1052,50 @@ void Editor::on_explode_cluster(const ActionConnection &conn)
     auto enp = point_from_selection(doc, sel, EntityType::CLUSTER);
     if (!enp)
         return;
+    CanvasUpdater canvas_updater{*this};
     auto &cluster = doc.get_entity<EntityCluster>(enp->entity);
-    auto &group = doc.insert_group<GroupExplodedCluster>(UUID::random(), cluster.m_group);
-    group.m_active_wrkpl = cluster.m_wrkpl;
-    cluster.m_exploded_group = group.m_uuid;
-    group.m_cluster = cluster.m_uuid;
-    UUID content_wrkpl;
-    for (const auto &[uu, en] : cluster.m_content->m_entities) {
-        if (!content_wrkpl)
-            content_wrkpl = dynamic_cast<const IEntityInWorkplane &>(*en).get_workplane();
-        auto en_cloned = en->clone();
-        en_cloned->m_group = group.m_uuid;
-        dynamic_cast<IEntityInWorkplaneSet &>(*en_cloned).set_workplane(cluster.m_wrkpl);
-        doc.m_entities.emplace(uu, std::move(en_cloned));
+    const auto clone_result = cluster.m_content->clone_for_new_workplane(cluster.m_wrkpl);
+    const double uniform_scale = std::max(1e-9, (std::abs(cluster.m_scale_x) + std::abs(cluster.m_scale_y)) * 0.5);
+    const bool preserve_constraints = std::abs(cluster.m_scale_x - 1.0) < 1e-9 && std::abs(cluster.m_scale_y - 1.0) < 1e-9;
+    const auto transform = [&cluster](const glm::dvec2 &p) { return cluster.transform(p); };
+
+    std::map<UUID, UUID> inverse_entity_xlat;
+    for (const auto &[old_uu, new_uu] : clone_result.entity_xlat)
+        inverse_entity_xlat.emplace(new_uu, old_uu);
+
+    std::set<SelectableRef> new_selection;
+    for (auto &[new_uu, en_cloned] : clone_result.content->m_entities) {
+        en_cloned->m_group = cluster.m_group;
+        en_cloned->m_layer = cluster.m_layer;
+        en_cloned->m_move_instead.clear();
+        if (inverse_entity_xlat.contains(new_uu) && cluster.m_content->m_entities.contains(inverse_entity_xlat.at(new_uu))) {
+            transform_cluster_content_entity(*en_cloned, *cluster.m_content->m_entities.at(inverse_entity_xlat.at(new_uu)),
+                                             transform, uniform_scale);
+        }
+        new_selection.emplace(SelectableRef::Type::ENTITY, new_uu, 0);
+        doc.m_entities.emplace(new_uu, std::move(en_cloned));
     }
-    for (const auto &[uu, co] : cluster.m_content->m_constraints) {
-        auto co_cloned = co->clone();
-        co_cloned->m_group = group.m_uuid;
-        co_cloned->replace_entity(content_wrkpl, cluster.m_wrkpl);
-        doc.m_constraints.emplace(uu, std::move(co_cloned));
+
+    if (preserve_constraints) {
+        for (auto &[uu, co_cloned] : clone_result.content->m_constraints) {
+            co_cloned->m_group = cluster.m_group;
+            doc.m_constraints.emplace(uu, std::move(co_cloned));
+        }
     }
-    finish_add_group(&group);
+
+    ItemsToDelete items_to_delete;
+    items_to_delete.entities.insert(cluster.m_uuid);
+    auto extra_items = doc.get_additional_items_to_delete(items_to_delete);
+    items_to_delete.append(extra_items);
+    doc.delete_items(items_to_delete);
+
+    get_canvas().set_selection(new_selection, false);
+    m_core.set_needs_save();
+    m_core.rebuild("convert cluster to geometry");
+    update_action_sensitivity();
+    rebuild_layers_popover();
+    if (m_workspace_browser)
+        m_workspace_browser->show_toast("Cluster converted to geometry in the current sketch");
 }
 
 void Editor::on_unexplode_cluster(const ActionConnection &conn)

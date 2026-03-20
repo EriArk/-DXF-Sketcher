@@ -23,6 +23,32 @@ using json = nlohmann::json;
 namespace {
 constexpr int sketch_sidebar_width = 252;
 
+std::filesystem::path normalize_sidebar_path(const std::filesystem::path &path)
+{
+    try {
+        return std::filesystem::absolute(path).lexically_normal();
+    }
+    catch (...) {
+        return path.lexically_normal();
+    }
+}
+
+std::string trim_copy(const std::string &text)
+{
+    const auto first = text.find_first_not_of(" \t\r\n");
+    if (first == std::string::npos)
+        return "";
+    const auto last = text.find_last_not_of(" \t\r\n");
+    return text.substr(first, last - first + 1);
+}
+
+std::filesystem::path build_renamed_file_path(const std::filesystem::path &old_path, const std::string &requested_name)
+{
+    auto new_filename = path_from_string(requested_name).filename();
+    new_filename.replace_extension(old_path.extension());
+    return normalize_sidebar_path(old_path.parent_path() / new_filename);
+}
+
 bool can_popup_from_widget(Gtk::Widget *widget)
 {
     if (!widget)
@@ -87,6 +113,8 @@ void Editor::init_workspace_browser()
             sigc::mem_fun(*this, &Editor::on_workspace_browser_group_selected));
     m_workspace_browser->signal_add_group().connect(sigc::mem_fun(*this, &Editor::on_add_group));
     m_workspace_browser->signal_open_folder().connect(sigc::mem_fun(*this, &Editor::on_open_folder));
+    m_workspace_browser->signal_open_project().connect(sigc::mem_fun(*this, &Editor::on_open_project));
+    m_workspace_browser->signal_save_project().connect(sigc::mem_fun(*this, &Editor::on_save_project));
     m_workspace_browser->signal_delete_current_group().connect(sigc::mem_fun(*this, &Editor::on_delete_current_group));
     m_workspace_browser->signal_move_group().connect(sigc::mem_fun(*this, &Editor::on_move_group));
     m_workspace_browser->signal_document_checked().connect(
@@ -100,10 +128,15 @@ void Editor::init_workspace_browser()
     m_workspace_browser->signale_active_link().connect(
             sigc::mem_fun(*this, &Editor::on_workspace_browser_activate_link));
     m_workspace_browser->signal_rename_body().connect(sigc::mem_fun(*this, &Editor::on_workspace_browser_rename_body));
+    m_workspace_browser->signal_rename_group().connect(sigc::mem_fun(*this, &Editor::on_workspace_browser_rename_group));
     m_workspace_browser->signal_reset_body_color().connect(
             sigc::mem_fun(*this, &Editor::on_workspace_browser_reset_body_color));
+    m_workspace_browser->signal_reset_group_color().connect(
+            sigc::mem_fun(*this, &Editor::on_workspace_browser_reset_group_color));
     m_workspace_browser->signal_set_body_color().connect(
             sigc::mem_fun(*this, &Editor::on_workspace_browser_set_body_color));
+    m_workspace_browser->signal_set_group_color().connect(
+            sigc::mem_fun(*this, &Editor::on_workspace_browser_set_group_color));
     m_workspace_browser->signal_body_expanded().connect([this](const UUID &body_uu, bool expanded) {
         if (m_core.get_current_document()
                             .get_group(m_core.get_current_group())
@@ -114,6 +147,7 @@ void Editor::init_workspace_browser()
             return false;
         }
         get_current_document_view().m_body_views[body_uu].m_expanded = expanded;
+        mark_sketcher_project_modified();
         return true;
     });
 
@@ -506,6 +540,7 @@ void Editor::on_workspace_browser_document_checked(const UUID &uu_doc, bool chec
     get_current_document_views()[uu_doc].m_document_is_visible = checked;
     m_workspace_browser->update_current_group(get_current_document_views());
     update_workspace_view_names();
+    mark_sketcher_project_modified();
 }
 
 void Editor::on_workspace_browser_group_checked(const UUID &uu_doc, const UUID &uu_group, bool checked)
@@ -513,6 +548,7 @@ void Editor::on_workspace_browser_group_checked(const UUID &uu_doc, const UUID &
     CanvasUpdater canvas_updater{*this};
     get_current_document_views()[uu_doc].m_group_views[uu_group].m_visible = checked;
     m_workspace_browser->update_current_group(get_current_document_views());
+    mark_sketcher_project_modified();
 }
 
 void Editor::on_workspace_browser_body_checked(const UUID &uu_doc, const UUID &uu_group, bool checked)
@@ -520,6 +556,7 @@ void Editor::on_workspace_browser_body_checked(const UUID &uu_doc, const UUID &u
     CanvasUpdater canvas_updater{*this};
     get_current_document_views()[uu_doc].m_body_views[uu_group].m_visible = checked;
     m_workspace_browser->update_current_group(get_current_document_views());
+    mark_sketcher_project_modified();
 }
 
 void Editor::on_workspace_browser_body_solid_model_checked(const UUID &uu_doc, const UUID &uu_group, bool checked)
@@ -527,6 +564,7 @@ void Editor::on_workspace_browser_body_solid_model_checked(const UUID &uu_doc, c
     CanvasUpdater canvas_updater{*this};
     get_current_document_views()[uu_doc].m_body_views[uu_group].m_solid_model_visible = checked;
     m_workspace_browser->update_current_group(get_current_document_views());
+    mark_sketcher_project_modified();
 }
 
 void Editor::on_workspace_browser_activate_link(const std::string &link)
@@ -548,7 +586,69 @@ void Editor::on_workspace_browser_activate_link(const std::string &link)
 void Editor::on_workspace_browser_rename_body(const UUID &uu_doc, const UUID &uu_group)
 {
     auto &doc = m_core.get_idocument_info(uu_doc).get_document();
-    auto &body = doc.get_group(uu_group).m_body.value();
+    auto &group = doc.get_group(uu_group);
+#ifdef DUNE_SKETCHER_ONLY
+    if (m_sketcher_folder_paths.contains(uu_group) && group.get_type() == Group::Type::REFERENCE) {
+        const auto current_folder = normalize_sidebar_path(m_sketcher_folder_paths.at(uu_group));
+        auto win = new RenameWindow("Rename folder");
+        win->set_text(path_to_string(current_folder.filename()));
+        win->set_transient_for(m_win);
+        win->set_modal(true);
+        win->present();
+        win->signal_changed().connect([this, win, uu_doc, uu_group, current_folder] {
+            const auto txt = trim_copy(win->get_text());
+            if (txt.empty()) {
+                m_workspace_browser->show_toast("Folder name can't be empty");
+                return;
+            }
+
+            const auto new_folder = normalize_sidebar_path(current_folder.parent_path() / path_from_string(txt));
+            if (new_folder == current_folder)
+                return;
+
+            std::error_code ec;
+            if (std::filesystem::exists(new_folder, ec)) {
+                m_workspace_browser->show_toast("A folder with that name already exists");
+                return;
+            }
+
+            std::filesystem::rename(current_folder, new_folder, ec);
+            if (ec) {
+                m_workspace_browser->show_toast("Couldn't rename folder");
+                return;
+            }
+
+            m_sketcher_folder_paths[uu_group] = new_folder;
+            auto &doc = m_core.get_idocument_info(uu_doc).get_document();
+            auto &folder_group = doc.get_group(uu_group);
+            if (folder_group.m_body.has_value())
+                folder_group.m_body->m_name = path_to_string(new_folder.filename());
+            for (auto &[group_uuid, path] : m_group_export_paths) {
+                if (normalize_sidebar_path(path).parent_path() == current_folder)
+                    path = normalize_sidebar_path(new_folder / path.filename());
+            }
+
+            const auto current_path = m_core.get_current_idocument_info().get_path();
+            if (!current_path.empty() && normalize_sidebar_path(current_path).parent_path() == current_folder) {
+                const auto new_current_path = normalize_sidebar_path(new_folder / current_path.filename());
+                m_core.set_current_document_path(new_current_path);
+                m_win.get_app().add_recent_item(new_current_path);
+            }
+
+            m_win.get_app().add_recent_folder(new_folder);
+            refresh_sketcher_document_path();
+            mark_sketcher_project_modified();
+            save_workspace_view(uu_doc);
+            m_workspace_browser->update_documents(get_current_document_views());
+            update_workspace_view_names();
+            update_title();
+            canvas_update_keep_selection();
+        });
+        return;
+    }
+#endif
+
+    auto &body = group.m_body.value();
 
     auto win = new RenameWindow("Rename body");
     win->set_text(body.m_name);
@@ -565,6 +665,74 @@ void Editor::on_workspace_browser_rename_body(const UUID &uu_doc, const UUID &uu
     });
 }
 
+void Editor::on_workspace_browser_rename_group(const UUID &uu_doc, const UUID &uu_group)
+{
+    auto &doc = m_core.get_idocument_info(uu_doc).get_document();
+    auto &group = doc.get_group(uu_group);
+    const auto export_path = get_group_export_path(uu_group);
+
+    auto win = new RenameWindow(export_path.has_value() ? "Rename file" : "Rename sketch");
+    win->set_text(export_path.has_value() ? path_to_string(export_path->filename()) : group.m_name);
+    win->set_transient_for(m_win);
+    win->set_modal(true);
+    win->present();
+    win->signal_changed().connect([this, win, uu_doc, uu_group, export_path, &group] {
+        const auto txt = trim_copy(win->get_text());
+        if (txt.empty()) {
+            m_workspace_browser->show_toast("Name can't be empty");
+            return;
+        }
+
+        if (!export_path.has_value()) {
+            group.m_name = txt;
+            mark_sketcher_project_modified();
+            m_workspace_browser->update_documents(get_current_document_views());
+            canvas_update_keep_selection();
+            return;
+        }
+
+        const auto old_path = normalize_sidebar_path(*export_path);
+        const auto new_path = build_renamed_file_path(old_path, txt);
+        const auto new_label = path_to_string(new_path.filename());
+        if (new_label.empty()) {
+            m_workspace_browser->show_toast("Name can't be empty");
+            return;
+        }
+
+        if (new_path != old_path) {
+            std::error_code ec;
+            if (std::filesystem::exists(new_path, ec)) {
+                m_workspace_browser->show_toast("A file with that name already exists");
+                return;
+            }
+
+            if (std::filesystem::exists(old_path, ec)) {
+                std::filesystem::rename(old_path, new_path, ec);
+                if (ec) {
+                    m_workspace_browser->show_toast("Couldn't rename file");
+                    return;
+                }
+            }
+        }
+
+        group.m_name = new_label;
+        set_group_export_path(uu_group, new_path);
+
+        const auto current_path = m_core.get_current_idocument_info().get_path();
+        if (!current_path.empty() && normalize_sidebar_path(current_path) == old_path)
+            m_core.set_current_document_path(new_path);
+
+        m_win.get_app().add_recent_item(new_path);
+        refresh_sketcher_document_path();
+        mark_sketcher_project_modified();
+        save_workspace_view(uu_doc);
+        m_workspace_browser->update_documents(get_current_document_views());
+        update_workspace_view_names();
+        update_title();
+        canvas_update_keep_selection();
+    });
+}
+
 void Editor::on_workspace_browser_set_body_color(const UUID &uu_doc, const UUID &uu_group)
 {
 
@@ -572,7 +740,34 @@ void Editor::on_workspace_browser_set_body_color(const UUID &uu_doc, const UUID 
     dia->set_with_alpha(false);
     Color initial{.5, .5, .5};
     auto &doc = m_core.get_idocument_info(uu_doc).get_document();
-    auto &body = doc.get_group(uu_group).m_body.value();
+    auto &group = doc.get_group(uu_group);
+#ifdef DUNE_SKETCHER_ONLY
+    if (m_sketcher_folder_paths.contains(uu_group) && group.get_type() == Group::Type::REFERENCE) {
+        auto &doc_view = get_current_document_views().at(uu_doc);
+        if (auto it = doc_view.m_body_views.find(uu_group); it != doc_view.m_body_views.end() && it->second.m_color)
+            initial = *it->second.m_color;
+
+        dia->choose_rgba(m_win, rgba_from_color(initial),
+                         [this, dia, uu_doc, uu_group](Glib::RefPtr<Gio::AsyncResult> &result) {
+                             try {
+                                 const auto rgba = dia->choose_rgba_finish(result);
+                                 const auto color = color_from_rgba(rgba);
+                                 for (auto &[wsv_uu, wsv] : m_workspace_views) {
+                                     if (auto it = wsv.m_documents.find(uu_doc); it != wsv.m_documents.end())
+                                         it->second.m_body_views[uu_group].m_color = color;
+                                 }
+                                 mark_sketcher_project_modified();
+                                 save_workspace_view(uu_doc);
+                                 m_workspace_browser->update_documents(get_current_document_views());
+                                 canvas_update_keep_selection();
+                             }
+                             catch (const Gtk::DialogError &err) {
+                             }
+                         });
+        return;
+    }
+#endif
+    auto &body = group.m_body.value();
 
     if (body.m_color)
         initial = body.m_color.value();
@@ -593,12 +788,67 @@ void Editor::on_workspace_browser_set_body_color(const UUID &uu_doc, const UUID 
                      });
 }
 
+void Editor::on_workspace_browser_set_group_color(const UUID &uu_doc, const UUID &uu_group)
+{
+    auto dia = Gtk::ColorDialog::create();
+    dia->set_with_alpha(false);
+    Color initial{.5, .5, .5};
+    auto &doc_view = get_current_document_views().at(uu_doc);
+    if (auto it = doc_view.m_group_views.find(uu_group); it != doc_view.m_group_views.end() && it->second.m_color)
+        initial = *it->second.m_color;
+
+    dia->choose_rgba(m_win, rgba_from_color(initial),
+                     [this, dia, uu_doc, uu_group](Glib::RefPtr<Gio::AsyncResult> &result) {
+                         try {
+                             const auto rgba = dia->choose_rgba_finish(result);
+                             const auto color = color_from_rgba(rgba);
+                             for (auto &[wsv_uu, wsv] : m_workspace_views) {
+                                 if (auto it = wsv.m_documents.find(uu_doc); it != wsv.m_documents.end())
+                                     it->second.m_group_views[uu_group].m_color = color;
+                             }
+                             mark_sketcher_project_modified();
+                             save_workspace_view(uu_doc);
+                             m_workspace_browser->update_documents(get_current_document_views());
+                             canvas_update_keep_selection();
+                         }
+                         catch (const Gtk::DialogError &err) {
+                         }
+                     });
+}
+
 void Editor::on_workspace_browser_reset_body_color(const UUID &uu_doc, const UUID &uu_group)
 {
+#ifdef DUNE_SKETCHER_ONLY
     auto &doc = m_core.get_idocument_info(uu_doc).get_document();
+    auto &group = doc.get_group(uu_group);
+    if (m_sketcher_folder_paths.contains(uu_group) && group.get_type() == Group::Type::REFERENCE) {
+        for (auto &[wsv_uu, wsv] : m_workspace_views) {
+            if (auto it = wsv.m_documents.find(uu_doc); it != wsv.m_documents.end())
+                it->second.m_body_views[uu_group].m_color.reset();
+        }
+        mark_sketcher_project_modified();
+        save_workspace_view(uu_doc);
+        m_workspace_browser->update_documents(get_current_document_views());
+        canvas_update_keep_selection();
+        return;
+    }
+#endif
+
     doc.get_group(uu_group).m_body.value().m_color.reset();
     doc.set_group_update_solid_model_pending(uu_group);
     m_core.rebuild("reset body color");
+    canvas_update_keep_selection();
+}
+
+void Editor::on_workspace_browser_reset_group_color(const UUID &uu_doc, const UUID &uu_group)
+{
+    for (auto &[wsv_uu, wsv] : m_workspace_views) {
+        if (auto it = wsv.m_documents.find(uu_doc); it != wsv.m_documents.end())
+            it->second.m_group_views[uu_group].m_color.reset();
+    }
+    mark_sketcher_project_modified();
+    save_workspace_view(uu_doc);
+    m_workspace_browser->update_documents(get_current_document_views());
     canvas_update_keep_selection();
 }
 

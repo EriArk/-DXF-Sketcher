@@ -33,6 +33,11 @@
   </provides>
 
   <releases>
+    <release version="1.5.1" date="2026-03-20">
+      <description>
+        <p>Release focused on workflow polish: project save/open support, multi-folder sketch browsing, clearer onboarding hints, improved light themes, and Linux release packaging in DEB, RPM, and AppImage formats.</p>
+      </description>
+    </release>
     <release version="1.5.0" date="2026-03-10">
       <description>
         <p>Prerelease with self-contained Boxes integration, the new Edge Features workflow, raster tracing improvements, and release packaging updates.</p>

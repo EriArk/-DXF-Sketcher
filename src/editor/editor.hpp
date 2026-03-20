@@ -123,6 +123,14 @@ private:
 
     std::optional<std::filesystem::path> get_group_export_path(const UUID &group) const;
     void set_group_export_path(const UUID &group, const std::filesystem::path &path);
+    void sync_sketcher_folder_groups();
+    void refresh_sketcher_document_path();
+    void mark_sketcher_project_modified();
+    void on_open_project();
+    void on_save_project();
+    void open_project(const std::filesystem::path &path);
+    bool open_project_now(const std::filesystem::path &path);
+    bool save_project_to(const std::filesystem::path &project_file);
 
     void init_workspace_browser();
     void init_properties_notebook();
@@ -242,8 +250,11 @@ private:
     void on_view_set(const ActionConnection &conn);
 
     void on_workspace_browser_rename_body(const UUID &uu_doc, const UUID &uu_group);
+    void on_workspace_browser_rename_group(const UUID &uu_doc, const UUID &uu_group);
     void on_workspace_browser_set_body_color(const UUID &uu_doc, const UUID &uu_group);
+    void on_workspace_browser_set_group_color(const UUID &uu_doc, const UUID &uu_group);
     void on_workspace_browser_reset_body_color(const UUID &uu_doc, const UUID &uu_group);
+    void on_workspace_browser_reset_group_color(const UUID &uu_doc, const UUID &uu_group);
 
     void on_export_solid_model(const ActionConnection &conn);
     void on_export_paths(const ActionConnection &conn);
@@ -356,6 +367,9 @@ private:
     void handle_click(unsigned int button, unsigned int n);
 
     void apply_preferences();
+    void set_tool_hint(Gtk::Widget &widget, const std::string &text);
+    void refresh_tool_hints();
+    std::string build_action_bar_hint(ActionToolID action) const;
 
     Gtk::Button *create_action_button(ActionToolID action);
     void attach_action_button(Gtk::Button &button, ActionToolID action);
@@ -363,6 +377,11 @@ private:
 
     Gtk::Button &create_action_bar_button(ActionToolID action);
     std::map<ActionToolID, Gtk::Button *> m_action_bar_buttons;
+    std::map<Gtk::Widget *, std::string> m_tool_hint_texts;
+    std::map<Gtk::Widget *, Gtk::Popover *> m_tool_hint_popovers;
+    std::map<Gtk::Widget *, Gtk::Label *> m_tool_hint_labels;
+    Gtk::Switch *m_tool_hints_switch = nullptr;
+    bool m_tool_hints_enabled = true;
     Gtk::Button *m_selection_mode_button = nullptr;
     Gtk::Popover *m_selection_mode_popover = nullptr;
     Gtk::Button *m_layers_mode_button = nullptr;
@@ -768,7 +787,10 @@ private:
     UUID m_update_groups_after;
     std::map<UUID, std::filesystem::path> m_group_export_paths;
     bool m_sketcher_opening_folder_batch = false;
-    std::optional<std::filesystem::path> m_sketcher_folder_path;
+    std::map<UUID, std::filesystem::path> m_sketcher_folder_paths;
+    std::optional<UUID> m_sketcher_opening_folder_group;
+    std::optional<std::filesystem::path> m_sketcher_project_path;
+    bool m_sketcher_opening_project = false;
     bool m_activate_selection_after_import_picture = false;
 };
 } // namespace dune3d

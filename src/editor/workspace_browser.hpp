@@ -4,6 +4,7 @@
 #include "document/group/group.hpp"
 #include "document/document.hpp"
 #include <optional>
+#include <set>
 
 namespace dune3d {
 
@@ -16,7 +17,7 @@ class WorkspaceBrowser : public Gtk::Box {
 public:
     WorkspaceBrowser(Core &core);
     void set_sketcher_open_controls(Gtk::Button &open_button, Gtk::MenuButton &open_menu_button);
-    void set_sketcher_folder_mode(const std::optional<std::string> &folder_name);
+    void set_sketcher_folder_groups(const std::set<UUID> &folder_groups);
 
     void update_documents(const std::map<UUID, DocumentView> &doc_views);
     void update_current_group(const std::map<UUID, DocumentView> &doc_views);
@@ -34,14 +35,29 @@ public:
         return m_signal_rename_body;
     }
 
+    type_signal_group_selected signal_rename_group()
+    {
+        return m_signal_rename_group;
+    }
+
     type_signal_group_selected signal_set_body_color()
     {
         return m_signal_set_body_color;
     }
 
+    type_signal_group_selected signal_set_group_color()
+    {
+        return m_signal_set_group_color;
+    }
+
     type_signal_group_selected signal_reset_body_color()
     {
         return m_signal_reset_body_color;
+    }
+
+    type_signal_group_selected signal_reset_group_color()
+    {
+        return m_signal_reset_group_color;
     }
 
     using type_signal_group_checked = sigc::signal<void(UUID, UUID, bool)>;
@@ -92,6 +108,17 @@ public:
         return m_signal_open_folder;
     }
 
+    using type_signal_simple_action = sigc::signal<void()>;
+    type_signal_simple_action signal_open_project()
+    {
+        return m_signal_open_project;
+    }
+
+    type_signal_simple_action signal_save_project()
+    {
+        return m_signal_save_project;
+    }
+
     using type_signal_close_document = sigc::signal<void(UUID)>;
     type_signal_close_document signal_close_document()
     {
@@ -139,8 +166,10 @@ private:
     Gtk::Button *m_sketcher_add_button = nullptr;
     Gtk::Box *m_sketcher_add_flyout = nullptr;
     Gtk::Button *m_sketcher_open_folder_button = nullptr;
+    Gtk::Button *m_sketcher_open_project_button = nullptr;
+    Gtk::Button *m_sketcher_save_project_button = nullptr;
     Gtk::Box *m_sketcher_actions_box = nullptr;
-    std::optional<std::string> m_sketcher_folder_name;
+    std::set<UUID> m_sketcher_folder_groups;
 
     Core &m_core;
 
@@ -154,12 +183,17 @@ private:
     type_signal_add_group m_signal_add_group;
     type_signal_move_group m_signal_move_group;
     type_signal_open_folder m_signal_open_folder;
+    type_signal_simple_action m_signal_open_project;
+    type_signal_simple_action m_signal_save_project;
     type_signal_close_document m_signal_close_document;
     type_signal_activate_link m_signal_activate_link;
 
     type_signal_group_selected m_signal_rename_body;
+    type_signal_group_selected m_signal_rename_group;
     type_signal_group_selected m_signal_set_body_color;
+    type_signal_group_selected m_signal_set_group_color;
     type_signal_group_selected m_signal_reset_body_color;
+    type_signal_group_selected m_signal_reset_group_color;
 
     type_signal_item_expanded m_signal_body_expanded;
 
@@ -182,5 +216,10 @@ private:
     UUID m_body_menu_document;
     UUID m_body_menu_body;
     Glib::RefPtr<Gio::SimpleAction> m_reset_body_color_action;
+    Gtk::PopoverMenu *m_group_popover = nullptr;
+    Glib::RefPtr<Gio::Menu> m_group_menu = nullptr;
+    UUID m_group_menu_document;
+    UUID m_group_menu_group;
+    Glib::RefPtr<Gio::SimpleAction> m_reset_group_color_action;
 };
 } // namespace dune3d

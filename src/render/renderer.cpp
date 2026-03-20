@@ -284,7 +284,7 @@ void Renderer::render(const Entity &entity)
     m_ca.set_vertex_inactive(entity.m_group != m_current_group->m_uuid);
     m_ca.set_selection_invisible(entity.m_selection_invisible);
     m_ca.set_vertex_construction(entity.m_construction);
-    m_ca.set_no_points(!m_show_entity_points);
+    m_ca.set_no_points(!m_show_entity_points || entity.m_group != m_current_group->m_uuid);
     try {
         entity.accept(*this);
     }

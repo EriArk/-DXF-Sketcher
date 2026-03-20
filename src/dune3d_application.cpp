@@ -319,6 +319,7 @@ void Dune3DApplication::on_startup()
 
 void Dune3DApplication::on_shutdown()
 {
+    m_preferences.save();
     m_user_config.save(get_user_config_filename());
 #ifdef DUNE_SKETCHER_ONLY
     try {

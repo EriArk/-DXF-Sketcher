@@ -1,9 +1,11 @@
 #pragma once
 #include "util/uuid.hpp"
+#include "util/color.hpp"
 #include "idocument_view.hpp"
 #include "entity_view.hpp"
 #include "nlohmann/json_fwd.hpp"
 #include <map>
+#include <optional>
 
 namespace dune3d {
 
@@ -22,6 +24,7 @@ public:
         GroupView();
         GroupView(const json &j);
         bool m_visible = true;
+        std::optional<Color> m_color;
         json serialize() const;
     };
     std::map<UUID, GroupView> m_group_views;
@@ -33,6 +36,7 @@ public:
         bool m_visible = true;
         bool m_solid_model_visible = true;
         bool m_expanded = true;
+        std::optional<Color> m_color;
         json serialize() const;
     };
     std::map<UUID, BodyView> m_body_views;

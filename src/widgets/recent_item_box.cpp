@@ -7,6 +7,7 @@ RecentItemBox::RecentItemBox(const std::string &aname, const std::filesystem::pa
                              bool is_folder)
     : Gtk::Box(Gtk::Orientation::VERTICAL, 6), m_path(pa), m_is_folder(is_folder), m_time(ti), m_name(aname)
 {
+    add_css_class("recent-item-box");
     set_margin(12);
     auto tbox = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 12);
     {

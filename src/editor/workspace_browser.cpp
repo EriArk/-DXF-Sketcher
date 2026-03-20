@@ -89,6 +89,8 @@ public:
     Glib::Property<GroupStatusMessage::Status> m_status;
     Glib::Property<Glib::ustring> m_status_message;
     Glib::Property<bool> m_source_group;
+    Glib::Property<bool> m_has_color;
+    Glib::Property<Gdk::RGBA> m_color;
     UUID m_uuid;
     UUID m_doc;
 
@@ -108,7 +110,8 @@ private:
         : Glib::ObjectBase("GroupItem"), m_name(*this, "name"), m_active(*this, "active", false),
           m_check_active(*this, "check_active", false), m_check_sensitive(*this, "check_sensitive", true),
           m_dof(*this, "dof"), m_status(*this, "status", GroupStatusMessage::Status::NONE),
-          m_status_message(*this, "status_message"), m_source_group(*this, "source_group")
+          m_status_message(*this, "status_message"), m_source_group(*this, "source_group"),
+          m_has_color(*this, "has_color", false), m_color(*this, "color")
     {
     }
 
@@ -227,23 +230,32 @@ void WorkspaceBrowser::update_documents(const std::map<UUID, DocumentView> &doc_
         auto mi = DocumentItem::create();
         mi->m_uuid = doci->get_uuid();
         mi->m_close_sensitive = doci->can_close();
+        const auto &doc_view = doc_views.at(mi->m_uuid);
         Glib::RefPtr<BodyItem> body_item = BodyItem::create();
         body_item->m_doc = mi->m_uuid;
-        body_item->m_name = m_sketcher_folder_name.value_or("Missing");
+        body_item->m_name = "Folder";
 #ifdef DUNE_SKETCHER_ONLY
-        body_item->m_show_in_sketcher = m_sketcher_folder_name.has_value();
+        body_item->m_show_in_sketcher = false;
 #endif
         for (auto gr : doci->get_document().get_groups_sorted()) {
             if (gr->m_body.has_value()) {
                 body_item = BodyItem::create();
-                body_item->m_name = m_sketcher_folder_name.value_or(gr->m_body->m_name);
+                body_item->m_name = gr->m_body->m_name;
+#ifdef DUNE_SKETCHER_ONLY
+                if (auto it = doc_view.m_body_views.find(gr->m_uuid); it != doc_view.m_body_views.end()
+                    && it->second.m_color.has_value()) {
+                    body_item->m_has_color = true;
+                    body_item->m_color = rgba_from_color(*it->second.m_color);
+                }
+#else
                 body_item->m_has_color = gr->m_body->m_color.has_value();
                 if (gr->m_body->m_color.has_value())
                     body_item->m_color = rgba_from_color(gr->m_body->m_color.value());
+#endif
                 body_item->m_uuid = gr->m_uuid;
                 body_item->m_doc = mi->m_uuid;
 #ifdef DUNE_SKETCHER_ONLY
-                body_item->m_show_in_sketcher = m_sketcher_folder_name.has_value();
+                body_item->m_show_in_sketcher = m_sketcher_folder_groups.contains(gr->m_uuid);
 #endif
                 mi->m_body_store->append(body_item);
             }
@@ -252,6 +264,11 @@ void WorkspaceBrowser::update_documents(const std::map<UUID, DocumentView> &doc_
             gi->m_name = gr->m_name;
             gi->m_uuid = gr->m_uuid;
             gi->m_doc = doci->get_uuid();
+            if (auto it = doc_view.m_group_views.find(gr->m_uuid); it != doc_view.m_group_views.end()
+                && it->second.m_color.has_value()) {
+                gi->m_has_color = true;
+                gi->m_color = rgba_from_color(*it->second.m_color);
+            }
 #ifdef DUNE_SKETCHER_ONLY
             if (gr->get_type() == Group::Type::REFERENCE)
                 continue;
@@ -353,12 +370,28 @@ void WorkspaceBrowser::update_current_group(const std::map<UUID, DocumentView> &
         for (size_t i_body = 0; i_body < it_doc.m_body_store->get_n_items(); i_body++) {
             auto &it_body = *it_doc.m_body_store->get_item(i_body);
             const bool is_current_body = body_uu == it_body.m_uuid && is_current_doc;
+#ifdef DUNE_SKETCHER_ONLY
+            it_body.m_check_sensitive = true;
+            it_body.m_check_active = doc_view.body_is_visible(it_body.m_uuid);
+#else
             it_body.m_check_sensitive = (body_uu != it_body.m_uuid) || !is_current_doc;
 
             if (is_current_body)
                 it_body.m_check_active = true;
             else
                 it_body.m_check_active = doc_view.body_is_visible(it_body.m_uuid);
+#endif
+
+#ifdef DUNE_SKETCHER_ONLY
+            if (auto it = doc_view.m_body_views.find(it_body.m_uuid); it != doc_view.m_body_views.end()
+                && it->second.m_color.has_value()) {
+                it_body.m_has_color = true;
+                it_body.m_color = rgba_from_color(*it->second.m_color);
+            }
+            else {
+                it_body.m_has_color = false;
+            }
+#endif
 
             it_body.m_solid_model_active = doc_view.body_solid_model_is_visible(it_body.m_uuid);
             it_body.m_expanded = doc_view.body_is_expanded(it_body.m_uuid) | is_current_body;
@@ -372,16 +405,14 @@ void WorkspaceBrowser::update_current_group(const std::map<UUID, DocumentView> &
                 it_group.m_dof = gr.m_dof;
                 it_group.m_name = gr.m_name;
                 it_group.m_source_group = source_groups.contains(it_group.m_uuid);
+#ifdef DUNE_SKETCHER_ONLY
+                it_group.m_check_sensitive = true;
+                it_group.m_check_active = doc_view.group_is_visible(it_group.m_uuid);
+#else
                 if (is_current && is_current_doc) {
                     it_group.m_check_active = true;
                     it_group.m_check_sensitive = false;
                 }
-#ifdef DUNE_SKETCHER_ONLY
-                else {
-                    it_group.m_check_sensitive = true;
-                    it_group.m_check_active = doc_view.group_is_visible(it_group.m_uuid);
-                }
-#else
                 else if (after_active) {
                     it_group.m_check_active = false;
                     it_group.m_check_sensitive = false;
@@ -401,6 +432,14 @@ void WorkspaceBrowser::update_current_group(const std::map<UUID, DocumentView> &
                         txt += msg.message;
                     }
                     it_group.m_status_message = txt;
+                }
+                if (auto it = doc_view.m_group_views.find(it_group.m_uuid); it != doc_view.m_group_views.end()
+                    && it->second.m_color.has_value()) {
+                    it_group.m_has_color = true;
+                    it_group.m_color = rgba_from_color(*it->second.m_color);
+                }
+                else {
+                    it_group.m_has_color = false;
                 }
 #ifndef DUNE_SKETCHER_ONLY
                 if (is_current)
@@ -445,12 +484,12 @@ void WorkspaceBrowser::update_needs_save()
     }
 }
 
-void WorkspaceBrowser::set_sketcher_folder_mode(const std::optional<std::string> &folder_name)
+void WorkspaceBrowser::set_sketcher_folder_groups(const std::set<UUID> &folder_groups)
 {
 #ifdef DUNE_SKETCHER_ONLY
-    m_sketcher_folder_name = folder_name;
+    m_sketcher_folder_groups = folder_groups;
 #else
-    (void)folder_name;
+    (void)folder_groups;
 #endif
 }
 
@@ -597,11 +636,32 @@ public:
         m_dof_label->add_css_class("dim-label");
         m_dof_label->set_width_chars(2);
 
+        m_color_indicator = Gtk::make_managed<Gtk::DrawingArea>();
+        m_color_indicator->set_content_width(10);
+        m_color_indicator->set_content_height(10);
+        m_color_indicator->set_valign(Gtk::Align::CENTER);
+        m_color_indicator->set_visible(false);
+        m_color_indicator->set_draw_func([this](const Cairo::RefPtr<Cairo::Context> &cr, int w, int h) {
+            if (!m_row_color.has_value())
+                return;
+            const double radius = std::max(2.0, (std::min(w, h) / 2.0) - 1.0);
+            cr->arc(w / 2.0, h / 2.0, radius, 0, 2.0 * M_PI);
+            Gdk::Cairo::set_source_rgba(cr, *m_row_color);
+            cr->fill_preserve();
+
+            auto border = get_color();
+            border.set_alpha(0.35);
+            Gdk::Cairo::set_source_rgba(cr, border);
+            cr->set_line_width(1.0);
+            cr->stroke();
+        });
+
         auto box = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 5);
         auto box2 = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 5);
         box2->set_hexpand(true);
         box->append(*m_checkbutton);
         box->append(*m_solid_toggle);
+        box2->append(*m_color_indicator);
         box2->append(*m_label);
         box2->append(*m_source_group_image);
         box->append(*box2);
@@ -615,7 +675,7 @@ public:
         auto controller = Gtk::GestureClick::create();
         controller->set_button(3);
         controller->signal_pressed().connect([this](int n_press, double x, double y) {
-            if (!m_body)
+            if (!m_body && !m_group)
                 return;
             const graphene_point_t pt_in{(float)x, (float)y};
             graphene_point_t pt_out;
@@ -624,6 +684,15 @@ public:
             Gdk::Rectangle rect;
             rect.set_x(pt_out.x);
             rect.set_y(pt_out.y);
+            if (m_group) {
+                m_browser.m_group_menu_document = m_group->m_doc;
+                m_browser.m_group_menu_group = m_group->m_uuid;
+                m_browser.m_reset_group_color_action->set_enabled(m_group->m_has_color);
+                m_browser.m_group_popover->set_pointing_to(rect);
+                m_browser.m_group_popover->popup();
+                return;
+            }
+
             m_browser.m_body_menu_document = m_body->m_doc;
             m_browser.m_body_menu_body = m_body->m_uuid;
             m_browser.m_reset_body_color_action->set_enabled(m_body->m_has_color);
@@ -653,6 +722,7 @@ public:
         m_close_button->set_visible(true);
         m_source_group_image->set_visible(false);
         m_label->set_attributes(m_attrs_normal);
+        set_color_indicator({});
         m_bindings.push_back(Glib::Binding::bind_property_value(
                 it.m_check_active.get_proxy(), m_checkbutton->property_active(), Glib::Binding::Flags::SYNC_CREATE));
         m_bindings.push_back(Glib::Binding::bind_property_value(it.m_check_sensitive.get_proxy(),
@@ -692,9 +762,11 @@ public:
         m_body = &it;
 #ifdef DUNE_SKETCHER_ONLY
         const bool is_folder_row = it.m_show_in_sketcher;
-        m_checkbutton->set_visible(!is_folder_row);
+        const bool show_folder_checkbox =
+                is_folder_row && (m_browser.m_sketcher_folder_groups.size() > 1 || !it.m_check_active.get_value());
+        m_checkbutton->set_visible(!is_folder_row || show_folder_checkbox);
         m_checkbutton->set_active(true);
-        m_checkbutton->set_sensitive(!is_folder_row);
+        m_checkbutton->set_sensitive(!is_folder_row || show_folder_checkbox);
         m_solid_toggle->set_visible(false);
 #else
         m_checkbutton->set_active(true);
@@ -725,11 +797,12 @@ public:
             m_solid_toggle->set_body_color(it.m_color.get_value());
         else
             m_solid_toggle->set_body_color({});
+        update_body_color(it);
 
         m_connections.push_back(
-                it.m_color.get_proxy().signal_changed().connect([this, &it] { update_solid_color(it); }));
+                it.m_color.get_proxy().signal_changed().connect([this, &it] { update_body_color(it); }));
         m_connections.push_back(
-                it.m_has_color.get_proxy().signal_changed().connect([this, &it] { update_solid_color(it); }));
+                it.m_has_color.get_proxy().signal_changed().connect([this, &it] { update_body_color(it); }));
 
         const auto body_uu = it.m_uuid;
         m_connections.push_back(get_list_row()->property_expanded().signal_changed().connect([this, body_uu, &it] {
@@ -753,6 +826,7 @@ public:
         m_status_button->set_visible(true);
         m_close_button->set_visible(false);
         m_group = &it;
+        set_group_color(it);
         m_bindings.push_back(Glib::Binding::bind_property_value(it.m_name.get_proxy(), m_label->property_label(),
                                                                 Glib::Binding::Flags::SYNC_CREATE));
         m_bindings.push_back(Glib::Binding::bind_property_value(
@@ -777,6 +851,10 @@ public:
         set_status(it.m_status.get_value());
         m_connections.push_back(
                 it.m_status.get_proxy().signal_changed().connect([this, &it] { set_status(it.m_status.get_value()); }));
+        m_connections.push_back(
+                it.m_color.get_proxy().signal_changed().connect([this, &it] { set_group_color(it); }));
+        m_connections.push_back(
+                it.m_has_color.get_proxy().signal_changed().connect([this, &it] { set_group_color(it); }));
 
         m_browser.unblock_signals();
     }
@@ -805,6 +883,7 @@ private:
     Gtk::CheckButton *m_checkbutton = nullptr;
     SolidModelToggleButton *m_solid_toggle = nullptr;
     Gtk::Label *m_label = nullptr;
+    Gtk::DrawingArea *m_color_indicator = nullptr;
     Gtk::Image *m_source_group_image = nullptr;
     Gtk::Label *m_dof_label = nullptr;
     Gtk::MenuButton *m_status_button = nullptr;
@@ -816,6 +895,7 @@ private:
 
     Pango::AttrList m_attrs_normal;
     Pango::AttrList m_attrs_bold;
+    std::optional<Gdk::RGBA> m_row_color;
 
     void update_label_attrs(GroupItem &it)
     {
@@ -840,13 +920,33 @@ private:
         m_status_button->set_icon_name(icon_name_from_status(st));
     }
 
-    void update_solid_color(const BodyItem &it)
+    void set_color_indicator(const std::optional<Gdk::RGBA> &color)
+    {
+        m_row_color = color;
+        m_color_indicator->set_visible(color.has_value());
+        m_color_indicator->queue_draw();
+    }
+
+    void update_body_color(const BodyItem &it)
     {
         const bool has_color = it.m_has_color.get_value();
         if (has_color)
             m_solid_toggle->set_body_color(it.m_color.get_value());
         else
             m_solid_toggle->set_body_color({});
+        if (has_color)
+            set_color_indicator(it.m_color.get_value());
+        else
+            set_color_indicator({});
+    }
+
+    void set_group_color(const GroupItem &it)
+    {
+        const bool has_color = it.m_has_color.get_value();
+        if (has_color)
+            set_color_indicator(it.m_color.get_value());
+        else
+            set_color_indicator({});
     }
 };
 
@@ -1134,6 +1234,22 @@ WorkspaceBrowser::WorkspaceBrowser(Core &core) : Gtk::Box(Gtk::Orientation::VERT
     m_body_popover->set_menu_model(m_body_menu);
 
     m_body_popover->set_parent(*this);
+
+    m_group_menu = Gio::Menu::create();
+    auto group_actions = Gio::SimpleActionGroup::create();
+    m_reset_group_color_action = group_actions->add_action(
+            "reset_color", [this] { signal_reset_group_color().emit(m_group_menu_document, m_group_menu_group); });
+    group_actions->add_action("rename", [this] { signal_rename_group().emit(m_group_menu_document, m_group_menu_group); });
+    group_actions->add_action(
+            "set_color", [this] { signal_set_group_color().emit(m_group_menu_document, m_group_menu_group); });
+    insert_action_group("group", group_actions);
+    m_group_menu->append("Set color", "group.set_color");
+    m_group_menu->append("Reset color", "group.reset_color");
+    m_group_menu->append("Rename", "group.rename");
+
+    m_group_popover = Gtk::make_managed<Gtk::PopoverMenu>();
+    m_group_popover->set_menu_model(m_group_menu);
+    m_group_popover->set_parent(*this);
 }
 
 void WorkspaceBrowser::set_sketcher_open_controls(Gtk::Button &open_button, Gtk::MenuButton &open_menu_button)
@@ -1171,6 +1287,26 @@ void WorkspaceBrowser::set_sketcher_open_controls(Gtk::Button &open_button, Gtk:
     open_menu_button.set_visible(true);
     if (open_menu_button.get_parent() != m_sketcher_open_box)
         m_sketcher_open_box->append(open_menu_button);
+    if (!m_sketcher_open_project_button) {
+        m_sketcher_open_project_button = Gtk::make_managed<Gtk::Button>();
+        m_sketcher_open_project_button->set_icon_name("document-open-symbolic");
+        m_sketcher_open_project_button->set_tooltip_text("Open project");
+        m_sketcher_open_project_button->set_has_frame(false);
+        m_sketcher_open_project_button->add_css_class("flat");
+        m_sketcher_open_project_button->signal_clicked().connect([this] { m_signal_open_project.emit(); });
+    }
+    if (!m_sketcher_save_project_button) {
+        m_sketcher_save_project_button = Gtk::make_managed<Gtk::Button>();
+        m_sketcher_save_project_button->set_icon_name("document-save-symbolic");
+        m_sketcher_save_project_button->set_tooltip_text("Save project");
+        m_sketcher_save_project_button->set_has_frame(false);
+        m_sketcher_save_project_button->add_css_class("flat");
+        m_sketcher_save_project_button->signal_clicked().connect([this] { m_signal_save_project.emit(); });
+    }
+    if (m_sketcher_open_project_button->get_parent() != m_sketcher_open_box)
+        m_sketcher_open_box->append(*m_sketcher_open_project_button);
+    if (m_sketcher_save_project_button->get_parent() != m_sketcher_open_box)
+        m_sketcher_open_box->append(*m_sketcher_save_project_button);
     if (open_button.get_parent() != m_sketcher_add_flyout)
         m_sketcher_add_flyout->prepend(open_button);
     open_button.signal_clicked().connect([this] {

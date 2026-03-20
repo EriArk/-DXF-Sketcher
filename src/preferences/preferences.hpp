@@ -53,6 +53,7 @@ public:
     enum class TrailingZeros { OFF, ONE_DECIMAL, ON };
     TrailingZeros constraint_trailing_zeros = TrailingZeros::ONE_DECIMAL;
     RadialMenuTrigger radial_menu_trigger = RadialMenuTrigger::SHIFT_RMB;
+    bool tool_hints = true;
 
     void load_from_json(const json &j);
     json serialize() const;

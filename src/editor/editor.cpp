@@ -62,6 +62,7 @@
 #include <array>
 #include <filesystem>
 #include <cmath>
+#include <set>
 #include <iomanip>
 #include <functional>
 #include <sstream>
@@ -86,6 +87,8 @@
 
 namespace dune3d {
 namespace {
+constexpr const char *kSketcherProjectExtension = ".dxsp";
+
 std::filesystem::path normalize_group_path(const std::filesystem::path &path)
 {
     try {
@@ -94,6 +97,57 @@ std::filesystem::path normalize_group_path(const std::filesystem::path &path)
     catch (...) {
         return path.lexically_normal();
     }
+}
+
+bool is_sketcher_project_file(const std::filesystem::path &path)
+{
+    auto ext = path.extension().string();
+    std::transform(ext.begin(), ext.end(), ext.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    return ext == kSketcherProjectExtension;
+}
+
+std::string sanitize_project_component(std::string text)
+{
+    for (char &ch : text) {
+        switch (ch) {
+        case '<':
+        case '>':
+        case ':':
+        case '"':
+        case '/':
+        case '\\':
+        case '|':
+        case '?':
+        case '*':
+            ch = '_';
+            break;
+        default:
+            if (static_cast<unsigned char>(ch) < 32)
+                ch = '_';
+            break;
+        }
+    }
+    const auto first = text.find_first_not_of(" .");
+    if (first == std::string::npos)
+        return "Item";
+    const auto last = text.find_last_not_of(" .");
+    text = text.substr(first, last - first + 1);
+    return text.empty() ? "Item" : text;
+}
+
+std::filesystem::path make_unique_project_path(const std::filesystem::path &base_path,
+                                               std::set<std::filesystem::path> &used_paths)
+{
+    auto candidate = base_path;
+    int suffix = 2;
+    while (used_paths.contains(candidate)) {
+        candidate = base_path.parent_path() / path_from_string(base_path.stem().string() + " " + std::to_string(suffix)
+                                                               + base_path.extension().string());
+        suffix++;
+    }
+    used_paths.insert(candidate);
+    return candidate;
 }
 
 std::string format_line_width_multiplier(double line_width)
@@ -109,6 +163,19 @@ std::string format_line_width_multiplier(double line_width)
     }
     ss << "x";
     return ss.str();
+}
+
+std::string join_tooltip_lines(std::initializer_list<const char *> lines)
+{
+    std::string text;
+    for (const auto *line : lines) {
+        if (!line || !*line)
+            continue;
+        if (!text.empty())
+            text += "\n";
+        text += line;
+    }
+    return text;
 }
 
 constexpr std::array<CanvasPreferences::ThemeVariant, 5> kSketchThemeOrder = {
@@ -3604,6 +3671,7 @@ struct HoverPopoverState {
 };
 
 Gtk::Popover *g_active_hover_popover = nullptr;
+Gtk::Popover *g_active_hint_popover = nullptr;
 
 bool widget_or_descendant_has_focus(Gtk::Widget &widget)
 {
@@ -3710,6 +3778,59 @@ void install_hover_popover(Gtk::Widget &button, Gtk::Popover &popover, std::func
             g_active_hover_popover = nullptr;
         state->pointer_on_button = false;
         state->pointer_on_popover = false;
+        state->close_timeout.disconnect();
+    });
+}
+
+void install_hint_popover(Gtk::Widget &button, Gtk::Popover &popover, std::function<bool()> can_open = {})
+{
+    auto state = std::make_shared<HoverPopoverState>();
+
+    auto maybe_close = [state, &popover] {
+        if (!state->pointer_on_button && popover.get_visible()) {
+            if (g_active_hint_popover == &popover)
+                g_active_hint_popover = nullptr;
+            popover.popdown();
+        }
+    };
+
+    auto schedule_close = [state, maybe_close] {
+        state->close_timeout.disconnect();
+        state->close_timeout = Glib::signal_timeout().connect(
+                [maybe_close] {
+                    maybe_close();
+                    return false;
+                },
+                120);
+    };
+
+    auto button_motion = Gtk::EventControllerMotion::create();
+    button_motion->signal_enter().connect([state, &popover, can_open](double, double) {
+        state->pointer_on_button = true;
+        state->close_timeout.disconnect();
+        if (can_open && !can_open()) {
+            if (popover.get_visible())
+                popover.popdown();
+            if (g_active_hint_popover == &popover)
+                g_active_hint_popover = nullptr;
+            return;
+        }
+        if (g_active_hint_popover && g_active_hint_popover != &popover && g_active_hint_popover->get_visible())
+            g_active_hint_popover->popdown();
+        if (!popover.get_visible())
+            popover.popup();
+        g_active_hint_popover = &popover;
+    });
+    button_motion->signal_leave().connect([state, schedule_close] {
+        state->pointer_on_button = false;
+        schedule_close();
+    });
+    button.add_controller(button_motion);
+
+    popover.signal_hide().connect([state, &popover] {
+        if (g_active_hint_popover == &popover)
+            g_active_hint_popover = nullptr;
+        state->pointer_on_button = false;
         state->close_timeout.disconnect();
     });
 }
@@ -3841,6 +3962,7 @@ void Editor::init()
     attach_action_button(m_win.get_welcome_new_button(), ActionID::NEW_DOCUMENT);
 #ifdef DUNE_SKETCHER_ONLY
     m_win.get_welcome_open_folder_button().signal_clicked().connect(sigc::mem_fun(*this, &Editor::on_open_folder));
+    m_win.get_welcome_open_project_button().signal_clicked().connect(sigc::mem_fun(*this, &Editor::on_open_project));
 #endif
 
 #ifdef DUNE_SKETCHER_ONLY
@@ -3974,7 +4096,10 @@ void Editor::init()
     {
         auto button = Gtk::make_managed<Gtk::Button>();
         button->set_icon_name("image-x-generic-symbolic");
-        button->set_tooltip_text("Import Picture");
+        set_tool_hint(*button, join_tooltip_lines({
+                                       "Import Picture",
+                                       "Import a bitmap into the sketch as a picture reference.",
+                               }));
         button->set_has_frame(true);
         button->add_css_class("sketch-toolbar-button");
         button->signal_clicked().connect([this] {
@@ -3987,7 +4112,10 @@ void Editor::init()
     {
         auto button = Gtk::make_managed<Gtk::Button>();
         button->set_icon_name("applications-graphics-symbolic");
-        button->set_tooltip_text("Trace Image");
+        set_tool_hint(*button, join_tooltip_lines({
+                                       "Trace Image",
+                                       "Trace a bitmap into editable sketch geometry.",
+                               }));
         button->set_has_frame(true);
         button->add_css_class("sketch-toolbar-button");
         button->signal_clicked().connect(sigc::mem_fun(*this, &Editor::on_trace_image_button));
@@ -4727,7 +4855,11 @@ void Editor::sync_selection_mode_popover()
 #ifdef DUNE_SKETCHER_ONLY
     if (!m_selection_mode_button)
         return;
-    m_selection_mode_button->set_tooltip_text("Selection tool (Middle mouse)");
+    set_tool_hint(*m_selection_mode_button, join_tooltip_lines({
+                                           "Selection tool",
+                                           "Selection mode.",
+                                           "Middle click toggles back to the last drawing tool.",
+                                   }));
     if (!m_selection_transform_switch || !m_selection_markers_switch || !m_selection_snap_switch
         || !m_selection_closed_loop_switch)
         return;
@@ -4876,7 +5008,11 @@ void Editor::init_layers_popover()
 #ifdef DUNE_SKETCHER_ONLY
     m_layers_mode_button = Gtk::make_managed<Gtk::Button>();
     m_layers_mode_button->set_icon_name("view-list-bullet-symbolic");
-    m_layers_mode_button->set_tooltip_text("Layers");
+    set_tool_hint(*m_layers_mode_button, join_tooltip_lines({
+                                           "Layers",
+                                           "Toggle layers mode.",
+                                           "Hover for layer controls.",
+                                   }));
     m_layers_mode_button->set_has_frame(true);
     m_layers_mode_button->add_css_class("sketch-toolbar-button");
 
@@ -5210,7 +5346,11 @@ void Editor::init_cup_template_popover()
 #ifdef DUNE_SKETCHER_ONLY
     m_cup_template_button = Gtk::make_managed<Gtk::Button>();
     m_cup_template_button->set_icon_name("view-column-symbolic");
-    m_cup_template_button->set_tooltip_text("Cup template");
+    set_tool_hint(*m_cup_template_button, join_tooltip_lines({
+                                             "Cup template",
+                                             "Toggle the cup template helper.",
+                                             "Hover to edit height, diameter, and segments.",
+                                     }));
     m_cup_template_button->set_has_frame(true);
     m_cup_template_button->set_focusable(false);
     m_cup_template_button->add_css_class("sketch-toolbar-button");
@@ -5342,7 +5482,12 @@ void Editor::init_gears_popover()
 #ifdef DUNE_SKETCHER_ONLY
     m_gears_button = Gtk::make_managed<Gtk::Button>();
     m_gears_button->set_icon_name("applications-engineering-symbolic");
-    m_gears_button->set_tooltip_text("Gears");
+    set_tool_hint(*m_gears_button, join_tooltip_lines({
+                                     "Gears",
+                                     "Toggle gears mode.",
+                                     "Select a circle, arc, or oval profile for quick apply.",
+                                     "Hover for quick settings or open the generator.",
+                             }));
     m_gears_button->set_has_frame(true);
     m_gears_button->set_focusable(false);
     m_gears_button->add_css_class("sketch-toolbar-button");
@@ -6543,7 +6688,12 @@ void Editor::init_joints_popover()
 #ifdef DUNE_SKETCHER_ONLY
     m_joints_button = Gtk::make_managed<Gtk::Button>();
     m_joints_button->set_icon_name("insert-link-symbolic");
-    m_joints_button->set_tooltip_text("Edge Tools: joints, hinges, lids, grooves, and utility edge cuts");
+    set_tool_hint(*m_joints_button, join_tooltip_lines({
+                                      "Edge Tools",
+                                      "Toggle Edge Tools mode.",
+                                      "Select one or more lines, then press Shift+LMB on the canvas for quick apply.",
+                                      "Hover for full edge feature settings.",
+                              }));
     m_joints_button->set_has_frame(true);
     m_joints_button->set_focusable(false);
     m_joints_button->add_css_class("sketch-toolbar-button");
@@ -6691,6 +6841,7 @@ void Editor::init_joints_popover()
     m_joints_family_description_label->set_wrap(true);
     m_joints_family_description_label->set_max_width_chars(24);
     m_joints_family_description_label->add_css_class("dim-label");
+    m_joints_family_description_label->set_visible(false);
     root->append(*m_joints_family_description_label);
 
     m_joints_selection_hint_label = Gtk::make_managed<Gtk::Label>();
@@ -6698,6 +6849,7 @@ void Editor::init_joints_popover()
     m_joints_selection_hint_label->set_wrap(true);
     m_joints_selection_hint_label->set_max_width_chars(24);
     m_joints_selection_hint_label->add_css_class("dim-label");
+    m_joints_selection_hint_label->set_visible(false);
     root->append(*m_joints_selection_hint_label);
 
     m_joints_summary_label = Gtk::make_managed<Gtk::Label>();
@@ -6705,6 +6857,7 @@ void Editor::init_joints_popover()
     m_joints_summary_label->set_wrap(true);
     m_joints_summary_label->set_max_width_chars(24);
     m_joints_summary_label->add_css_class("dim-label");
+    m_joints_summary_label->set_visible(false);
     root->append(*m_joints_summary_label);
 
     m_joints_advanced_expander = Gtk::make_managed<Gtk::Expander>("Advanced");
@@ -6805,11 +6958,6 @@ void Editor::init_joints_popover()
     m_joints_quick_apply_button->add_css_class("suggested-action");
     m_joints_quick_apply_button->set_tooltip_text("Apply the current Edge Feature to the selected edges");
     quick_root->append(*m_joints_quick_apply_button);
-    m_joints_quick_hint_label = Gtk::make_managed<Gtk::Label>();
-    m_joints_quick_hint_label->set_xalign(0);
-    m_joints_quick_hint_label->set_wrap(true);
-    m_joints_quick_hint_label->add_css_class("dim-label");
-    quick_root->append(*m_joints_quick_hint_label);
     m_joints_quick_apply_button->signal_clicked().connect([this] {
         if (!generate_joints_from_selected_lines()) {
             if (m_workspace_browser)
@@ -7088,7 +7236,10 @@ void Editor::init_boxes_popover()
 #ifdef DUNE_SKETCHER_ONLY
     m_boxes_button = Gtk::make_managed<Gtk::Button>();
     m_boxes_button->set_icon_name("package-x-generic-symbolic");
-    m_boxes_button->set_tooltip_text("Boxes");
+    set_tool_hint(*m_boxes_button, join_tooltip_lines({
+                                     "Boxes",
+                                     "Open the Boxes catalog and generator.",
+                             }));
     m_boxes_button->set_has_frame(true);
     m_boxes_button->set_focusable(false);
     m_boxes_button->add_css_class("sketch-toolbar-button");
@@ -10773,7 +10924,11 @@ void Editor::init_header_bar()
         m_grid_menu_button->set_icon_name("view-grid-symbolic");
         m_grid_menu_button->set_has_frame(true);
         m_grid_menu_button->add_css_class("sketch-toolbar-button");
-        m_grid_menu_button->set_tooltip_text("Grid settings");
+        set_tool_hint(*m_grid_menu_button, join_tooltip_lines({
+                                              "Grid",
+                                              "Toggle grid.",
+                                              "Hover to change spacing and snap.",
+                                      }));
 
         auto grid_popover = Gtk::make_managed<Gtk::Popover>();
         grid_popover->add_css_class("sketch-grid-popover");
@@ -10856,7 +11011,11 @@ void Editor::init_symmetry_popover()
     m_symmetry_menu_button->set_icon_name("object-flip-horizontal-symbolic");
     m_symmetry_menu_button->set_has_frame(true);
     m_symmetry_menu_button->add_css_class("sketch-toolbar-button");
-    m_symmetry_menu_button->set_tooltip_text("Symmetry");
+    set_tool_hint(*m_symmetry_menu_button, join_tooltip_lines({
+                                              "Symmetry",
+                                              "Toggle live symmetry.",
+                                              "Hover to choose axis or radial mode.",
+                                      }));
     m_win.get_header_bar().pack_start(*m_symmetry_menu_button);
 
     auto popover = Gtk::make_managed<Gtk::Popover>();
@@ -12249,6 +12408,24 @@ void Editor::init_settings_popover()
         m_right_click_popovers_only = m_right_click_popovers_switch->get_active();
     });
 
+    auto tool_hints_row = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 8);
+    auto tool_hints_label = Gtk::make_managed<Gtk::Label>("Tool hints");
+    tool_hints_label->set_hexpand(true);
+    tool_hints_label->set_xalign(0);
+    m_tool_hints_switch = Gtk::make_managed<Gtk::Switch>();
+    tool_hints_row->append(*tool_hints_label);
+    tool_hints_row->append(*m_tool_hints_switch);
+    root->append(*tool_hints_row);
+
+    m_tool_hints_switch->property_active().signal_changed().connect([this] {
+        if (m_updating_settings_popover || !m_tool_hints_switch)
+            return;
+        m_tool_hints_enabled = m_tool_hints_switch->get_active();
+        m_preferences.editor.tool_hints = m_tool_hints_enabled;
+        refresh_tool_hints();
+        m_preferences.signal_changed().emit();
+    });
+
     auto pref_button = Gtk::make_managed<Gtk::Button>("Preferences");
     pref_button->set_hexpand(true);
     root->append(*pref_button);
@@ -12291,7 +12468,7 @@ void Editor::sync_settings_popover_from_preferences()
 {
     if (!m_theme_prev_button || !m_theme_next_button || !m_theme_value_label || !m_theme_accent_section
         || !m_theme_accent_row || !m_line_width_scale
-        || !m_line_width_value_label || !m_right_click_popovers_switch)
+        || !m_line_width_value_label || !m_right_click_popovers_switch || !m_tool_hints_switch)
         return;
     m_updating_settings_popover = true;
     const auto variant = normalize_sketch_theme_variant(m_preferences.canvas.theme_variant);
@@ -12307,6 +12484,7 @@ void Editor::sync_settings_popover_from_preferences()
     m_line_width_scale->set_value(m_preferences.canvas.appearance.line_width);
     m_line_width_value_label->set_text(format_line_width_multiplier(m_preferences.canvas.appearance.line_width));
     m_right_click_popovers_switch->set_active(m_right_click_popovers_only);
+    m_tool_hints_switch->set_active(m_tool_hints_enabled);
     m_updating_settings_popover = false;
 }
 
@@ -12442,6 +12620,449 @@ void Editor::on_open_folder()
             std::cout << "Unexpected exception. " << err.what() << std::endl;
         }
     });
+#endif
+}
+
+void Editor::on_open_project()
+{
+#ifdef DUNE_SKETCHER_ONLY
+    if (m_sidebar_popover)
+        m_sidebar_popover->popdown();
+    auto dialog = Gtk::FileDialog::create();
+    auto filters = Gio::ListStore<Gtk::FileFilter>::create();
+    auto filter_project = Gtk::FileFilter::create();
+    filter_project->set_name("DXF Sketcher projects");
+    filter_project->add_pattern("*.dxsp");
+    filter_project->add_pattern("*.DXSP");
+    filters->append(filter_project);
+    dialog->set_filters(filters);
+    if (m_sketcher_project_path.has_value())
+        dialog->set_initial_file(Gio::File::create_for_path(path_to_string(*m_sketcher_project_path)));
+    dialog->open(m_win, [this, dialog](const Glib::RefPtr<Gio::AsyncResult> &result) {
+        try {
+            auto file = dialog->open_finish(result);
+            if (file)
+                open_project(path_from_string(file->get_path()));
+        }
+        catch (const Gtk::DialogError &err) {
+            std::cout << "No file selected. " << err.what() << std::endl;
+        }
+        catch (const Glib::Error &err) {
+            std::cout << "Unexpected exception. " << err.what() << std::endl;
+        }
+    });
+#endif
+}
+
+void Editor::on_save_project()
+{
+#ifdef DUNE_SKETCHER_ONLY
+    if (!m_core.has_documents()) {
+        if (m_workspace_browser)
+            m_workspace_browser->show_toast("Open or create a sketch first");
+        return;
+    }
+    if (m_sidebar_popover)
+        m_sidebar_popover->popdown();
+    if (m_sketcher_project_path.has_value()) {
+        save_project_to(*m_sketcher_project_path);
+        return;
+    }
+
+    auto dialog = Gtk::FileDialog::create();
+    auto filters = Gio::ListStore<Gtk::FileFilter>::create();
+    auto filter_project = Gtk::FileFilter::create();
+    filter_project->set_name("DXF Sketcher projects");
+    filter_project->add_pattern("*.dxsp");
+    filter_project->add_pattern("*.DXSP");
+    filters->append(filter_project);
+    dialog->set_filters(filters);
+    dialog->save(m_win, [this, dialog](const Glib::RefPtr<Gio::AsyncResult> &result) {
+        try {
+            auto file = dialog->save_finish(result);
+            if (!file)
+                return;
+            auto selected_path = path_from_string(file->get_path());
+            if (!is_sketcher_project_file(selected_path))
+                selected_path = path_from_string(append_suffix_if_required(file->get_path(), kSketcherProjectExtension));
+            const auto project_name = sanitize_project_component(path_to_string(selected_path.stem()));
+            const auto project_dir = normalize_group_path(selected_path.parent_path() / path_from_string(project_name));
+            const auto project_file = project_dir / path_from_string(project_name + std::string(kSketcherProjectExtension));
+            save_project_to(project_file);
+        }
+        catch (const Gtk::DialogError &err) {
+            std::cout << "No file selected. " << err.what() << std::endl;
+        }
+        catch (const Glib::Error &err) {
+            std::cout << "Unexpected exception. " << err.what() << std::endl;
+        }
+    });
+#endif
+}
+
+void Editor::refresh_sketcher_document_path()
+{
+#ifdef DUNE_SKETCHER_ONLY
+    if (!m_core.has_documents())
+        return;
+    if (m_sketcher_project_path.has_value()) {
+        m_core.set_current_document_path(*m_sketcher_project_path);
+        return;
+    }
+    if (auto group_path = get_group_export_path(m_core.get_current_group()))
+        m_core.set_current_document_path(*group_path);
+#endif
+}
+
+void Editor::mark_sketcher_project_modified()
+{
+#ifdef DUNE_SKETCHER_ONLY
+    if (!m_sketcher_project_path.has_value())
+        return;
+    m_core.set_needs_save();
+    update_workspace_view_names();
+    update_title();
+#endif
+}
+
+void Editor::open_project(const std::filesystem::path &path)
+{
+#ifdef DUNE_SKETCHER_ONLY
+    const auto normalized_path = normalize_group_path(path);
+    if (!is_sketcher_project_file(normalized_path)) {
+        if (m_workspace_browser)
+            m_workspace_browser->show_toast("Project file must end with .dxsp");
+        return;
+    }
+
+    auto open_now = [this, normalized_path] {
+        if (m_core.has_documents())
+            trigger_action(ActionID::NEW_DOCUMENT);
+        open_project_now(normalized_path);
+    };
+
+    if (m_core.has_documents() && m_core.get_needs_save_any()) {
+        const auto doc_name = m_sketcher_project_path.has_value() ? path_to_string(m_sketcher_project_path->filename())
+                                                                  : m_core.get_current_idocument_info().get_basename();
+        show_save_dialog(
+                doc_name,
+                [this, open_now] {
+                    m_after_save_cb = open_now;
+                    trigger_action(ActionID::SAVE);
+                },
+                [open_now] { open_now(); });
+        return;
+    }
+
+    open_now();
+#else
+    (void)path;
+#endif
+}
+
+bool Editor::open_project_now(const std::filesystem::path &path)
+{
+#ifdef DUNE_SKETCHER_ONLY
+    try {
+        const auto normalized_path = normalize_group_path(path);
+        const auto project_dir = normalized_path.parent_path();
+        const auto j = load_json_from_file(normalized_path);
+        if (j.value("type", std::string()) != "dxf-sketcher-project")
+            throw std::runtime_error("Unsupported project file");
+
+        const auto version = j.value("version", 0);
+        if (version != 1)
+            throw std::runtime_error("Unsupported project version");
+
+        if (!m_core.has_documents())
+            trigger_action(ActionID::NEW_DOCUMENT);
+
+        m_sketcher_opening_project = true;
+        if (j.contains("folders")) {
+            for (const auto &folder_json : j.at("folders")) {
+                const auto folder_rel = path_from_string(folder_json.at("path").get<std::string>());
+                open_folder(project_dir / folder_rel);
+            }
+        }
+        if (j.contains("loose_files")) {
+            for (const auto &file_json : j.at("loose_files")) {
+                const auto file_rel = path_from_string(file_json.at("path").get<std::string>());
+                open_file(project_dir / file_rel);
+            }
+        }
+        m_sketcher_opening_project = false;
+
+        auto &doc_view = get_current_document_view();
+        std::map<std::filesystem::path, nlohmann::json> folder_state_by_path;
+        std::map<std::filesystem::path, nlohmann::json> file_state_by_path;
+
+        if (j.contains("folders")) {
+            for (const auto &folder_json : j.at("folders")) {
+                const auto folder_abs = normalize_group_path(project_dir / path_from_string(folder_json.at("path").get<std::string>()));
+                folder_state_by_path[folder_abs] = folder_json;
+                for (const auto &file_json : folder_json.value("files", nlohmann::json::array())) {
+                    const auto file_abs =
+                            normalize_group_path(project_dir / path_from_string(file_json.at("path").get<std::string>()));
+                    file_state_by_path[file_abs] = file_json;
+                }
+            }
+        }
+        if (j.contains("loose_files")) {
+            for (const auto &file_json : j.at("loose_files")) {
+                const auto file_abs =
+                        normalize_group_path(project_dir / path_from_string(file_json.at("path").get<std::string>()));
+                file_state_by_path[file_abs] = file_json;
+            }
+        }
+
+        for (const auto &[folder_group, folder_path] : m_sketcher_folder_paths) {
+            const auto normalized_folder = normalize_group_path(folder_path);
+            if (!folder_state_by_path.contains(normalized_folder))
+                continue;
+            const auto &folder_json = folder_state_by_path.at(normalized_folder);
+            auto &body_view = doc_view.m_body_views[folder_group];
+            body_view.m_visible = folder_json.value("visible", true);
+            body_view.m_expanded = folder_json.value("expanded", true);
+            if (folder_json.contains("color") && !folder_json.at("color").is_null())
+                body_view.m_color = folder_json.at("color").get<Color>();
+            else
+                body_view.m_color.reset();
+        }
+
+        std::optional<UUID> current_group;
+        for (const auto &[group_uuid, export_path] : m_group_export_paths) {
+            const auto normalized_export = normalize_group_path(export_path);
+            if (!file_state_by_path.contains(normalized_export))
+                continue;
+            const auto &file_json = file_state_by_path.at(normalized_export);
+            auto &group_view = doc_view.m_group_views[group_uuid];
+            group_view.m_visible = file_json.value("visible", true);
+            if (file_json.contains("color") && !file_json.at("color").is_null())
+                group_view.m_color = file_json.at("color").get<Color>();
+            else
+                group_view.m_color.reset();
+            if (j.contains("current_file") && !j.at("current_file").is_null()) {
+                const auto current_file_abs =
+                        normalize_group_path(project_dir / path_from_string(j.at("current_file").get<std::string>()));
+                if (normalized_export == current_file_abs)
+                    current_group = group_uuid;
+            }
+        }
+
+        m_sketcher_project_path = normalized_path;
+        refresh_sketcher_document_path();
+        m_core.clear_needs_save();
+        m_win.get_app().add_recent_item(normalized_path);
+        save_workspace_view(m_core.get_current_idocument_info().get_uuid());
+        m_workspace_browser->update_documents(get_current_document_views());
+        if (current_group.has_value())
+            set_current_group(*current_group);
+        else
+            update_title();
+        update_version_info();
+        return true;
+    }
+    catch (const std::exception &err) {
+        m_sketcher_opening_project = false;
+        if (m_workspace_browser)
+            m_workspace_browser->show_toast("Couldn't open project");
+        Logger::get().log_warning(err.what(), Logger::Domain::EDITOR);
+        return false;
+    }
+#else
+    (void)path;
+    return false;
+#endif
+}
+
+bool Editor::save_project_to(const std::filesystem::path &project_file)
+{
+#ifdef DUNE_SKETCHER_ONLY
+    if (!m_core.has_documents())
+        return false;
+
+    try {
+        const auto normalized_project_file = normalize_group_path(project_file);
+        const auto project_dir = normalized_project_file.parent_path();
+        const bool overwriting_current_project =
+                m_sketcher_project_path.has_value() && normalize_group_path(*m_sketcher_project_path) == normalized_project_file;
+
+        std::error_code ec;
+        if (std::filesystem::exists(project_dir, ec)) {
+            if (!overwriting_current_project) {
+                bool is_empty = true;
+                for (std::filesystem::directory_iterator it(project_dir, ec); !ec && it != std::filesystem::directory_iterator();
+                     ++it) {
+                    is_empty = false;
+                    break;
+                }
+                if (!is_empty) {
+                    if (m_workspace_browser)
+                        m_workspace_browser->show_toast("Project folder already exists and is not empty");
+                    m_after_save_cb = nullptr;
+                    return false;
+                }
+            }
+            else {
+                for (const auto &entry : std::filesystem::directory_iterator(project_dir))
+                    std::filesystem::remove_all(entry.path());
+            }
+        }
+        std::filesystem::create_directories(project_dir);
+
+        auto &doc = m_core.get_current_document();
+        auto &doc_view = get_current_document_view();
+        std::set<std::filesystem::path> used_folder_paths;
+        std::set<std::filesystem::path> used_root_file_paths;
+        std::map<UUID, std::set<std::filesystem::path>> used_file_paths_by_folder;
+        std::map<UUID, std::filesystem::path> new_folder_paths;
+        std::map<UUID, std::filesystem::path> new_group_paths;
+        std::map<UUID, std::filesystem::path> relative_group_paths;
+        nlohmann::json project_json = {{"type", "dxf-sketcher-project"},
+                                       {"version", 1},
+                                       {"folders", nlohmann::json::array()},
+                                       {"loose_files", nlohmann::json::array()},
+                                       {"current_file", nullptr}};
+
+        std::vector<UUID> ordered_folder_groups;
+        std::vector<UUID> ordered_loose_groups;
+        for (const auto *group : doc.get_groups_sorted()) {
+            if (m_sketcher_folder_paths.contains(group->m_uuid)) {
+                ordered_folder_groups.push_back(group->m_uuid);
+                continue;
+            }
+            if (group->get_type() != Group::Type::SKETCH)
+                continue;
+            const auto body_group = group->find_body(doc).group.m_uuid;
+            if (!m_sketcher_folder_paths.contains(body_group))
+                ordered_loose_groups.push_back(group->m_uuid);
+        }
+
+        auto make_group_filename = [this, &doc](const UUID &group_uuid) {
+            if (auto export_path = get_group_export_path(group_uuid)) {
+                auto filename = export_path->filename();
+                if (filename.extension().empty() || filename.extension() == ".svg" || filename.extension() == ".SVG")
+                    filename.replace_extension(".dxf");
+                return filename;
+            }
+            auto filename = path_from_string(sanitize_project_component(doc.get_group(group_uuid).m_name));
+            if (filename.extension().empty())
+                filename.replace_extension(".dxf");
+            else if (filename.extension() != ".dxf" && filename.extension() != ".DXF")
+                filename.replace_extension(".dxf");
+            return filename;
+        };
+
+        for (const auto folder_group : ordered_folder_groups) {
+            auto &folder_ref = doc.get_group<GroupReference>(folder_group);
+            const auto folder_title = folder_ref.m_body.has_value() ? folder_ref.m_body->m_name : "Folder";
+            const auto folder_dir_name = sanitize_project_component(folder_title);
+            const auto folder_relative_dir =
+                    make_unique_project_path(path_from_string(folder_dir_name), used_folder_paths);
+            const auto folder_absolute_dir = normalize_group_path(project_dir / folder_relative_dir);
+            std::filesystem::create_directories(folder_absolute_dir);
+            new_folder_paths[folder_group] = folder_absolute_dir;
+
+            auto &body_view = doc_view.m_body_views[folder_group];
+            nlohmann::json folder_json = {{"name", folder_title},
+                                          {"path", path_to_string(folder_relative_dir)},
+                                          {"visible", body_view.m_visible},
+                                          {"expanded", body_view.m_expanded},
+                                          {"files", nlohmann::json::array()}};
+            if (body_view.m_color)
+                folder_json["color"] = *body_view.m_color;
+            else
+                folder_json["color"] = nullptr;
+
+            for (const auto *group : doc.get_groups_sorted()) {
+                if (group->get_type() != Group::Type::SKETCH)
+                    continue;
+                if (group->find_body(doc).group.m_uuid != folder_group)
+                    continue;
+                auto relative_file = make_unique_project_path(make_group_filename(group->m_uuid),
+                                                              used_file_paths_by_folder[folder_group]);
+                const auto absolute_file = normalize_group_path(folder_absolute_dir / relative_file);
+                export_dxf(absolute_file, doc, group->m_uuid);
+                new_group_paths[group->m_uuid] = absolute_file;
+                relative_group_paths[group->m_uuid] = std::filesystem::relative(absolute_file, project_dir);
+
+                auto &group_view = doc_view.m_group_views[group->m_uuid];
+                nlohmann::json file_json = {{"name", group->m_name},
+                                            {"path", path_to_string(relative_group_paths.at(group->m_uuid))},
+                                            {"visible", group_view.m_visible}};
+                if (group_view.m_color)
+                    file_json["color"] = *group_view.m_color;
+                else
+                    file_json["color"] = nullptr;
+                folder_json["files"].push_back(file_json);
+            }
+
+            project_json["folders"].push_back(folder_json);
+        }
+
+        for (const auto group_uuid : ordered_loose_groups) {
+            auto relative_file = make_unique_project_path(make_group_filename(group_uuid), used_root_file_paths);
+            const auto absolute_file = normalize_group_path(project_dir / relative_file);
+            export_dxf(absolute_file, doc, group_uuid);
+            new_group_paths[group_uuid] = absolute_file;
+            relative_group_paths[group_uuid] = relative_file;
+
+            auto &group = doc.get_group(group_uuid);
+            auto &group_view = doc_view.m_group_views[group_uuid];
+            nlohmann::json file_json = {{"name", group.m_name},
+                                        {"path", path_to_string(relative_file)},
+                                        {"visible", group_view.m_visible}};
+            if (group_view.m_color)
+                file_json["color"] = *group_view.m_color;
+            else
+                file_json["color"] = nullptr;
+            project_json["loose_files"].push_back(file_json);
+        }
+
+        if (relative_group_paths.contains(m_core.get_current_group()))
+            project_json["current_file"] = path_to_string(relative_group_paths.at(m_core.get_current_group()));
+
+        save_json_to_file(normalized_project_file, project_json);
+
+        m_group_export_paths = new_group_paths;
+        m_sketcher_folder_paths = new_folder_paths;
+        sync_sketcher_folder_groups();
+        for (const auto &[group_uuid, export_path] : new_group_paths) {
+            auto &group = doc.get_group(group_uuid);
+            group.m_name = path_to_string(export_path.filename());
+        }
+        for (const auto &[folder_group, folder_path] : new_folder_paths) {
+            auto &folder_ref = doc.get_group<GroupReference>(folder_group);
+            if (folder_ref.m_body.has_value())
+                folder_ref.m_body->m_name = path_to_string(folder_path.filename());
+        }
+
+        m_sketcher_project_path = normalized_project_file;
+        refresh_sketcher_document_path();
+        m_core.clear_needs_save();
+        m_win.get_app().add_recent_item(normalized_project_file);
+        save_workspace_view(m_core.get_current_idocument_info().get_uuid());
+        m_workspace_browser->update_documents(get_current_document_views());
+        update_workspace_view_names();
+        update_version_info();
+        update_title();
+        if (m_workspace_browser)
+            m_workspace_browser->show_toast("Project saved");
+        if (m_after_save_cb)
+            m_after_save_cb();
+        m_after_save_cb = nullptr;
+        return true;
+    }
+    catch (const std::exception &err) {
+        m_after_save_cb = nullptr;
+        if (m_workspace_browser)
+            m_workspace_browser->show_toast("Couldn't save project");
+        Logger::get().log_warning(err.what(), Logger::Domain::EDITOR);
+        return false;
+    }
+#else
+    (void)project_file;
+    return false;
 #endif
 }
 
@@ -12604,20 +13225,52 @@ void Editor::open_folder(const std::filesystem::path &folder_path)
                 dxf_files.push_back(entry.path());
         }
         std::sort(dxf_files.begin(), dxf_files.end());
+        const auto normalized_folder = normalize_group_path(folder_path);
+        for (const auto &[folder_group, existing_path] : m_sketcher_folder_paths) {
+            if (normalize_group_path(existing_path) == normalized_folder) {
+                m_workspace_browser->show_toast("Folder already added");
+                return;
+            }
+        }
 
-        trigger_action(ActionID::NEW_DOCUMENT);
+        if (!m_core.has_documents())
+            trigger_action(ActionID::NEW_DOCUMENT);
         if (m_core.tool_is_active())
             force_end_tool();
-        m_group_export_paths.clear();
-        m_sketcher_folder_path = folder_path;
-        m_win.get_app().add_recent_folder(folder_path);
 
-        m_workspace_browser->set_sketcher_folder_mode(path_to_string(folder_path.filename()));
+        auto &doc = m_core.get_current_document();
+        const bool first_folder = m_sketcher_folder_paths.empty();
+        UUID folder_group = doc.get_reference_group().m_uuid;
+        if (!first_folder) {
+            auto &folder_ref = doc.insert_group<GroupReference>(UUID::random(), doc.get_groups_sorted().back()->m_uuid);
+            folder_ref.m_name = "Reference";
+            folder_ref.m_body.emplace();
+            folder_ref.m_show_xy = false;
+            folder_ref.m_show_yz = false;
+            folder_ref.m_show_zx = false;
+            folder_group = folder_ref.m_uuid;
+            doc.set_group_generate_pending(folder_group);
+        }
+
+        auto &folder_ref = doc.get_group<GroupReference>(folder_group);
+        if (!folder_ref.m_body.has_value())
+            folder_ref.m_body.emplace();
+        folder_ref.m_body->m_name = path_to_string(normalized_folder.filename());
+        m_sketcher_folder_paths[folder_group] = normalized_folder;
+        sync_sketcher_folder_groups();
+        if (!m_sketcher_opening_project)
+            m_win.get_app().add_recent_folder(normalized_folder);
+
         m_sketcher_opening_folder_batch = true;
+        if (!first_folder)
+            m_sketcher_opening_folder_group = folder_group;
         for (const auto &path : dxf_files)
             open_file(path);
+        m_sketcher_opening_folder_group.reset();
         m_sketcher_opening_folder_batch = false;
         m_workspace_browser->update_documents(get_current_document_views());
+        refresh_sketcher_document_path();
+        mark_sketcher_project_modified();
     }
     catch (...) {
         m_workspace_browser->show_toast("Couldn't open folder");
@@ -12673,8 +13326,9 @@ void Editor::on_save_as(const ActionConnection &conn)
             auto &group = m_core.get_current_document().get_group(m_core.get_current_group());
             group.m_name = path_to_string(filename.filename());
             set_group_export_path(group.m_uuid, filename);
-            m_core.set_current_document_path(filename);
+            refresh_sketcher_document_path();
             m_core.clear_needs_save();
+            mark_sketcher_project_modified();
             m_win.get_app().add_recent_item(filename);
             save_workspace_view(m_core.get_current_idocument_info().get_uuid());
             m_workspace_browser->update_documents(get_current_document_views());
@@ -12923,6 +13577,9 @@ void Editor::apply_preferences()
 {
     CanvasUpdater canvas_updater{*this};
 
+    m_tool_hints_enabled = m_preferences.editor.tool_hints;
+    refresh_tool_hints();
+
     for (auto &[id, conn] : m_action_connections) {
         auto &act = action_catalog.at(id);
         if (!(act.flags & ActionCatalogItem::FLAGS_NO_PREFERENCES) && m_preferences.key_sequences.keys.count(id)) {
@@ -12942,14 +13599,11 @@ void Editor::apply_preferences()
     }
 
     for (const auto &[id, it] : m_action_connections) {
-        std::string tip = action_catalog.at(id).name.full;
-        if (it.key_sequences.size()) {
+        if (it.key_sequences.size())
             m_tool_popover->set_key_sequences(id, it.key_sequences);
-            tip += " (" + key_sequences_to_string(it.key_sequences) + ")";
-        }
         if (m_action_bar_buttons.contains(id)) {
             auto &button = *m_action_bar_buttons.at(id);
-            button.set_tooltip_text(tip);
+            set_tool_hint(button, build_action_bar_hint(id));
         }
     }
 
@@ -13836,6 +14490,107 @@ void Editor::reset_key_hint_label()
     m_win.set_key_hint_label_text(">");
 }
 
+void Editor::set_tool_hint(Gtk::Widget &widget, const std::string &text)
+{
+    m_tool_hint_texts[&widget] = text;
+    widget.set_has_tooltip(false);
+    widget.set_tooltip_text("");
+    if (!m_tool_hint_popovers.contains(&widget)) {
+        auto popover = Gtk::make_managed<Gtk::Popover>();
+        popover->set_has_arrow(true);
+        popover->set_autohide(false);
+        popover->set_position(Gtk::PositionType::TOP);
+        popover->add_css_class("sketch-hint-popover");
+        popover->set_parent(widget);
+
+        auto label = Gtk::make_managed<Gtk::Label>();
+        label->set_wrap(true);
+        label->set_wrap_mode(Pango::WrapMode::WORD_CHAR);
+        label->set_max_width_chars(28);
+        label->set_xalign(0);
+        label->set_margin_start(10);
+        label->set_margin_end(10);
+        label->set_margin_top(8);
+        label->set_margin_bottom(8);
+        popover->set_child(*label);
+
+        install_hint_popover(widget, *popover, [this, &widget] {
+            return m_tool_hints_enabled && m_tool_hint_texts.contains(&widget) && !m_tool_hint_texts.at(&widget).empty();
+        });
+
+        m_tool_hint_popovers[&widget] = popover;
+        m_tool_hint_labels[&widget] = label;
+    }
+
+    if (m_tool_hint_labels.contains(&widget) && m_tool_hint_labels.at(&widget))
+        m_tool_hint_labels.at(&widget)->set_text(text);
+
+    if ((!m_tool_hints_enabled || text.empty()) && m_tool_hint_popovers.contains(&widget) && m_tool_hint_popovers.at(&widget)
+        && m_tool_hint_popovers.at(&widget)->get_visible()) {
+        m_tool_hint_popovers.at(&widget)->popdown();
+    }
+}
+
+void Editor::refresh_tool_hints()
+{
+    for (const auto &[widget, popover] : m_tool_hint_popovers) {
+        if (!widget || !popover)
+            continue;
+        widget->set_has_tooltip(false);
+        if (!m_tool_hints_enabled && popover->get_visible())
+            popover->popdown();
+    }
+
+    if (!m_tool_hints_enabled && g_active_hint_popover && g_active_hint_popover->get_visible()) {
+        g_active_hint_popover->popdown();
+        g_active_hint_popover = nullptr;
+    }
+}
+
+std::string Editor::build_action_bar_hint(ActionToolID action) const
+{
+    std::string tip = action_catalog.at(action).name.full;
+    static const std::map<ActionToolID, std::string> descriptions = {
+            {ToolID::DRAW_CONTOUR,
+             join_tooltip_lines({
+                     "Active drawing tool.",
+                     "Click to keep drawing connected segments.",
+             })},
+            {ToolID::DRAW_RECTANGLE,
+             join_tooltip_lines({
+                     "Active drawing tool.",
+                     "Click two corners to place a rectangle.",
+             })},
+            {ToolID::DRAW_CIRCLE_2D,
+             join_tooltip_lines({
+                     "Active drawing tool.",
+                     "Click center, then radius.",
+             })},
+            {ToolID::DRAW_REGULAR_POLYGON,
+             join_tooltip_lines({
+                     "Active drawing tool.",
+                     "Click center, then radius.",
+                     "Hover for sides and rounding.",
+             })},
+            {ToolID::DRAW_TEXT,
+             join_tooltip_lines({
+                     "Active drawing tool.",
+                     "Click to place text.",
+                     "Hover for font settings.",
+             })},
+    };
+    if (const auto it = descriptions.find(action); it != descriptions.end()) {
+        tip += "\n";
+        tip += it->second;
+    }
+    if (const auto conn_it = m_action_connections.find(action);
+        conn_it != m_action_connections.end() && conn_it->second.key_sequences.size()) {
+        tip += "\nShortcut: ";
+        tip += key_sequences_to_string(conn_it->second.key_sequences);
+    }
+    return tip;
+}
+
 void Editor::tool_bar_clear_actions()
 {
     m_win.tool_bar_clear_actions();
@@ -13939,12 +14694,28 @@ void Editor::set_group_export_path(const UUID &group, const std::filesystem::pat
     m_group_export_paths[group] = normalize_group_path(path);
 }
 
+void Editor::sync_sketcher_folder_groups()
+{
+#ifdef DUNE_SKETCHER_ONLY
+    if (!m_workspace_browser)
+        return;
+    std::set<UUID> folder_groups;
+    for (const auto &[folder_group, path] : m_sketcher_folder_paths)
+        folder_groups.insert(folder_group);
+    m_workspace_browser->set_sketcher_folder_groups(folder_groups);
+#endif
+}
+
 void Editor::open_file(const std::filesystem::path &path)
 {
 #ifdef DUNE_SKETCHER_ONLY
     auto ext = path.extension().string();
     std::transform(ext.begin(), ext.end(), ext.begin(),
                    [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    if (ext == kSketcherProjectExtension) {
+        open_project(path);
+        return;
+    }
     if (ext == ".dxf" || ext == ".svg") {
         CanvasUpdater canvas_updater{*this};
         if (ext == ".svg") {
@@ -13983,9 +14754,10 @@ void Editor::open_file(const std::filesystem::path &path)
                 continue;
 
             set_current_group(gr->m_uuid);
-            m_core.set_current_document_path(normalized_path);
             set_group_export_path(gr->m_uuid, normalized_path);
-            m_win.get_app().add_recent_item(path);
+            refresh_sketcher_document_path();
+            if (!m_sketcher_opening_project)
+                m_win.get_app().add_recent_item(path);
             m_workspace_browser->show_toast("File already imported: switched to existing sketch");
             update_title();
             return;
@@ -13996,6 +14768,62 @@ void Editor::open_file(const std::filesystem::path &path)
 
         bool current_group_is_empty = true;
         current_group_is_empty = !group_has_user_entities(group_uu);
+
+        if (m_sketcher_opening_folder_group.has_value()) {
+            const auto folder_group = *m_sketcher_opening_folder_group;
+            auto find_last_group_in_folder = [&doc](const UUID &folder_group_uu) {
+                UUID last_group = folder_group_uu;
+                bool in_folder = false;
+                for (auto gr : doc.get_groups_sorted()) {
+                    if (gr->m_uuid == folder_group_uu) {
+                        in_folder = true;
+                        last_group = folder_group_uu;
+                        continue;
+                    }
+                    if (!in_folder)
+                        continue;
+                    if (gr->m_body.has_value())
+                        break;
+                    last_group = gr->m_uuid;
+                }
+                return last_group;
+            };
+            auto find_reusable_group_in_folder = [this, &doc, &group_has_user_entities, folder_group]() {
+                bool in_folder = false;
+                for (auto gr : doc.get_groups_sorted()) {
+                    if (gr->m_uuid == folder_group) {
+                        in_folder = true;
+                        continue;
+                    }
+                    if (!in_folder)
+                        continue;
+                    if (gr->m_body.has_value())
+                        break;
+                    if (gr->get_type() != Group::Type::SKETCH)
+                        continue;
+                    if (get_group_export_path(gr->m_uuid).has_value())
+                        continue;
+                    if (!group_has_user_entities(gr->m_uuid))
+                        return gr->m_uuid;
+                }
+                return UUID();
+            };
+
+            if (auto reusable_group = find_reusable_group_in_folder()) {
+                group_uu = reusable_group;
+                set_current_group(group_uu);
+            }
+            else {
+                auto &new_group = doc.insert_group<GroupSketch>(UUID::random(), find_last_group_in_folder(folder_group));
+                new_group.m_name = doc.find_next_group_name(Group::Type::SKETCH);
+                new_group.m_active_wrkpl = doc.get_reference_group().get_workplane_xy_uuid();
+                doc.set_group_generate_pending(new_group.m_uuid);
+                m_core.rebuild("add group");
+                set_current_group(new_group.m_uuid);
+                group_uu = new_group.m_uuid;
+            }
+            current_group_is_empty = !group_has_user_entities(group_uu);
+        }
 
         if (!current_group_is_empty) {
             auto &new_group = doc.insert_group<GroupSketch>(UUID::random(), current_group.m_uuid);
@@ -14030,13 +14858,22 @@ void Editor::open_file(const std::filesystem::path &path)
         }
 
         auto export_path = normalized_path;
-        if (m_sketcher_folder_path.has_value() && !m_sketcher_opening_folder_batch)
-            export_path = normalize_group_path(*m_sketcher_folder_path / path.filename());
+        std::optional<UUID> folder_group;
+        if (m_sketcher_opening_folder_group.has_value()) {
+            folder_group = *m_sketcher_opening_folder_group;
+        }
+        else {
+            const auto current_body_group = doc.get_group(group_uu).find_body(doc).group.m_uuid;
+            if (m_sketcher_folder_paths.contains(current_body_group))
+                folder_group = current_body_group;
+        }
+        if (folder_group.has_value())
+            export_path = normalize_group_path(m_sketcher_folder_paths.at(*folder_group) / path.filename());
 
         doc.get_group(group_uu).m_name = imported_group_name;
         set_group_export_path(group_uu, export_path);
         bool export_written = true;
-        if (m_sketcher_folder_path.has_value() && !m_sketcher_opening_folder_batch) {
+        if (folder_group.has_value() && !m_sketcher_opening_folder_batch) {
             try {
                 export_dxf(export_path, m_core.get_current_document(), group_uu);
             }
@@ -14048,17 +14885,20 @@ void Editor::open_file(const std::filesystem::path &path)
         doc.set_group_generate_pending(group_uu);
         m_core.rebuild("import dxf");
         set_current_group(group_uu);
-        m_core.set_current_document_path(export_path);
+        refresh_sketcher_document_path();
         if (export_written)
             m_core.clear_needs_save();
         else
             m_core.set_needs_save();
-        m_win.get_app().add_recent_item(path);
+        mark_sketcher_project_modified();
+        if (!m_sketcher_opening_project)
+            m_win.get_app().add_recent_item(path);
         save_workspace_view(m_core.get_current_idocument_info().get_uuid());
         m_workspace_browser->update_documents(get_current_document_views());
         update_version_info();
         update_title();
-        add_to_recent_docs(path);
+        if (!m_sketcher_opening_project)
+            add_to_recent_docs(path);
         return;
     }
 #endif

@@ -1,5 +1,6 @@
 #include "document_view.hpp"
 #include "document/entity/entity.hpp"
+#include "util/json_util.hpp"
 #include "nlohmann/json.hpp"
 
 namespace dune3d {
@@ -67,11 +68,21 @@ EntityView *DocumentView::get_or_create_entity_view(const UUID &en, EntityType t
 DocumentView::GroupView::GroupView() = default;
 DocumentView::GroupView::GroupView(const json &j) : m_visible(j.at("visible").get<bool>())
 {
+    if (j.contains("color")) {
+        const auto &jc = j.at("color");
+        if (jc != nullptr)
+            m_color = jc.get<Color>();
+    }
 }
 
 json DocumentView::GroupView::serialize() const
 {
-    return {{"visible", m_visible}};
+    json j = {{"visible", m_visible}};
+    if (m_color)
+        j["color"] = *m_color;
+    else
+        j["color"] = nullptr;
+    return j;
 }
 
 DocumentView::BodyView::BodyView() = default;
@@ -79,11 +90,23 @@ DocumentView::BodyView::BodyView(const json &j)
     : m_visible(j.at("visible").get<bool>()), m_solid_model_visible(j.at("solid_model_visible").get<bool>()),
       m_expanded(j.value("expanded", true))
 {
+    if (j.contains("color")) {
+        const auto &jc = j.at("color");
+        if (jc != nullptr)
+            m_color = jc.get<Color>();
+    }
 }
 
 json DocumentView::BodyView::serialize() const
 {
-    return {{"visible", m_visible}, {"solid_model_visible", m_solid_model_visible}, {"expanded", m_expanded}};
+    json j = {{"visible", m_visible},
+              {"solid_model_visible", m_solid_model_visible},
+              {"expanded", m_expanded}};
+    if (m_color)
+        j["color"] = *m_color;
+    else
+        j["color"] = nullptr;
+    return j;
 }
 
 json DocumentView::serialize() const

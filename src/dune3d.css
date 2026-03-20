@@ -90,6 +90,7 @@ button.osd:disabled:backdrop {background-image: image(rgba(53, 53, 53, 0.7));}
 .selection-menu contents, .selection-menu arrow {background-color: alpha(@theme_bg_color, .75);}
 .sketch-sidebar-popover contents, .sketch-sidebar-popover arrow {background-color: alpha(@theme_bg_color, .9);}
 .sketch-grid-popover contents, .sketch-grid-popover arrow {background-color: alpha(@theme_bg_color, .92);}
+.sketch-hint-popover contents, .sketch-hint-popover arrow {background-color: alpha(@theme_bg_color, .96);}
 .sketch-quick-menu contents {
   background-color: alpha(@theme_bg_color, 0.92);
   border: 1px solid alpha(@borders, 0.8);
@@ -190,13 +191,195 @@ button.osd:disabled:backdrop {background-image: image(rgba(53, 53, 53, 0.7));}
 .sketch-light .sketch-sidebar-popover contents,
 .sketch-light .sketch-sidebar-popover arrow,
 .sketch-light .sketch-grid-popover contents,
-.sketch-light .sketch-grid-popover arrow {
+.sketch-light .sketch-grid-popover arrow,
+.sketch-light .sketch-hint-popover contents,
+.sketch-light .sketch-hint-popover arrow {
   background-image: linear-gradient(to bottom, #ffffff, #f7f7f7 62%, #f2f2f2);
   border-color: #d9d9d9;
   color: #202226;
   box-shadow:
     inset 0 1px alpha(#ffffff, 0.82),
     0 8px 22px alpha(#000000, 0.08);
+}
+
+.sketch-light popover scrolledwindow,
+.sketch-light popover viewport,
+.sketch-light popover listbox,
+.sketch-light popover row,
+.sketch-light popover box,
+.sketch-light popover label,
+.sketch-light popover image,
+.sketch-light popover entry,
+.sketch-light popover entry image,
+.sketch-light popover menubutton > button,
+.sketch-light popover button,
+.sketch-light tooltip,
+.sketch-light tooltip label,
+.sketch-light tooltip image {
+  color: #202226;
+}
+
+.sketch-light popover entry {
+  background-image: none;
+  background-color: alpha(#ffffff, 0.84);
+  border-color: #c9d6e2;
+}
+
+.sketch-light popover scrolledwindow,
+.sketch-light popover viewport,
+.sketch-light popover listbox,
+.sketch-light popover row {
+  background-image: none;
+  background-color: transparent;
+}
+
+.sketch-light popover .dim-label,
+.sketch-light tooltip .dim-label {
+  color: alpha(#202226, 0.72);
+}
+
+.sketch-light tooltip {
+  background-image: linear-gradient(to bottom, #ffffff, #f7f7f7 62%, #f2f2f2);
+  border: 1px solid #d9d9d9;
+  box-shadow:
+    inset 0 1px alpha(#ffffff, 0.82),
+    0 6px 18px alpha(#000000, 0.10);
+}
+
+.sketch-light .welcome-box {
+  background-image: linear-gradient(to bottom, alpha(#ffffff, 0.98), alpha(#f6f7f9, 0.98));
+  color: #202226;
+  border-color: #d9d9d9;
+  box-shadow:
+    inset 0 1px alpha(#ffffff, 0.82),
+    0 8px 22px alpha(#000000, 0.08);
+}
+
+.sketch-light .welcome-box label,
+.sketch-light .welcome-box image,
+.sketch-light .welcome-box separator {
+  color: #202226;
+}
+
+.sketch-light .welcome-box searchentry,
+.sketch-light .welcome-box entry {
+  background-image: none;
+  background-color: #ffffff;
+  color: #202226;
+  border-color: #c9d6e2;
+}
+
+.sketch-light .welcome-box scrolledwindow.frame,
+.sketch-light .welcome-box scrolledwindow.frame viewport,
+.sketch-light .welcome-box listbox,
+.sketch-light .welcome-box listbox row,
+.sketch-light .welcome-box listbox row box {
+  background-image: none;
+  background-color: #fbfbfc;
+  color: #202226;
+}
+
+.sketch-light .welcome-box listbox row:hover,
+.sketch-light .welcome-box listbox row:focus,
+.sketch-light .welcome-box listbox row:selected {
+  background-color: #eef4fb;
+}
+
+.sketch-light .welcome-box .dim-label {
+  color: alpha(#202226, 0.72);
+}
+
+.sketch-light .welcome-box .welcome-action-button,
+.sketch-light .welcome-box .welcome-action-button label,
+.sketch-light .welcome-box .welcome-action-button image {
+  color: #202226;
+}
+
+.sketch-light .welcome-box .welcome-recent-button,
+.sketch-light .welcome-box .welcome-recent-button:hover,
+.sketch-light .welcome-box .welcome-recent-button:active,
+.sketch-light .welcome-box .welcome-recent-button:checked {
+  background-image: none;
+  background-color: #f8fbff;
+  color: #202226;
+  border: none;
+  border-radius: 10px;
+  box-shadow: none;
+  outline: none;
+}
+
+.sketch-light .welcome-box .welcome-recent-button:hover {
+  background-color: #eef4fb;
+}
+
+.sketch-light .welcome-box .welcome-recent-row,
+.sketch-light .welcome-box .welcome-recent-row box,
+.sketch-light .welcome-box .welcome-recent-listbox row,
+.sketch-light .welcome-box .welcome-recent-listbox row box,
+.sketch-light .welcome-box .welcome-recent-scroll,
+.sketch-light .welcome-box .welcome-recent-scroll viewport {
+  background-image: none;
+  background-color: #f3f8fe;
+}
+
+.sketch-light .welcome-box .welcome-recent-listbox,
+.sketch-light .welcome-box .welcome-recent-listbox row,
+.sketch-light .welcome-box .welcome-recent-listbox row box,
+.sketch-light .welcome-box .welcome-recent-scroll,
+.sketch-light .welcome-box .welcome-recent-scroll viewport {
+  border: none;
+  outline: none;
+  box-shadow: none;
+}
+
+.sketch-light .welcome-box .welcome-recent-listbox separator,
+.sketch-light .welcome-box .welcome-recent-scroll separator {
+  background: transparent;
+  color: transparent;
+  min-height: 0;
+  min-width: 0;
+}
+
+.sketch-light .welcome-box .recent-item-box,
+.sketch-light .welcome-box .recent-item-box box,
+.sketch-light .welcome-box .recent-item-box label,
+.sketch-light .welcome-box .recent-item-box image {
+  background-image: none;
+  background-color: transparent;
+  color: #202226;
+}
+
+.sketch-light .welcome-box .recent-item-box .dim-label {
+  color: alpha(#202226, 0.72);
+}
+
+.sketch-light popover.recent-popover scrolledwindow.frame,
+.sketch-light popover.recent-popover scrolledwindow.frame viewport,
+.sketch-light popover.recent-popover .recent-listbox,
+.sketch-light popover.recent-popover .recent-listbox row,
+.sketch-light popover.recent-popover .recent-listbox row box,
+.sketch-light popover.recent-popover .recent-listbox row label,
+.sketch-light popover.recent-popover .recent-listbox row image {
+  background-image: none;
+  background-color: #fbfbfc;
+  color: #202226;
+}
+
+.sketch-light popover.recent-popover .recent-listbox row:hover,
+.sketch-light popover.recent-popover .recent-listbox row:focus,
+.sketch-light popover.recent-popover .recent-listbox row:selected {
+  background-color: #eef4fb;
+}
+
+.sketch-light popover.recent-popover .recent-search-entry {
+  background-image: none;
+  background-color: #ffffff;
+  color: #202226;
+  border-color: #c9d6e2;
+}
+
+.sketch-light popover.recent-popover .recent-listbox .dim-label {
+  color: alpha(#202226, 0.72);
 }
 
 .sketch-dark-blue {
@@ -297,7 +480,9 @@ button.osd:disabled:backdrop {background-image: image(rgba(53, 53, 53, 0.7));}
 .sketch-dark-blue .sketch-sidebar-popover contents,
 .sketch-dark-blue .sketch-sidebar-popover arrow,
 .sketch-dark-blue .sketch-grid-popover contents,
-.sketch-dark-blue .sketch-grid-popover arrow {
+.sketch-dark-blue .sketch-grid-popover arrow,
+.sketch-dark-blue .sketch-hint-popover contents,
+.sketch-dark-blue .sketch-hint-popover arrow {
   background-image: linear-gradient(to bottom, #1d2e4e, #162642 58%, #13213a);
   border-color: #355382;
   box-shadow:
@@ -424,13 +609,195 @@ button.osd:disabled:backdrop {background-image: image(rgba(53, 53, 53, 0.7));}
 .sketch-heaven .sketch-sidebar-popover contents,
 .sketch-heaven .sketch-sidebar-popover arrow,
 .sketch-heaven .sketch-grid-popover contents,
-.sketch-heaven .sketch-grid-popover arrow {
+.sketch-heaven .sketch-grid-popover arrow,
+.sketch-heaven .sketch-hint-popover contents,
+.sketch-heaven .sketch-hint-popover arrow {
   background-image: linear-gradient(to bottom, #e9f5ff, #d5ebff 62%, #cbe4fb);
   border-color: #82b2da;
   color: #123257;
   box-shadow:
     inset 0 1px alpha(#ffffff, 0.65),
     0 8px 22px alpha(#7ba8cf, 0.34);
+}
+
+.sketch-heaven popover scrolledwindow,
+.sketch-heaven popover viewport,
+.sketch-heaven popover listbox,
+.sketch-heaven popover row,
+.sketch-heaven popover box,
+.sketch-heaven popover label,
+.sketch-heaven popover image,
+.sketch-heaven popover entry,
+.sketch-heaven popover entry image,
+.sketch-heaven popover menubutton > button,
+.sketch-heaven popover button,
+.sketch-heaven tooltip,
+.sketch-heaven tooltip label,
+.sketch-heaven tooltip image {
+  color: #123257;
+}
+
+.sketch-heaven popover entry {
+  background-image: none;
+  background-color: alpha(#f6fbff, 0.84);
+  border-color: #8db7da;
+}
+
+.sketch-heaven popover scrolledwindow,
+.sketch-heaven popover viewport,
+.sketch-heaven popover listbox,
+.sketch-heaven popover row {
+  background-image: none;
+  background-color: transparent;
+}
+
+.sketch-heaven popover .dim-label,
+.sketch-heaven tooltip .dim-label {
+  color: alpha(#123257, 0.72);
+}
+
+.sketch-heaven tooltip {
+  background-image: linear-gradient(to bottom, #eef7ff, #deefff 62%, #d3e8fb);
+  border: 1px solid #82b2da;
+  box-shadow:
+    inset 0 1px alpha(#ffffff, 0.70),
+    0 6px 18px alpha(#7ba8cf, 0.28);
+}
+
+.sketch-heaven .welcome-box {
+  background-image: linear-gradient(to bottom, alpha(#f6fbff, 0.98), alpha(#e6f3ff, 0.98));
+  color: #123257;
+  border-color: #82b2da;
+  box-shadow:
+    inset 0 1px alpha(#ffffff, 0.70),
+    0 8px 22px alpha(#7ba8cf, 0.28);
+}
+
+.sketch-heaven .welcome-box label,
+.sketch-heaven .welcome-box image,
+.sketch-heaven .welcome-box separator {
+  color: #123257;
+}
+
+.sketch-heaven .welcome-box searchentry,
+.sketch-heaven .welcome-box entry {
+  background-image: none;
+  background-color: #f8fcff;
+  color: #123257;
+  border-color: #8db7da;
+}
+
+.sketch-heaven .welcome-box scrolledwindow.frame,
+.sketch-heaven .welcome-box scrolledwindow.frame viewport,
+.sketch-heaven .welcome-box listbox,
+.sketch-heaven .welcome-box listbox row,
+.sketch-heaven .welcome-box listbox row box {
+  background-image: none;
+  background-color: #eef6ff;
+  color: #123257;
+}
+
+.sketch-heaven .welcome-box listbox row:hover,
+.sketch-heaven .welcome-box listbox row:focus,
+.sketch-heaven .welcome-box listbox row:selected {
+  background-color: #dcecff;
+}
+
+.sketch-heaven .welcome-box .dim-label {
+  color: alpha(#123257, 0.72);
+}
+
+.sketch-heaven .welcome-box .welcome-action-button,
+.sketch-heaven .welcome-box .welcome-action-button label,
+.sketch-heaven .welcome-box .welcome-action-button image {
+  color: #123257;
+}
+
+.sketch-heaven .welcome-box .welcome-recent-button,
+.sketch-heaven .welcome-box .welcome-recent-button:hover,
+.sketch-heaven .welcome-box .welcome-recent-button:active,
+.sketch-heaven .welcome-box .welcome-recent-button:checked {
+  background-image: none;
+  background-color: #f3f9ff;
+  color: #123257;
+  border: none;
+  border-radius: 10px;
+  box-shadow: none;
+  outline: none;
+}
+
+.sketch-heaven .welcome-box .welcome-recent-button:hover {
+  background-color: #dcecff;
+}
+
+.sketch-heaven .welcome-box .welcome-recent-row,
+.sketch-heaven .welcome-box .welcome-recent-row box,
+.sketch-heaven .welcome-box .welcome-recent-listbox row,
+.sketch-heaven .welcome-box .welcome-recent-listbox row box,
+.sketch-heaven .welcome-box .welcome-recent-scroll,
+.sketch-heaven .welcome-box .welcome-recent-scroll viewport {
+  background-image: none;
+  background-color: #e8f3ff;
+}
+
+.sketch-heaven .welcome-box .welcome-recent-listbox,
+.sketch-heaven .welcome-box .welcome-recent-listbox row,
+.sketch-heaven .welcome-box .welcome-recent-listbox row box,
+.sketch-heaven .welcome-box .welcome-recent-scroll,
+.sketch-heaven .welcome-box .welcome-recent-scroll viewport {
+  border: none;
+  outline: none;
+  box-shadow: none;
+}
+
+.sketch-heaven .welcome-box .welcome-recent-listbox separator,
+.sketch-heaven .welcome-box .welcome-recent-scroll separator {
+  background: transparent;
+  color: transparent;
+  min-height: 0;
+  min-width: 0;
+}
+
+.sketch-heaven .welcome-box .recent-item-box,
+.sketch-heaven .welcome-box .recent-item-box box,
+.sketch-heaven .welcome-box .recent-item-box label,
+.sketch-heaven .welcome-box .recent-item-box image {
+  background-image: none;
+  background-color: transparent;
+  color: #123257;
+}
+
+.sketch-heaven .welcome-box .recent-item-box .dim-label {
+  color: alpha(#123257, 0.72);
+}
+
+.sketch-heaven popover.recent-popover scrolledwindow.frame,
+.sketch-heaven popover.recent-popover scrolledwindow.frame viewport,
+.sketch-heaven popover.recent-popover .recent-listbox,
+.sketch-heaven popover.recent-popover .recent-listbox row,
+.sketch-heaven popover.recent-popover .recent-listbox row box,
+.sketch-heaven popover.recent-popover .recent-listbox row label,
+.sketch-heaven popover.recent-popover .recent-listbox row image {
+  background-image: none;
+  background-color: #eef6ff;
+  color: #123257;
+}
+
+.sketch-heaven popover.recent-popover .recent-listbox row:hover,
+.sketch-heaven popover.recent-popover .recent-listbox row:focus,
+.sketch-heaven popover.recent-popover .recent-listbox row:selected {
+  background-color: #dcecff;
+}
+
+.sketch-heaven popover.recent-popover .recent-search-entry {
+  background-image: none;
+  background-color: #f8fcff;
+  color: #123257;
+  border-color: #8db7da;
+}
+
+.sketch-heaven popover.recent-popover .recent-listbox .dim-label {
+  color: alpha(#123257, 0.72);
 }
 
 /* Flatten custom theme buttons so they match Dark theme mechanics */

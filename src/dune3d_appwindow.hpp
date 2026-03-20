@@ -72,6 +72,11 @@ public:
         return *m_welcome_open_folder_button;
     }
 
+    Gtk::Button &get_welcome_open_project_button()
+    {
+        return *m_welcome_open_project_button;
+    }
+
     Gtk::MenuButton &get_open_menu_button()
     {
         return *m_open_menu_button;
@@ -254,6 +259,7 @@ private:
     Gtk::Button *m_welcome_new_button = nullptr;
     Gtk::Button *m_welcome_open_button = nullptr;
     Gtk::Button *m_welcome_open_folder_button = nullptr;
+    Gtk::Button *m_welcome_open_project_button = nullptr;
 
     std::vector<std::pair<Gtk::Widget *, bool>> m_header_widgets_visibility_before_welcome;
     bool m_header_compact_for_welcome = false;

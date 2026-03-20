@@ -1,3 +1,26 @@
+# Version 1.5.1
+
+## New Features
+
+ - save and reopen full `.dxsp` projects with restored folders, files, colors, visibility, and active file state
+ - open multiple folders in the sketch sidebar instead of replacing the current folder
+ - add project controls to the sidebar and welcome screen
+ - add beginner-friendly tool hints with an in-app on/off switch
+
+## Enhancements
+
+ - workspace browser can now rename folders, sketches, and imported DXF files directly on disk
+ - folders, sketches, and DXF files can use color markers in the sidebar
+ - convert cluster content directly into editable geometry in the current sketch
+ - markers are now shown only for the active file when marker display is enabled
+ - improve Light and Light-Blue theme readability across welcome and recent views
+ - default window size updated for a more compact first launch
+ - ship Linux release artifacts as `.deb`, `.rpm`, and `.AppImage`
+
+## Notes
+
+ - Windows and macOS release builds are planned a little later while platform-specific issues are being resolved
+
 # Version 1.5.0
 
 ## New Features

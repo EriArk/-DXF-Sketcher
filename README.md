@@ -1,125 +1,177 @@
 # DXF Sketcher
 
-DXF Sketcher is a focused 2D DXF editor for fast drawing, cleanup, and fabrication prep.
+DXF Sketcher is a practical 2D editor for people who just want to open drawings, clean them up, build missing geometry, and get back to making things.
 
-It keeps the parametric sketching core from [dune3d](https://github.com/dune3d/dune3d), but reshapes the workflow around everyday DXF work: open a file or folder, edit directly on canvas, generate helper geometry, and export without a full mechanical CAD workflow getting in the way.
+It keeps the precise sketching core from [dune3d](https://github.com/dune3d/dune3d), but reshapes the workflow around real DXF work: open one file, open a whole folder, save a multi-file project, edit directly on canvas, and export without dragging a full mechanical CAD workflow into every small job.
+
+It is especially useful for laser cutting, CNC prep, templates, signs, enclosures, box layouts, gears, traced artwork, and everyday workshop drawing edits.
 
 <p align="center">
-  <img src="screenshots/main.png" alt="DXF Sketcher editor" width="900">
+  <img src="screenshots/Screenshot%20From%202026-03-20%2012-29-09.png" alt="DXF Sketcher editor" width="950">
 </p>
 
-## What It Does Well
+## Why People Use It
 
-- Open a single `DXF` file or browse a whole folder of drawings
-- Draw and edit directly on canvas with lightweight sketch tools
-- Keep constraints, dimensions, and precise geometry when needed
+- Open a single `DXF`, a whole folder of `DXF` files, or a saved project
+- Edit geometry directly on the canvas instead of fighting a heavy CAD workflow
+- Keep constraints, measurements, snapping, and precise sketch tools when you need them
+- Generate fabrication helpers inside the app instead of jumping between separate tools
 - Save back to `DXF` or export through `Save As` to `DXF` or `SVG`
-- Generate fabrication-ready geometry inside the app instead of bouncing between separate tools
 
-## Main Features
+## What You Can Do
 
-### Drawing and editing
+### Fast DXF editing
 
-- Contour drawing
-- Rectangle and rounded rectangle tools
-- Circles, arcs, and regular polygons
-- Text placement
-- Direct selection, move, duplicate, and cleanup workflows
-- Symmetry tools and layered sketch organization
+- Draw contours, rectangles, rounded rectangles, circles, arcs, polygons, and text
+- Move, duplicate, trim, clean up, and refine geometry directly on the sketch
+- Use grid, snapping, markers, and symmetry tools while drawing
+- Organize sketch content with layers and visibility controls
+- Convert imported cluster geometry into editable geometry in place
 
-### Fabrication tools
+### Work with real file sets
 
-- Built-in **Boxes** catalog powered by bundled `boxes.py`
-- **Edge Tools** for joints, hinges, grooves, lids, flex cuts, handles, and utility edge operations
-- Built-in **Gears** generator
+- Open one file when you just need a quick edit
+- Open full folders when a job is split into many `DXF` files
+- Color-mark folders and files, rename them, and toggle visibility from the side panel
+- Save the entire job as a project file (`.dxsp`)
+
+When you save a project, DXF Sketcher creates a project folder, copies in the relevant files and folders, and remembers:
+
+- file and folder visibility
+- file and folder color markers
+- the currently active file
+- the overall project structure
+
+That makes it easy to stop and continue later exactly where you left off.
+
+### Built-in fabrication helpers
+
+- **Edge Tools** for finger joints, grooves, hinges, lids, flex cuts, handles, and related edge operations
+- **Boxes** integration with bundled `boxes.py`, including catalog, preview, settings, gallery, and import
+- **Gears** generator for involute gears directly in the sketch
 - **Cup Template** helper
-- **Import Raster** and **Trace Image**
+- **Import Raster** for cleanup before vectorizing
+- **Trace Image** for turning artwork into editable vector geometry
 
-### Workflow polish
+### Easier to learn
 
-- Five built-in theme variants: `Light`, `Mix`, `Dark`, `Light-Blue`, `Blue`
-- Accent color selection from the in-app menu
-- Consistent themed generator and import windows
-- Practical toolbar and popover-driven sketch workflow
+- Short built-in tool hints for new users
+- Quick popovers on the main toolbar instead of digging through deep menus
+- Five built-in interface themes: `Light`, `Mix`, `Dark`, `Blue`, `Light-Blue`
+- Accent colors and line-thickness tuning from the in-app menu
 
 ## Typical Workflows
 
-### Edit a DXF quickly
+### 1. Open and fix a DXF
 
-1. Open one file or a folder with multiple DXF files.
-2. Choose the sketch you want to work on.
-3. Draw, trim, move, constrain, trace, or generate helper geometry.
-4. Save back to `DXF` or export to `DXF` / `SVG`.
+1. Open one file, a folder, or an existing project.
+2. Pick the sketch you want to work on.
+3. Edit, redraw, constrain, or clean up geometry on canvas.
+4. Save back to `DXF` or export to `SVG`.
 
-### Prepare fabrication geometry
+### 2. Prepare parts for cutting
 
-- Use **Boxes** to generate layouts from real `boxes.py` parameters
-- Use **Edge Tools** to apply finger joints, grooves, hinges, slide-on lids, flex cuts, and other edge treatments
-- Use **Gears** to build involute gear outlines directly in the sketch
-- Use **Import Raster** and **Trace Image** to turn bitmap artwork into editable vector geometry
+1. Draw or import the base outline.
+2. Apply **Edge Tools** for joints, grooves, lids, or flex features.
+3. Add text, markers, helper geometry, or traced graphics.
+4. Export the final file for fabrication.
+
+### 3. Build a full job package
+
+1. Open several folders and files.
+2. Color-mark and show/hide what matters.
+3. Save everything into one `.dxsp` project.
+4. Reopen later with the same structure and visibility state restored.
 
 ## Screenshots
 
 <table>
   <tr>
     <td align="center" width="50%">
-      <img src="screenshots/import-raster.png" alt="Import Raster" width="100%"><br>
+      <img src="screenshots/Screenshot%20From%202026-03-20%2012-28-43.png" alt="Welcome screen" width="100%"><br>
+      <strong>Quick start</strong><br>
+      Open recent files, folders, or full projects from the start screen.
+    </td>
+    <td align="center" width="50%">
+      <img src="screenshots/Screenshot%20From%202026-03-20%2012-29-09.png" alt="Main editor" width="100%"><br>
+      <strong>Main editor</strong><br>
+      Direct sketch editing with markers, clean canvas tools, and fabrication-friendly workflow.
+    </td>
+  </tr>
+  <tr>
+    <td align="center" width="50%">
+      <img src="screenshots/Screenshot%20From%202026-03-20%2012-34-51.png" alt="Edge Tools" width="100%"><br>
+      <strong>Edge Tools</strong><br>
+      Apply joints and edge treatments from a compact popover.
+    </td>
+    <td align="center" width="50%">
+      <img src="screenshots/Screenshot%20From%202026-03-20%2012-36-37.png" alt="Gears generator" width="100%"><br>
+      <strong>Gears generator</strong><br>
+      Build involute gears without leaving the sketch.
+    </td>
+  </tr>
+  <tr>
+    <td align="center" width="50%">
+      <img src="screenshots/Screenshot%20From%202026-03-20%2012-39-06.png" alt="Boxes integration" width="100%"><br>
+      <strong>Boxes integration</strong><br>
+      Browse templates, change parameters, preview the result, and import it straight into the project.
+    </td>
+    <td align="center" width="50%">
+      <img src="screenshots/Screenshot%20From%202026-03-20%2012-49-21.png" alt="Import Raster" width="100%"><br>
       <strong>Import Raster</strong><br>
-      Preprocess a bitmap before tracing or applying it.
+      Adjust an image before tracing or using it as a sketch reference.
     </td>
+  </tr>
+  <tr>
     <td align="center" width="50%">
-      <img src="screenshots/trace-image.png" alt="Trace Image" width="100%"><br>
+      <img src="screenshots/Screenshot%20From%202026-03-20%2012-49-46.png" alt="Trace Image" width="100%"><br>
       <strong>Trace Image</strong><br>
-      Convert raster artwork into editable sketch geometry.
-    </td>
-  </tr>
-  <tr>
-    <td align="center" width="50%">
-      <img src="screenshots/gears-generator.png" alt="Gears generator" width="100%"><br>
-      <strong>Gears Generator</strong><br>
-      Create involute gear geometry inside the app.
+      Turn bitmap artwork into editable vector geometry.
     </td>
     <td align="center" width="50%">
-      <img src="screenshots/boxes-window.png" alt="Boxes window" width="100%"><br>
-      <strong>Boxes</strong><br>
-      Preview templates, adjust native parameters, and import the result.
-    </td>
-  </tr>
-  <tr>
-    <td align="center" width="50%">
-      <img src="screenshots/boxes-catalog.png" alt="Boxes catalog" width="100%"><br>
-      <strong>Boxes Catalog</strong><br>
-      Browse categories, favorites, and templates.
-    </td>
-    <td align="center" width="50%">
-      <img src="screenshots/boxes-gallery.png" alt="Boxes gallery" width="100%"><br>
-      <strong>Boxes Gallery</strong><br>
-      Browse sample photos visually before importing.
+      <img src="screenshots/Screenshot%20From%202026-03-20%2012-51-27.png" alt="Light Blue theme" width="100%"><br>
+      <strong>Theme options</strong><br>
+      Switch between multiple built-in themes and accent colors.
     </td>
   </tr>
 </table>
 
-## Install
+## Download
 
-Current stable release: **1.5.0**
+Current release: **1.5.1**
 
-Releases are published on GitHub:
+GitHub releases:
 
 - https://github.com/EriArk/-DXF-Sketcher/releases
 
-Current Debian package:
+Linux release files include:
 
-- `dxfsketcher_1.5.0_amd64.deb`
+- `.deb`
+- `.rpm`
+- `.AppImage`
 
-Install on Debian or Ubuntu:
+Example install commands:
 
 ```bash
-sudo apt install ./dxfsketcher_1.5.0_amd64.deb
+sudo apt install ./dxfsketcher_1.5.1_amd64.deb
 ```
 
-## Build From Source
+```bash
+sudo rpm -i dxfsketcher-1.5.1-1.x86_64.rpm
+```
 
-DXF Sketcher is built as the sketcher-only variant of the project:
+```bash
+chmod +x dxfsketcher-1.5.1-x86_64.AppImage
+./dxfsketcher-1.5.1-x86_64.AppImage
+```
+
+## Platform Status
+
+Linux is the main release target right now.
+
+Windows and macOS versions will arrive a little later. They are planned, but there are still a few platform-specific issues we want to sort out before shipping builds there.
+
+## Build From Source
 
 ```bash
 meson setup build-sketcher -Dsketcher_only=true
@@ -127,17 +179,19 @@ ninja -C build-sketcher dxfsketcher
 ./build-sketcher/dxfsketcher
 ```
 
-To build a Debian package locally:
+To build release packages locally:
 
 ```bash
 bash scripts/build_deb.sh build-sketcher
+bash scripts/build_rpm.sh build-sketcher
+bash scripts/build_appimage.sh build-sketcher
 ```
 
 ## Project Notes
 
-- `DXF` is the main editable document workflow
+- The main editable workflow is `DXF`
 - `SVG` export is available through `Save As`
-- The app is tuned for 2D sketching and fabrication prep, not full 3D solid-model CAD
+- DXF Sketcher is focused on 2D sketching and fabrication prep, not full 3D solid-model CAD
 
 ## Acknowledgements
 

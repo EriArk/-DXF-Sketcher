@@ -200,7 +200,7 @@ const std::map<ActionToolID, ActionCatalogItem> action_catalog = {
          {"Constrain tangent to be symmetric", ActionGroup::CONSTRAIN, ActionCatalogItem::FLAGS_DEFAULT}},
         {ToolID::IMPORT_DXF, {"Import DXF", ActionGroup::UNKNOWN, ActionCatalogItem::FLAGS_DEFAULT}},
         {ToolID::CREATE_CLUSTER, {"Create cluster", ActionGroup::UNKNOWN, ActionCatalogItem::FLAGS_DEFAULT}},
-        {ActionID::EXPLODE_CLUSTER, {"Explode cluster", ActionGroup::UNKNOWN, ActionCatalogItem::FLAGS_SPECIFIC}},
+        {ActionID::EXPLODE_CLUSTER, {"Convert to geometry", ActionGroup::UNKNOWN, ActionCatalogItem::FLAGS_SPECIFIC}},
         {ActionID::UNEXPLODE_CLUSTER, {"Unexplode cluster", ActionGroup::UNKNOWN, ActionCatalogItem::FLAGS_DEFAULT}},
         {ActionID::TOGGLE_PREVIOUS_CONSTRUCTION_ENTITIES,
          {"Toggle previous construction entities", ActionGroup::VIEW, ActionCatalogItem::FLAGS_IN_TOOL}},
