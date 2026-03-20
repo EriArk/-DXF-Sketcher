@@ -40,6 +40,11 @@
   opacity: 0.68;
 }
 
+.welcome-support-spacer {
+  min-width: 22px;
+  min-height: 22px;
+}
+
 .welcome-support-button:hover,
 .welcome-support-button:checked {
   opacity: 1;
