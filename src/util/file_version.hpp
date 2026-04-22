@@ -26,8 +26,6 @@ public:
 
     std::string get_message() const;
 
-    static const std::string learn_more_markup;
-
 private:
     unsigned int m_app = 0;
     unsigned int m_file = 0;

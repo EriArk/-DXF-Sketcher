@@ -16,8 +16,6 @@
 #include "core/tool_id.hpp"
 #include "in_tool_action/in_tool_action.hpp"
 #include "in_tool_action/in_tool_action_catalog.hpp"
-#include <iostream>
-#include <iomanip>
 #include <sstream>
 #include <vector>
 #include <set>
@@ -269,9 +267,6 @@ void Dune3DApplication::on_startup()
     }
     CATCH_LOG(Logger::Level::CRITICAL, "error loading preferences", Logger::Domain::UNSPECIFIED)
 
-    // std::cout << std::setw(4) << m_preferences.serialize() << std::endl;
-
-
     add_action("preferences", [this] {
         auto pwin = show_preferences_window();
         pwin->show_page("editor");
@@ -339,7 +334,6 @@ PreferencesWindow *Dune3DApplication::show_preferences_window(guint32 timestamp)
         m_preferences_window = new PreferencesWindow(m_preferences);
         m_preferences_window->set_hide_on_close(true);
         m_preferences_window->signal_hide().connect([this] {
-            std::cout << "pref save" << std::endl;
             m_preferences.save();
             delete m_preferences_window;
             m_preferences_window = nullptr;

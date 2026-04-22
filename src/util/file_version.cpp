@@ -28,20 +28,15 @@ void FileVersion::update_file_from_app()
     m_file = m_app;
 }
 
-const std::string FileVersion::learn_more_markup =
-        "<a href=\"https://docs.dune3d.org/en/latest/version.html\">Learn more</a>";
-
 std::string FileVersion::get_message() const
 {
     if (m_app > m_file) {
-        return "This Document has been created with an older version of Dune 3D. Saving will update it to the latest "
-               "version that might be incompatible with older versions of Dune 3D. "
-               + learn_more_markup;
+        return "This document uses an older file-format version. Saving will update it to the current DXF Sketcher "
+               "format and may make it incompatible with older DXF Sketcher builds.";
     }
     else if (m_file > m_app) {
-        return "This Document has been created with a newer version of Dune 3D. Some content may not display "
-               "correctly. To preserve fidelity, this Document has been opened read-only. "
-               + learn_more_markup;
+        return "This document uses a newer file-format version. Some content may not display correctly, so it has "
+               "been opened read-only to avoid accidental data loss.";
     }
     else {
         return "";

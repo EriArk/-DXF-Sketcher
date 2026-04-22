@@ -10,11 +10,16 @@
 #include "canvas/canvas.hpp"
 #include "dune3d_appwindow.hpp"
 #include "dune3d_application.hpp"
+#include "logger/logger.hpp"
 #include "util/template_util.hpp"
 #include "util/step_exporter.hpp"
-#include <iostream>
 
 namespace dune3d {
+
+static void log_export_dialog_failure(const char *dialog_name, const Glib::Error &err)
+{
+    Logger::log_warning(std::string(dialog_name) + " failed", Logger::Domain::EDITOR, err.what());
+}
 
 static Glib::RefPtr<Gio::File>
 get_export_initial_filename(const Dune3DApplication::UserConfig &cfg, const IDocumentInfo &doc_info, const UUID &group,
@@ -180,12 +185,11 @@ void Editor::on_export_solid_model(const ActionConnection &conn)
             set_export_initial_filename(m_win.get_app().m_user_config, doc_info, group_uuid, export_type,
                                         path_to_string(path));
         }
-        catch (const Gtk::DialogError &err) {
-            // Can be thrown by dialog->open_finish(result).
-            std::cout << "No file selected. " << err.what() << std::endl;
+        catch (const Gtk::DialogError &) {
+            // User cancelled the dialog.
         }
         catch (const Glib::Error &err) {
-            std::cout << "Unexpected exception. " << err.what() << std::endl;
+            log_export_dialog_failure("Export solid dialog", err);
         }
     };
     dialog->save(m_win, handle_response);
@@ -251,12 +255,11 @@ void Editor::on_export_paths(const ActionConnection &conn)
             set_export_initial_filename(m_win.get_app().m_user_config, m_core.get_current_idocument_info(),
                                         &Dune3DApplication::UserConfig::ExportPaths::paths, path_to_string(path));
         }
-        catch (const Gtk::DialogError &err) {
-            // Can be thrown by dialog->open_finish(result).
-            std::cout << "No file selected. " << err.what() << std::endl;
+        catch (const Gtk::DialogError &) {
+            // User cancelled the dialog.
         }
         catch (const Glib::Error &err) {
-            std::cout << "Unexpected exception. " << err.what() << std::endl;
+            log_export_dialog_failure("Export paths dialog", err);
         }
     });
 }
@@ -349,12 +352,11 @@ void Editor::on_export_projection(const ActionConnection &conn)
                                             path_to_string(path));
             }
         }
-        catch (const Gtk::DialogError &err) {
-            // Can be thrown by dialog->open_finish(result).
-            std::cout << "No file selected. " << err.what() << std::endl;
+        catch (const Gtk::DialogError &) {
+            // User cancelled the dialog.
         }
         catch (const Glib::Error &err) {
-            std::cout << "Unexpected exception. " << err.what() << std::endl;
+            log_export_dialog_failure("Export projection dialog", err);
         }
     });
 }

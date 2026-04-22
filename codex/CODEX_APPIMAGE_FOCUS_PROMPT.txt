@@ -1,0 +1,43 @@
+Read these files first and follow them strictly before doing anything else:
+
+- CODEX_MASTER_BRIEF_DXF_SKETCHER.md
+- CODEX_EXECUTION_PROTOCOL.md
+- DXF_SKETCHER_REFACTOR_PLAN.md
+- DXF_SKETCHER_POLISH_STANDARD.md
+- DXF_SKETCHER_APPIMAGE_TRACK.md
+- DXF_SKETCHER_WORKLOG.md
+
+Then do this in order:
+
+1. Restore the project context from those files.
+2. Summarize the current AppImage / release-polish state.
+3. Inspect the real relevant files before editing:
+   - scripts/build_appimage.sh
+   - meson.build
+   - desktop / metainfo / icon install files
+   - any icon/theme-related UI code that looks relevant
+4. Determine whether the best AppImage-focused session target is:
+   - A) icon / placeholder regression,
+   - B) update metadata / Gear Lever friendliness.
+5. Explain why one of those is the best one-session move right now.
+6. Explain the micro-plan before editing.
+7. Implement only one safe, scoped step.
+8. Validate as far as possible.
+9. Update DXF_SKETCHER_WORKLOG.md.
+10. Report back in this structure:
+   - Session restore
+   - Current AppImage state
+   - Chosen AppImage focus
+   - Micro-plan
+   - Changes made
+   - Files touched
+   - Validation
+   - Worklog update
+   - Next AppImage candidates
+
+Important rules:
+- Do not guess the cause of the icon issue without checking build path and artifact contents.
+- Explicitly check whether GTK plugin fallback is relevant.
+- Do not treat launcher icon success as proof that all in-app icons are fine.
+- Prefer embedded update metadata and reproducible release flow over manual post-install workarounds.
+- Do not mix both AppImage tracks into one huge session unless the change remains genuinely small and safe.

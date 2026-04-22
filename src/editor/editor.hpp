@@ -435,6 +435,7 @@ private:
     Gtk::Switch *m_gears_generator_ratio_degrees_switch = nullptr;
     Gtk::Box *m_gears_generator_pair_box = nullptr;
     Gtk::Label *m_gears_generator_ratio_label = nullptr;
+    Gtk::Label *m_gears_generator_ratio_unit_label = nullptr;
     Gtk::SpinButton *m_gears_generator_diameter1_spin = nullptr;
     Gtk::SpinButton *m_gears_generator_ratio_spin = nullptr;
     Gtk::Label *m_gears_generator_summary_label = nullptr;

@@ -1,5 +1,6 @@
 #include "step_exporter.hpp"
 #include "util/fs_util.hpp"
+#include "version.hpp"
 
 #include <APIHeaderSection_MakeHeader.hxx>
 #include <Quantity_Color.hxx>
@@ -14,11 +15,27 @@
 #include <XCAFDoc_ShapeTool.hxx>
 
 #include <memory>
+#include <string>
 
 namespace dune3d {
+namespace {
+std::string get_step_header_subject(const std::string &assembly_name)
+{
+    if (!assembly_name.empty())
+        return assembly_name;
+    return "DXF Sketcher export";
+}
+
+std::string get_step_originating_system()
+{
+    return "DXF Sketcher " + Version::get_string();
+}
+} // namespace
+
 struct STEPExporter::Impl {
     Handle(TDocStd_Document) doc;
     TDF_Label assy;
+    std::string assembly_name;
 };
 
 STEPExporter::STEPExporter(const char *assy_name) : m_impl(std::make_unique<Impl>())
@@ -27,8 +44,10 @@ STEPExporter::STEPExporter(const char *assy_name) : m_impl(std::make_unique<Impl
     app->NewDocument("MDTV-XCAF", m_impl->doc);
     auto shape_tool = XCAFDoc_DocumentTool::ShapeTool(m_impl->doc->Main());
     m_impl->assy = shape_tool->NewShape();
-    if (assy_name)
+    if (assy_name) {
+        m_impl->assembly_name = assy_name;
         TDataStd_Name::Set(m_impl->assy, assy_name);
+    }
 }
 
 STEPExporter::~STEPExporter() = default;
@@ -61,11 +80,13 @@ void STEPExporter::write(const std::filesystem::path &path) const
     }
 
     APIHeaderSection_MakeHeader hdr(writer.ChangeWriter().Model());
-    hdr.SetName(new TCollection_HAsciiString("Body"));
-    hdr.SetAuthorValue(1, new TCollection_HAsciiString("An Author"));
-    hdr.SetOrganizationValue(1, new TCollection_HAsciiString("A Company"));
-    hdr.SetOriginatingSystem(new TCollection_HAsciiString("Dune 3D"));
-    hdr.SetDescriptionValue(1, new TCollection_HAsciiString("Body"));
+    const auto subject = get_step_header_subject(m_impl->assembly_name);
+    const auto originating_system = get_step_originating_system();
+    hdr.SetName(new TCollection_HAsciiString(subject.c_str()));
+    hdr.SetAuthorValue(1, new TCollection_HAsciiString("DXF Sketcher contributors"));
+    hdr.SetOrganizationValue(1, new TCollection_HAsciiString("DXF Sketcher"));
+    hdr.SetOriginatingSystem(new TCollection_HAsciiString(originating_system.c_str()));
+    hdr.SetDescriptionValue(1, new TCollection_HAsciiString(subject.c_str()));
 
     if (Standard_False == writer.Write(path_to_string(path).c_str()))
         throw std::runtime_error("write error");

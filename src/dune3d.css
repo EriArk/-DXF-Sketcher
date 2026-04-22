@@ -33,16 +33,16 @@
 }
 
 .welcome-support-button {
-  min-width: 22px;
-  min-height: 22px;
-  padding: 0;
+  min-width: 78px;
+  min-height: 26px;
+  padding: 0 10px;
   border-radius: 999px;
-  opacity: 0.68;
+  opacity: 0.78;
 }
 
 .welcome-support-spacer {
-  min-width: 22px;
-  min-height: 22px;
+  min-width: 78px;
+  min-height: 26px;
 }
 
 .welcome-support-button:hover,
@@ -52,6 +52,7 @@
 
 .welcome-support-button > label {
   font-weight: 700;
+  font-size: 0.9rem;
 }
 
 .welcome-support-popover contents,

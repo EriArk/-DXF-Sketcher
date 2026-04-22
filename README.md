@@ -138,7 +138,7 @@ That makes it easy to stop and continue later exactly where you left off.
 
 ## Download
 
-Current release: **1.5.1**
+Current release: **1.5.2**
 
 GitHub releases:
 
@@ -153,17 +153,23 @@ Linux release files include:
 Example install commands:
 
 ```bash
-sudo apt install ./dxfsketcher_1.5.1_amd64.deb
+sudo apt install ./dxfsketcher_1.5.2_amd64.deb
 ```
 
 ```bash
-sudo rpm -i dxfsketcher-1.5.1-1.x86_64.rpm
+sudo rpm -i dxfsketcher-1.5.2-1.x86_64.rpm
 ```
 
 ```bash
-chmod +x dxfsketcher-1.5.1-x86_64.AppImage
-./dxfsketcher-1.5.1-x86_64.AppImage
+chmod +x dxfsketcher-1.5.2-x86_64.AppImage
+./dxfsketcher-1.5.2-x86_64.AppImage
 ```
+
+## What's New in 1.5.2
+
+- Cleaner, more consistent toolbar popovers for selection, grid, symmetry, gears, cup templates, and edge tools
+- Shorter joint labels and tidier parameter rows so edge settings are easier to scan
+- Stronger Linux release packaging, including AppImage update metadata plus the `.zsync` companion used by Gear Lever style update flows
 
 ## Platform Status
 
@@ -195,6 +201,28 @@ bash scripts/build_deb.sh build-sketcher
 bash scripts/build_rpm.sh build-sketcher
 bash scripts/build_appimage.sh build-sketcher
 ```
+
+## AppImage Update Metadata
+
+`scripts/build_appimage.sh` now supports embedding AppImage update information for GitHub Releases / Gear Lever style update flows.
+
+- If the checkout has a GitHub `origin`, the script auto-derives a `gh-releases-zsync` update source.
+- You can override it with `APPIMAGE_UPDATE_INFORMATION` or `UPD_INFO`.
+- You can also force a specific GitHub target with `APPIMAGE_GITHUB_REPO=owner/repo`.
+- By default the release channel is `latest`; override it with `APPIMAGE_GITHUB_RELEASE`.
+
+Example:
+
+```bash
+APPIMAGE_GITHUB_REPO=EriArk/-DXF-Sketcher bash scripts/build_appimage.sh build-sketcher
+./dist/appimage/dxfsketcher-1.5.2-x86_64.AppImage --appimage-updateinformation
+```
+
+If `appimagetool` has zsync support available, it also writes a matching `.zsync` companion file next to the `.AppImage`.
+For GitHub releases, upload both files together:
+
+- `dxfsketcher-<version>-<arch>.AppImage`
+- `dxfsketcher-<version>-<arch>.AppImage.zsync`
 
 ## Project Notes
 

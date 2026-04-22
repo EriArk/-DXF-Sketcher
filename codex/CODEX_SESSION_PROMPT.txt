@@ -1,0 +1,63 @@
+Read these files first and follow them strictly before doing anything else:
+
+- CODEX_MASTER_BRIEF_DXF_SKETCHER.md
+- CODEX_EXECUTION_PROTOCOL.md
+- DXF_SKETCHER_REFACTOR_PLAN.md
+- DXF_SKETCHER_POLISH_STANDARD.md
+- DXF_SKETCHER_APPIMAGE_TRACK.md
+- DXF_SKETCHER_WORKLOG.md
+
+Then do this in order:
+
+1. Restore the project context from those files.
+2. Summarize:
+   - current stage,
+   - completed work,
+   - open risks,
+   - product direction,
+   - estimated remaining sessions to finish the current plan at the current scope.
+3. For the remaining-session estimate:
+   - do not pretend precision,
+   - give a range,
+   - include:
+     - optimistic,
+     - realistic,
+     - conservative,
+   - explain briefly what could move the estimate up or down.
+4. Inspect the real relevant code and packaging files before editing anything.
+5. Propose 3 candidate next steps from the plan and track files.
+6. Compare them briefly by:
+   - polish impact,
+   - user-visible impact,
+   - risk,
+   - readiness,
+   - fit for one session.
+7. Choose ONE best next step.
+8. Explain the micro-plan before editing.
+9. Implement it carefully without unrelated changes.
+10. Validate the result as far as possible.
+11. Update DXF_SKETCHER_WORKLOG.md.
+12. Recalculate the remaining-session estimate after the session based on what was actually completed.
+13. Report back in this structure:
+   - Session restore
+   - Remaining sessions estimate
+   - Candidate steps considered
+   - Chosen step
+   - Micro-plan
+   - Changes made
+   - Files touched
+   - Validation
+   - Worklog update
+   - Remaining sessions after this session
+   - Next recommended candidates
+
+Important rules:
+- Do not skip reading the state files.
+- Do not invent missing context from memory.
+- Do not assume the first unresolved plan item must be next.
+- Do not drift into unrelated feature work.
+- Do not do giant refactors unless clearly justified by the current step.
+- Treat packaging / AppImage regressions as real product issues, not as optional afterthoughts.
+- Keep DXF Sketcher practical, clean, workshop-friendly, cohesive, and not heavy-CAD-like.
+- Always show the remaining-session estimate as an estimate, never as a guaranteed exact count.
+- Re-read the state files every new session even if the previous session felt recent.

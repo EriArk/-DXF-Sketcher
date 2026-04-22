@@ -5,7 +5,6 @@
 #include "document/group/igroup_source_group.hpp"
 #include "workspace/document_view.hpp"
 #include "util/fs_util.hpp"
-#include <iostream>
 #include <memory>
 
 namespace dune3d {
@@ -1014,7 +1013,6 @@ WorkspaceBrowser::WorkspaceBrowser(Core &core) : Gtk::Box(Gtk::Orientation::VERT
           if (!tr)
               return;
           if (auto gr = std::dynamic_pointer_cast<WorkspaceBrowser::GroupItem>(tr->get_item())) {
-              std::cout << "sel gr " << gr->m_name << std::endl;
               m_signal_group_selected.emit(gr->m_doc, gr->m_uuid);
           }
       });*/
@@ -1084,7 +1082,7 @@ WorkspaceBrowser::WorkspaceBrowser(Core &core) : Gtk::Box(Gtk::Orientation::VERT
     m_info_bar->set_revealed(false);
     m_info_bar->set_message_type(Gtk::MessageType::ERROR);
     m_info_bar_icon = Gtk::make_managed<Gtk::Image>();
-    m_info_bar_label = Gtk::make_managed<Gtk::Label>("foo");
+    m_info_bar_label = Gtk::make_managed<Gtk::Label>();
     m_info_bar_label->signal_activate_link().connect(
             [this](const std::string &link) {
                 m_signal_activate_link.emit(link);

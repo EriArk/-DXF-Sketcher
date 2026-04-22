@@ -730,7 +730,7 @@ void Dune3DAppWindow::set_window_title_from_path(const std::filesystem::path &pa
 
 void Dune3DAppWindow::set_window_title(const std::string &extra)
 {
-    std::string title = "Dune 3D";
+    std::string title = "DXF Sketcher";
     if (!extra.empty()) {
         title = extra + " - " + title;
     }

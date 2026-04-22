@@ -1,3 +1,17 @@
+# Version 1.5.2
+
+## Enhancements
+
+ - make the most-used toolbar popovers feel more consistent with tighter control rows, steadier widths, and clearer section structure
+ - shorten verbose Edge Tools joint labels so advanced settings are easier to scan
+ - clean up remaining DXF Sketcher wording in file-version and app surfaces
+ - improve AppImage release maturity with embedded update metadata, `.zsync` companion generation, and release-side upload support for Gear Lever style update flows
+
+## Notes
+
+ - Linux remains the main release target
+ - this release continues the workshop-first polish pass rather than adding heavy-CAD complexity
+
 # Version 1.5.1
 
 ## New Features

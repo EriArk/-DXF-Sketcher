@@ -80,6 +80,13 @@ jobs:
       - name: Build AppImage
         run: bash scripts/build_appimage.sh $BUILD_DIR
 
+      - name: Verify AppImage update companion
+        run: |
+          compgen -G "dist/appimage/*.AppImage.zsync" > /dev/null || {
+            echo "Missing AppImage .zsync companion in dist/appimage"
+            exit 1
+          }
+
       - name: Upload Debian package
         uses: actions/upload-artifact@v4
         with:
@@ -91,7 +98,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: dxfsketcher-appimage
-          path: dist/appimage/*.AppImage
+          path: |
+            dist/appimage/*.AppImage
+            dist/appimage/*.AppImage.zsync
           if-no-files-found: error
 
       - name: Upload RPM package
@@ -106,9 +115,15 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          shopt -s nullglob
+          appimage_assets=(dist/appimage/*.AppImage dist/appimage/*.AppImage.zsync)
+          if [ "${#appimage_assets[@]}" -eq 0 ]; then
+            echo "No AppImage assets found in dist/appimage"
+            exit 1
+          fi
           gh release upload "$RELEASE_TAG" \
             dist/deb/*.deb \
             dist/rpm/*.rpm \
-            dist/appimage/*.AppImage \
+            "${appimage_assets[@]}" \
             --repo "${{ github.repository }}" \
             --clobber

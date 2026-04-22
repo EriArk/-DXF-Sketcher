@@ -89,7 +89,7 @@ Canvas::Canvas()
     m_selection_menu->add_css_class("selection-menu");
     m_selection_menu->set_parent(*this);
     {
-        auto label = Gtk::make_managed<Gtk::Label>("foo");
+        auto label = Gtk::make_managed<Gtk::Label>();
         m_selection_menu->set_child(*label);
     }
 }
@@ -902,7 +902,6 @@ glm::vec3 Canvas::get_center_shift(const glm::vec2 &shift) const
 
 void Canvas::on_realize()
 {
-    std::cout << "realize" << std::endl;
 #if GTK_CHECK_VERSION(4, 12, 0)
     gtk_gl_area_set_allowed_apis(gobj(), GDK_GL_API_GL);
 #endif
@@ -1417,7 +1416,6 @@ void Canvas::on_resize(int width, int height)
     const auto scale_factor = get_scale_factor();
     if (width == m_dev_width && height == m_dev_height && scale_factor == m_scale_factor)
         return;
-    std::cout << "resize " << width << "x" << height << std::endl;
     m_dev_width = width;
     m_dev_height = height;
     m_height = get_height();

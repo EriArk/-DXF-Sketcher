@@ -1,6 +1,5 @@
 #include "capture_dialog.hpp"
 #include "util/key_util.hpp"
-#include <iostream>
 
 namespace dune3d {
 
@@ -32,7 +31,7 @@ CaptureDialog::CaptureDialog(Gtk::Window *parent)
 
     m_capture_label = Gtk::make_managed<Gtk::Entry>();
     m_capture_label->set_editable(false);
-    m_capture_label->set_placeholder_text("type here");
+    m_capture_label->set_placeholder_text("Press shortcut");
 
     {
         auto controller = Gtk::EventControllerKey::create();

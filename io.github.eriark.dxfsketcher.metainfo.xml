@@ -5,7 +5,9 @@
   <project_license>GPL-3.0+</project_license>
   <name>DXF Sketcher</name>
   <summary>Practical 2D DXF sketch editor</summary>
-  <developer_name>DXF Sketcher contributors</developer_name>
+  <developer id="io.github.eriark">
+    <name>DXF Sketcher contributors</name>
+  </developer>
 
   <description>
     <p>DXF Sketcher is a practical 2D DXF editor focused on fast everyday sketch workflows.</p>
@@ -20,19 +22,21 @@
   <url type="vcs-browser">https://github.com/EriArk/-DXF-Sketcher</url>
 
   <supports>
-    <control>touch</control>
-  </supports>
-
-  <requires>
     <control>pointing</control>
     <control>keyboard</control>
-  </requires>
+    <control>touch</control>
+  </supports>
 
   <provides>
     <binary>dxfsketcher</binary>
   </provides>
 
   <releases>
+    <release version="1.5.2" date="2026-04-22">
+      <description>
+        <p>Polish release with cleaner toolbar popovers, more readable edge-tool settings, improved DXF Sketcher copy cleanup, and AppImage releases that now publish update metadata plus the matching .zsync companion for Gear Lever style updates.</p>
+      </description>
+    </release>
     <release version="1.5.1" date="2026-03-20">
       <description>
         <p>Release focused on workflow polish: project save/open support, multi-folder sketch browsing, clearer onboarding hints, improved light themes, and Linux release packaging in DEB, RPM, and AppImage formats.</p>

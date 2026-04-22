@@ -282,6 +282,20 @@ JOINT_FAMILY_SPECS = [
     },
 ]
 
+JOINT_ARG_LABEL_OVERRIDES = {
+    "finger": {
+        "FingerJoint_style": "Style",
+        "FingerJoint_surroundingspaces": "Margin",
+        "FingerJoint_bottom_lip": "Lip",
+        "FingerJoint_edge_width": "Inset",
+        "FingerJoint_extra_length": "Extra",
+        "FingerJoint_finger": "Finger",
+        "FingerJoint_play": "Play",
+        "FingerJoint_space": "Gap",
+        "FingerJoint_width": "Hole",
+    },
+}
+
 
 def get_translation():
     localedir = ROOT / "locale"
@@ -428,10 +442,25 @@ def settings_metadata(settings_cls: type[boxes.edges.Settings], prefix: str) -> 
     return args, groups
 
 
+def compact_joint_arg_label(family_id: str, prefix: str, dest: str, label: str) -> str:
+    override = JOINT_ARG_LABEL_OVERRIDES.get(family_id, {}).get(dest)
+    if override:
+        return override
+
+    prefix_label = f"{prefix} "
+    if label.startswith(prefix_label):
+        compact = label[len(prefix_label):].strip()
+        if compact:
+            return compact[:1].upper() + compact[1:]
+    return label
+
+
 def discover_joint_families() -> dict[str, dict[str, object]]:
     families: dict[str, dict[str, object]] = {}
     for spec in JOINT_FAMILY_SPECS:
         args, groups = settings_metadata(spec["settings_cls"], spec["prefix"])
+        for item in args:
+            item["label"] = compact_joint_arg_label(spec["id"], spec["prefix"], str(item["dest"]), str(item["label"]))
         family = dict(spec)
         family["args"] = args
         family["arg_groups"] = groups

@@ -54,7 +54,6 @@
 #include "nlohmann/json.hpp"
 #include "buffer.hpp"
 #include "icon_texture_id.hpp"
-#include <iostream>
 #include <cstdlib>
 #include <cctype>
 #include <algorithm>
@@ -88,6 +87,11 @@
 namespace dune3d {
 namespace {
 constexpr const char *kSketcherProjectExtension = ".dxsp";
+
+void log_dialog_failure(const char *dialog_name, const Glib::Error &err)
+{
+    Logger::log_warning(std::string(dialog_name) + " failed", Logger::Domain::EDITOR, err.what());
+}
 
 std::filesystem::path normalize_group_path(const std::filesystem::path &path)
 {
@@ -177,6 +181,153 @@ std::string join_tooltip_lines(std::initializer_list<const char *> lines)
     }
     return text;
 }
+
+void configure_sketch_settings_spin(Gtk::SpinButton &spin, int digits, double min, double max, double step,
+                                    int width_chars = 8)
+{
+    spin.set_digits(digits);
+    spin.set_numeric(true);
+    spin.set_range(min, max);
+    spin.set_increments(step, step * 10.0);
+    spin.set_width_chars(width_chars);
+    spin.set_halign(Gtk::Align::END);
+    spin.add_css_class("tnum");
+}
+
+void configure_sketch_cycle_button(Gtk::Button &button, const char *icon_name)
+{
+    button.set_icon_name(icon_name);
+    button.set_has_frame(false);
+    button.set_focusable(false);
+}
+
+Gtk::Label *make_sketch_unit_label(const char *text)
+{
+    auto *label = Gtk::make_managed<Gtk::Label>(text);
+    label->set_width_chars(4);
+    label->set_xalign(1.0f);
+    label->set_halign(Gtk::Align::END);
+    label->add_css_class("dim-label");
+    return label;
+}
+
+Gtk::Box *append_sketch_settings_section(Gtk::Box &parent, const char *title)
+{
+    auto *frame = Gtk::make_managed<Gtk::Frame>(title);
+    auto *box = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 8);
+    frame->set_hexpand(true);
+    frame->set_halign(Gtk::Align::FILL);
+    box->set_hexpand(true);
+    box->set_halign(Gtk::Align::FILL);
+    box->set_margin_start(10);
+    box->set_margin_end(10);
+    box->set_margin_top(10);
+    box->set_margin_bottom(10);
+    frame->set_child(*box);
+    parent.append(*frame);
+    return box;
+}
+
+[[maybe_unused]] std::string compact_sketch_settings_title(std::string title)
+{
+    static const std::array<const char *, 2> kPrefixes = {
+            "Settings for the ",
+            "Settings for ",
+    };
+    for (const auto *prefix : kPrefixes) {
+        const std::string prefix_text = prefix;
+        if (title.rfind(prefix_text, 0) == 0) {
+            title.erase(0, prefix_text.size());
+            break;
+        }
+    }
+    return title;
+}
+
+class SketchSettingsGridBuilder {
+public:
+    explicit SketchSettingsGridBuilder(Gtk::Grid &grid) : m_grid(grid)
+    {
+        m_grid.set_hexpand(true);
+        m_grid.set_halign(Gtk::Align::FILL);
+        m_grid.set_column_spacing(12);
+        m_grid.set_row_spacing(8);
+    }
+
+    void add_row(const char *label_text, Gtk::Widget &control, Gtk::Widget *trailing = nullptr)
+    {
+        auto *label = Gtk::make_managed<Gtk::Label>(label_text);
+        label->set_hexpand(true);
+        label->set_xalign(0.0f);
+        label->set_halign(Gtk::Align::START);
+        add_widget_row(*label, control, trailing);
+    }
+
+    void add_widget_row(Gtk::Widget &label, Gtk::Widget &control, Gtk::Widget *trailing = nullptr)
+    {
+        auto *unit_slot = trailing ? trailing : static_cast<Gtk::Widget *>(make_sketch_unit_label(""));
+        m_grid.attach(label, 0, m_row, 1, 1);
+        m_grid.attach(*unit_slot, 1, m_row, 1, 1);
+        m_grid.attach(control, 2, m_row, 1, 1);
+        m_row++;
+    }
+
+    void add_row_span(const char *label_text, Gtk::Widget &control, int control_width)
+    {
+        auto *label = Gtk::make_managed<Gtk::Label>(label_text);
+        label->set_hexpand(true);
+        label->set_xalign(0.0f);
+        label->set_halign(Gtk::Align::START);
+        m_grid.attach(*label, 0, m_row, 1, 1);
+        m_grid.attach(control, 1, m_row, control_width, 1);
+        m_row++;
+    }
+
+private:
+    Gtk::Grid &m_grid;
+    int m_row = 0;
+};
+
+class SketchSettingsRowListBuilder {
+public:
+    explicit SketchSettingsRowListBuilder(Gtk::Box &box) : m_box(box)
+    {
+        m_box.set_hexpand(true);
+        m_box.set_halign(Gtk::Align::FILL);
+    }
+
+    void add_row(const char *label_text, Gtk::Widget &control, Gtk::Widget *trailing = nullptr)
+    {
+        auto *label = Gtk::make_managed<Gtk::Label>(label_text);
+        label->set_hexpand(true);
+        label->set_xalign(0.0f);
+        label->set_halign(Gtk::Align::START);
+        add_widget_row(*label, control, trailing);
+    }
+
+    void add_widget_row(Gtk::Widget &label, Gtk::Widget &control, Gtk::Widget *trailing = nullptr)
+    {
+        auto *row = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 12);
+        auto *unit_slot = trailing ? trailing : static_cast<Gtk::Widget *>(make_sketch_unit_label(""));
+        row->set_hexpand(true);
+        row->set_halign(Gtk::Align::FILL);
+        label.set_hexpand(true);
+        label.set_halign(Gtk::Align::START);
+        control.set_halign(Gtk::Align::END);
+        row->append(label);
+        row->append(*unit_slot);
+        row->append(control);
+        m_box.append(*row);
+    }
+
+    void add_row_span(const char *label_text, Gtk::Widget &control, int)
+    {
+        add_row(label_text, control);
+    }
+
+private:
+    Gtk::Box &m_box;
+};
 
 constexpr std::array<CanvasPreferences::ThemeVariant, 5> kSketchThemeOrder = {
         CanvasPreferences::ThemeVariant::LIGHT,
@@ -507,10 +658,30 @@ double radial_rotation_deg_to_rad(double deg)
     return deg * M_PI / 180.0;
 }
 
-constexpr int sketch_popover_content_width = 193;
+constexpr int sketch_popover_content_width = 220;
 constexpr int sketch_popover_total_width = sketch_popover_content_width + 24;
-constexpr int edge_features_popover_content_width = 128;
-constexpr int edge_features_popover_total_width = edge_features_popover_content_width + 24;
+constexpr int sketch_tall_popover_max_height = 420;
+
+Gtk::Box *create_sketch_popover_content_box(Gtk::Popover &popover, int spacing = 8)
+{
+    auto *width_lock = Gtk::make_managed<Gtk::ScrolledWindow>();
+    width_lock->set_policy(Gtk::PolicyType::NEVER, Gtk::PolicyType::NEVER);
+    width_lock->set_min_content_width(sketch_popover_total_width);
+    width_lock->set_max_content_width(sketch_popover_total_width);
+    width_lock->set_propagate_natural_width(false);
+    width_lock->set_propagate_natural_height(true);
+
+    auto *box = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, spacing);
+    box->set_margin_start(12);
+    box->set_margin_end(12);
+    box->set_margin_top(12);
+    box->set_margin_bottom(12);
+    box->set_hexpand(true);
+    box->set_halign(Gtk::Align::FILL);
+    width_lock->set_child(*box);
+    popover.set_child(*width_lock);
+    return box;
+}
 
 std::string format_text_font_label(const Pango::FontDescription &desc)
 {
@@ -3982,49 +4153,39 @@ void Editor::init()
                               [this] { return m_right_click_popovers_only; });
         m_selection_mode_popover = popover;
 
-        auto box = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 10);
-        box->set_margin_start(12);
-        box->set_margin_end(12);
-        box->set_margin_top(12);
-        box->set_margin_bottom(12);
-        box->set_size_request(sketch_popover_content_width, -1);
-        popover->set_child(*box);
+        auto box = create_sketch_popover_content_box(*popover, 8);
 
-        auto transform_row = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 8);
-        auto transform_label = Gtk::make_managed<Gtk::Label>("Transform");
-        transform_label->set_hexpand(true);
-        transform_label->set_xalign(0);
+        auto intro = Gtk::make_managed<Gtk::Label>("Keep selection helpers predictable while editing sketches.");
+        intro->set_wrap(true);
+        intro->set_xalign(0.0f);
+        intro->add_css_class("dim-label");
+        box->append(*intro);
+
+        auto handles_section = append_sketch_settings_section(*box, "Handles");
+        auto handles_grid = Gtk::make_managed<Gtk::Grid>();
+        handles_section->append(*handles_grid);
+        SketchSettingsGridBuilder handle_rows(*handles_grid);
+
         m_selection_transform_switch = Gtk::make_managed<Gtk::Switch>();
-        transform_row->append(*transform_label);
-        transform_row->append(*m_selection_transform_switch);
-        box->append(*transform_row);
+        m_selection_transform_switch->set_halign(Gtk::Align::END);
+        handle_rows.add_row_span("Transform handles", *m_selection_transform_switch, 2);
 
-        auto markers_row = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 8);
-        auto markers_label = Gtk::make_managed<Gtk::Label>("Show markers");
-        markers_label->set_hexpand(true);
-        markers_label->set_xalign(0);
         m_selection_markers_switch = Gtk::make_managed<Gtk::Switch>();
-        markers_row->append(*markers_label);
-        markers_row->append(*m_selection_markers_switch);
-        box->append(*markers_row);
+        m_selection_markers_switch->set_halign(Gtk::Align::END);
+        handle_rows.add_row_span("Show markers", *m_selection_markers_switch, 2);
 
-        auto snap_row = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 8);
-        auto snap_label = Gtk::make_managed<Gtk::Label>("Snap");
-        snap_label->set_hexpand(true);
-        snap_label->set_xalign(0);
+        auto behavior_section = append_sketch_settings_section(*box, "Behavior");
+        auto behavior_grid = Gtk::make_managed<Gtk::Grid>();
+        behavior_section->append(*behavior_grid);
+        SketchSettingsGridBuilder behavior_rows(*behavior_grid);
+
         m_selection_snap_switch = Gtk::make_managed<Gtk::Switch>();
-        snap_row->append(*snap_label);
-        snap_row->append(*m_selection_snap_switch);
-        box->append(*snap_row);
+        m_selection_snap_switch->set_halign(Gtk::Align::END);
+        behavior_rows.add_row_span("Snap", *m_selection_snap_switch, 2);
 
-        auto closed_loop_row = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 8);
-        auto closed_loop_label = Gtk::make_managed<Gtk::Label>("Closed loop");
-        closed_loop_label->set_hexpand(true);
-        closed_loop_label->set_xalign(0);
         m_selection_closed_loop_switch = Gtk::make_managed<Gtk::Switch>();
-        closed_loop_row->append(*closed_loop_label);
-        closed_loop_row->append(*m_selection_closed_loop_switch);
-        box->append(*closed_loop_row);
+        m_selection_closed_loop_switch->set_halign(Gtk::Align::END);
+        behavior_rows.add_row_span("Closed-loop select", *m_selection_closed_loop_switch, 2);
 
         m_selection_transform_switch->property_active().signal_changed().connect([this] {
             if (m_updating_selection_mode_popover)
@@ -4327,13 +4488,7 @@ Gtk::Button &Editor::create_action_bar_button(ActionToolID action)
         tool_popover->set_parent(*bu);
         tool_popover->set_size_request(sketch_popover_total_width, -1);
 
-        auto box = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 10);
-        box->set_margin_start(12);
-        box->set_margin_end(12);
-        box->set_margin_top(12);
-        box->set_margin_bottom(12);
-        box->set_size_request(sketch_popover_content_width, -1);
-        tool_popover->set_child(*box);
+        auto box = create_sketch_popover_content_box(*tool_popover, 10);
 
         auto sides_row = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 8);
         auto sides_label = Gtk::make_managed<Gtk::Label>("Sides");
@@ -4374,11 +4529,9 @@ Gtk::Button &Editor::create_action_bar_button(ActionToolID action)
         radius_spin->set_numeric(true);
         radius_spin->set_width_chars(5);
         radius_spin->set_value(ToolDrawRegularPolygon::get_default_round_radius());
-        auto mm_label = Gtk::make_managed<Gtk::Label>("mm");
-        mm_label->add_css_class("dim-label");
         radius_row->append(*radius_label);
+        radius_row->append(*make_sketch_unit_label("mm"));
         radius_row->append(*radius_spin);
-        radius_row->append(*mm_label);
         radius_revealer->set_child(*radius_row);
         radius_revealer->set_reveal_child(rounded_switch->get_active());
         box->append(*radius_revealer);
@@ -4402,13 +4555,7 @@ Gtk::Button &Editor::create_action_bar_button(ActionToolID action)
         tool_popover->set_parent(*bu);
         tool_popover->set_size_request(sketch_popover_total_width, -1);
 
-        auto box = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 10);
-        box->set_margin_start(12);
-        box->set_margin_end(12);
-        box->set_margin_top(12);
-        box->set_margin_bottom(12);
-        box->set_size_request(sketch_popover_content_width, -1);
-        tool_popover->set_child(*box);
+        auto box = create_sketch_popover_content_box(*tool_popover, 10);
 
         auto oval_row = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 8);
         auto oval_label = Gtk::make_managed<Gtk::Label>("Oval");
@@ -4449,11 +4596,9 @@ Gtk::Button &Editor::create_action_bar_button(ActionToolID action)
         angle_spin->set_numeric(true);
         angle_spin->set_width_chars(3);
         angle_spin->set_value(std::clamp(default_span, 1.0, 359.0));
-        auto deg_label = Gtk::make_managed<Gtk::Label>("deg");
-        deg_label->add_css_class("dim-label");
         angle_row->append(*angle_label);
+        angle_row->append(*make_sketch_unit_label("deg"));
         angle_row->append(*angle_spin);
-        angle_row->append(*deg_label);
         angle_revealer->set_child(*angle_row);
         angle_revealer->set_reveal_child(slice_switch->get_active());
         box->append(*angle_revealer);
@@ -4486,13 +4631,7 @@ Gtk::Button &Editor::create_action_bar_button(ActionToolID action)
         tool_popover->set_parent(*bu);
         tool_popover->set_size_request(sketch_popover_total_width, -1);
 
-        auto box = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 10);
-        box->set_margin_start(12);
-        box->set_margin_end(12);
-        box->set_margin_top(12);
-        box->set_margin_bottom(12);
-        box->set_size_request(sketch_popover_content_width, -1);
-        tool_popover->set_child(*box);
+        auto box = create_sketch_popover_content_box(*tool_popover, 10);
         m_draw_text_popover = tool_popover;
 
         m_draw_text_font_dialog = Gtk::FontDialog::create();
@@ -4589,13 +4728,7 @@ Gtk::Button &Editor::create_action_bar_button(ActionToolID action)
         tool_popover->set_parent(*bu);
         tool_popover->set_size_request(sketch_popover_total_width, -1);
 
-        auto box = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 10);
-        box->set_margin_start(12);
-        box->set_margin_end(12);
-        box->set_margin_top(12);
-        box->set_margin_bottom(12);
-        box->set_size_request(sketch_popover_content_width, -1);
-        tool_popover->set_child(*box);
+        auto box = create_sketch_popover_content_box(*tool_popover, 10);
 
         auto square_row = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 8);
         auto square_label = Gtk::make_managed<Gtk::Label>("Square");
@@ -4631,11 +4764,9 @@ Gtk::Button &Editor::create_action_bar_button(ActionToolID action)
         radius_spin->set_numeric(true);
         radius_spin->set_width_chars(5);
         radius_spin->set_value(ToolDrawRectangle::get_default_round_radius());
-        auto mm_label = Gtk::make_managed<Gtk::Label>("mm");
-        mm_label->add_css_class("dim-label");
         radius_row->append(*radius_label);
+        radius_row->append(*make_sketch_unit_label("mm"));
         radius_row->append(*radius_spin);
-        radius_row->append(*mm_label);
         radius_revealer->set_child(*radius_row);
         radius_revealer->set_reveal_child(rounded_switch->get_active());
         box->append(*radius_revealer);
@@ -4857,7 +4988,7 @@ void Editor::sync_selection_mode_popover()
         return;
     set_tool_hint(*m_selection_mode_button, join_tooltip_lines({
                                            "Selection tool",
-                                           "Selection mode.",
+                                           "Adjust selection helpers, transform handles, and snapping behavior.",
                                            "Middle click toggles back to the last drawing tool.",
                                    }));
     if (!m_selection_transform_switch || !m_selection_markers_switch || !m_selection_snap_switch
@@ -5026,13 +5157,7 @@ void Editor::init_layers_popover()
                           [this] { return m_right_click_popovers_only; });
     m_layers_popover->signal_show().connect([this] { rebuild_layers_popover(); });
 
-    auto root = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 8);
-    root->set_margin_start(12);
-    root->set_margin_end(12);
-    root->set_margin_top(12);
-    root->set_margin_bottom(12);
-    root->set_size_request(sketch_popover_content_width, -1);
-    m_layers_popover->set_child(*root);
+    auto root = create_sketch_popover_content_box(*m_layers_popover, 8);
 
     m_layers_list_box = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 4);
     root->append(*m_layers_list_box);
@@ -5172,13 +5297,7 @@ void Editor::init_layers_popover()
     m_layer_edit_popover->set_parent(*m_layers_mode_button);
     m_layer_edit_popover->set_size_request(sketch_popover_total_width, -1);
 
-    auto edit_root = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 8);
-    edit_root->set_margin_start(12);
-    edit_root->set_margin_end(12);
-    edit_root->set_margin_top(12);
-    edit_root->set_margin_bottom(12);
-    edit_root->set_size_request(sketch_popover_content_width, -1);
-    m_layer_edit_popover->set_child(*edit_root);
+    auto edit_root = create_sketch_popover_content_box(*m_layer_edit_popover, 8);
 
     auto name_label = Gtk::make_managed<Gtk::Label>("Layer name");
     name_label->set_xalign(0);
@@ -5364,57 +5483,53 @@ void Editor::init_cup_template_popover()
     install_hover_popover(*m_cup_template_button, *m_cup_template_popover, [this] { return !m_primary_button_pressed; },
                           [this] { return m_right_click_popovers_only; });
 
-    auto root = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 8);
-    root->set_margin_start(12);
-    root->set_margin_end(12);
-    root->set_margin_top(12);
-    root->set_margin_bottom(12);
-    root->set_size_request(sketch_popover_content_width, -1);
-    m_cup_template_popover->set_child(*root);
+    auto root = create_sketch_popover_content_box(*m_cup_template_popover, 8);
 
-    auto make_dimension_row = [root](const char *title, Gtk::SpinButton *&spin, int digits = 2) {
-        auto row = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 6);
-        auto label = Gtk::make_managed<Gtk::Label>(title);
-        label->set_hexpand(true);
-        label->set_xalign(0);
-        spin = Gtk::make_managed<Gtk::SpinButton>();
-        spin->set_digits(digits);
-        spin->set_numeric(true);
-        spin->set_width_chars(7);
-        spin->set_halign(Gtk::Align::END);
-        auto unit = Gtk::make_managed<Gtk::Label>("mm");
-        unit->add_css_class("dim-label");
-        row->append(*label);
-        row->append(*spin);
-        row->append(*unit);
-        root->append(*row);
-    };
+    auto intro = Gtk::make_managed<Gtk::Label>(
+            "Overlay a quick cup-wrap guide on the active sketch. Diameter and wrap width stay linked while you edit.");
+    intro->set_wrap(true);
+    intro->set_xalign(0.0f);
+    intro->set_max_width_chars(26);
+    intro->add_css_class("dim-label");
+    root->append(*intro);
 
-    make_dimension_row("Height", m_cup_template_height_spin, 2);
-    make_dimension_row("Circumference", m_cup_template_circumference_spin, 2);
-    make_dimension_row("Diameter", m_cup_template_diameter_spin, 2);
+    auto size_section = append_sketch_settings_section(*root, "Cup size");
+    auto size_rows_box = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 8);
+    size_section->append(*size_rows_box);
+    SketchSettingsRowListBuilder size_rows(*size_rows_box);
 
-    auto segments_row = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 6);
-    auto segments_label = Gtk::make_managed<Gtk::Label>("Segments");
-    segments_label->set_hexpand(true);
-    segments_label->set_xalign(0);
+    m_cup_template_height_spin = Gtk::make_managed<Gtk::SpinButton>();
+    configure_sketch_settings_spin(*m_cup_template_height_spin, 2, 1.0, 2000.0, 1.0, 6);
+    size_rows.add_row("Height", *m_cup_template_height_spin, make_sketch_unit_label("mm"));
+
+    m_cup_template_circumference_spin = Gtk::make_managed<Gtk::SpinButton>();
+    configure_sketch_settings_spin(*m_cup_template_circumference_spin, 2, 1.0, 4000.0, 1.0, 6);
+    size_rows.add_row("Wrap width", *m_cup_template_circumference_spin, make_sketch_unit_label("mm"));
+
+    m_cup_template_diameter_spin = Gtk::make_managed<Gtk::SpinButton>();
+    configure_sketch_settings_spin(*m_cup_template_diameter_spin, 2, 0.1, 1200.0, 0.5, 6);
+    size_rows.add_row("Diameter", *m_cup_template_diameter_spin, make_sketch_unit_label("mm"));
+
+    auto wrap_section = append_sketch_settings_section(*root, "Wrap panels");
+    auto wrap_rows_box = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 8);
+    wrap_section->append(*wrap_rows_box);
+    SketchSettingsRowListBuilder wrap_rows(*wrap_rows_box);
+
     m_cup_template_segments_spin = Gtk::make_managed<Gtk::SpinButton>();
-    m_cup_template_segments_spin->set_digits(0);
-    m_cup_template_segments_spin->set_numeric(true);
-    m_cup_template_segments_spin->set_width_chars(4);
-    m_cup_template_segments_spin->set_halign(Gtk::Align::END);
-    segments_row->append(*segments_label);
-    segments_row->append(*m_cup_template_segments_spin);
-    root->append(*segments_row);
-
-    m_cup_template_height_spin->set_range(1.0, 2000.0);
-    m_cup_template_height_spin->set_increments(1.0, 10.0);
-    m_cup_template_circumference_spin->set_range(1.0, 4000.0);
-    m_cup_template_circumference_spin->set_increments(1.0, 10.0);
-    m_cup_template_diameter_spin->set_range(0.1, 1200.0);
-    m_cup_template_diameter_spin->set_increments(0.5, 10.0);
-    m_cup_template_segments_spin->set_range(1, 12);
+    configure_sketch_settings_spin(*m_cup_template_segments_spin, 0, 1, 12, 1, 4);
     m_cup_template_segments_spin->set_increments(1, 1);
+    wrap_rows.add_row("Segments", *m_cup_template_segments_spin);
+
+    auto wrap_hint = Gtk::make_managed<Gtk::Label>("More segments make the overlay rounder. Fewer segments keep the guide quick to scan.");
+    wrap_hint->set_wrap(true);
+    wrap_hint->set_xalign(0.0f);
+    wrap_hint->set_max_width_chars(26);
+    wrap_hint->add_css_class("dim-label");
+    wrap_section->append(*wrap_hint);
+
+    m_cup_template_circumference_spin->set_tooltip_text("Changing wrap width also updates diameter.");
+    m_cup_template_diameter_spin->set_tooltip_text("Changing diameter also updates wrap width.");
+    m_cup_template_segments_spin->set_tooltip_text("Preview panel count for the cup wrap guide.");
 
     m_updating_cup_template_popover = true;
     m_cup_template_height_spin->set_value(m_cup_template_height_mm);
@@ -5509,71 +5624,99 @@ void Editor::init_gears_popover()
         update_sketcher_toolbar_button_states();
     });
 
-    auto root = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 8);
-    root->set_margin_start(12);
-    root->set_margin_end(12);
-    root->set_margin_top(12);
-    root->set_margin_bottom(12);
-    root->set_size_request(sketch_popover_content_width, -1);
-    m_gears_popover->set_child(*root);
+    auto root = create_sketch_popover_content_box(*m_gears_popover, 8);
 
-    auto add_spin_row = [root](const char *label_text, Gtk::SpinButton *&spin, int digits, double min, double max, double step,
-                               const char *unit = nullptr) {
-        auto row = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 6);
-        auto label = Gtk::make_managed<Gtk::Label>(label_text);
-        label->set_hexpand(true);
-        label->set_xalign(0);
-        spin = Gtk::make_managed<Gtk::SpinButton>();
-        spin->set_digits(digits);
-        spin->set_numeric(true);
-        spin->set_range(min, max);
-        spin->set_increments(step, step * 10.0);
-        spin->set_width_chars(6);
-        row->append(*label);
-        row->append(*spin);
-        if (unit) {
-            auto unit_label = Gtk::make_managed<Gtk::Label>(unit);
-            unit_label->add_css_class("dim-label");
-            row->append(*unit_label);
-        }
-        root->append(*row);
-    };
+    auto content_scroll = Gtk::make_managed<Gtk::ScrolledWindow>();
+    content_scroll->set_policy(Gtk::PolicyType::NEVER, Gtk::PolicyType::AUTOMATIC);
+    content_scroll->set_min_content_width(sketch_popover_content_width);
+    content_scroll->set_max_content_width(sketch_popover_content_width);
+    content_scroll->set_min_content_height(120);
+    content_scroll->set_max_content_height(sketch_tall_popover_max_height);
+    content_scroll->set_propagate_natural_height(true);
+    content_scroll->set_propagate_natural_width(false);
+    root->append(*content_scroll);
 
-    add_spin_row("Module", m_gears_module_spin, 2, 0.1, 50.0, 0.1, "mm");
-    add_spin_row("Teeth", m_gears_teeth_spin, 0, 3, 360, 1);
-    add_spin_row("Pressure", m_gears_pressure_angle_spin, 1, 5, 45, 0.5, "deg");
-    add_spin_row("Backlash", m_gears_backlash_spin, 3, 0.0, 0.5, 0.01, "mm");
-    add_spin_row("Segments", m_gears_segments_spin, 0, 4, 128, 1);
-    add_spin_row("Bore", m_gears_bore_spin, 2, 0.0, 400.0, 0.1, "mm");
-    add_spin_row("Material", m_gears_material_thickness_spin, 2, 0.1, 100.0, 0.1, "mm");
+    auto content = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 8);
+    content->set_size_request(sketch_popover_content_width, -1);
+    content->set_hexpand(true);
+    content->set_halign(Gtk::Align::FILL);
+    content_scroll->set_child(*content);
 
-    auto hole_mode_row = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 6);
-    auto hole_mode_title = Gtk::make_managed<Gtk::Label>("Hole");
-    hole_mode_title->set_hexpand(true);
-    hole_mode_title->set_xalign(0);
+    auto intro = Gtk::make_managed<Gtk::Label>(
+            "Tune quick gear defaults here for standalone outlines or selection-based apply from a circle, arc, or oval profile.");
+    intro->set_wrap(true);
+    intro->set_xalign(0.0f);
+    intro->set_max_width_chars(28);
+    intro->add_css_class("dim-label");
+    content->append(*intro);
+
+    auto primary_section = append_sketch_settings_section(*content, "Primary gear");
+    auto primary_rows_box = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 8);
+    primary_section->append(*primary_rows_box);
+    SketchSettingsRowListBuilder primary_rows(*primary_rows_box);
+
+    m_gears_module_spin = Gtk::make_managed<Gtk::SpinButton>();
+    configure_sketch_settings_spin(*m_gears_module_spin, 2, 0.1, 50.0, 0.1, 6);
+    primary_rows.add_row("Module", *m_gears_module_spin, make_sketch_unit_label("mm"));
+
+    m_gears_teeth_spin = Gtk::make_managed<Gtk::SpinButton>();
+    configure_sketch_settings_spin(*m_gears_teeth_spin, 0, 3, 360, 1, 6);
+    primary_rows.add_row("Teeth", *m_gears_teeth_spin);
+
+    m_gears_pressure_angle_spin = Gtk::make_managed<Gtk::SpinButton>();
+    configure_sketch_settings_spin(*m_gears_pressure_angle_spin, 1, 5, 45, 0.5, 6);
+    primary_rows.add_row("Pressure", *m_gears_pressure_angle_spin, make_sketch_unit_label("deg"));
+
+    m_gears_backlash_spin = Gtk::make_managed<Gtk::SpinButton>();
+    configure_sketch_settings_spin(*m_gears_backlash_spin, 3, 0.0, 0.5, 0.01, 6);
+    primary_rows.add_row("Backlash", *m_gears_backlash_spin, make_sketch_unit_label("mm"));
+
+    m_gears_segments_spin = Gtk::make_managed<Gtk::SpinButton>();
+    configure_sketch_settings_spin(*m_gears_segments_spin, 0, 4, 128, 1, 6);
+    primary_rows.add_row("Segments", *m_gears_segments_spin);
+
+    auto hole_section = append_sketch_settings_section(*content, "Center hole");
+    auto hole_rows_box = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 8);
+    hole_section->append(*hole_rows_box);
+    SketchSettingsRowListBuilder hole_rows(*hole_rows_box);
+
+    m_gears_bore_spin = Gtk::make_managed<Gtk::SpinButton>();
+    configure_sketch_settings_spin(*m_gears_bore_spin, 2, 0.0, 400.0, 0.1, 6);
+    hole_rows.add_row("Bore", *m_gears_bore_spin, make_sketch_unit_label("mm"));
+
+    m_gears_material_thickness_spin = Gtk::make_managed<Gtk::SpinButton>();
+    configure_sketch_settings_spin(*m_gears_material_thickness_spin, 2, 0.1, 100.0, 0.1, 6);
+    hole_rows.add_row("Material", *m_gears_material_thickness_spin, make_sketch_unit_label("mm"));
+
+    auto hole_mode_control = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 6);
+    hole_mode_control->set_halign(Gtk::Align::END);
     m_gears_hole_mode_prev_button = Gtk::make_managed<Gtk::Button>();
-    m_gears_hole_mode_prev_button->set_icon_name("go-previous-symbolic");
-    m_gears_hole_mode_prev_button->set_has_frame(true);
+    configure_sketch_cycle_button(*m_gears_hole_mode_prev_button, "go-previous-symbolic");
     m_gears_hole_mode_label = Gtk::make_managed<Gtk::Label>("Circle");
-    m_gears_hole_mode_label->set_width_chars(6);
+    m_gears_hole_mode_label->set_width_chars(8);
     m_gears_hole_mode_label->set_xalign(0.5f);
     m_gears_hole_mode_next_button = Gtk::make_managed<Gtk::Button>();
-    m_gears_hole_mode_next_button->set_icon_name("go-next-symbolic");
-    m_gears_hole_mode_next_button->set_has_frame(true);
-    hole_mode_row->append(*hole_mode_title);
-    hole_mode_row->append(*m_gears_hole_mode_prev_button);
-    hole_mode_row->append(*m_gears_hole_mode_label);
-    hole_mode_row->append(*m_gears_hole_mode_next_button);
-    root->append(*hole_mode_row);
+    configure_sketch_cycle_button(*m_gears_hole_mode_next_button, "go-next-symbolic");
+    hole_mode_control->append(*m_gears_hole_mode_prev_button);
+    hole_mode_control->append(*m_gears_hole_mode_label);
+    hole_mode_control->append(*m_gears_hole_mode_next_button);
+    hole_rows.add_row_span("Hole", *hole_mode_control, 2);
 
-    auto inward_row = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 6);
-    auto inward_label = Gtk::make_managed<Gtk::Label>("Inward");
-    inward_label->set_hexpand(true);
-    inward_label->set_xalign(0);
+    auto apply_section = append_sketch_settings_section(*content, "Selection apply");
+    auto apply_rows_box = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 8);
+    apply_section->append(*apply_rows_box);
+    SketchSettingsRowListBuilder apply_rows(*apply_rows_box);
+
     m_gears_inward_switch = Gtk::make_managed<Gtk::Switch>();
-    inward_row->append(*inward_label);
-    inward_row->append(*m_gears_inward_switch);
-    root->append(*inward_row);
+    apply_rows.add_row("Inward", *m_gears_inward_switch);
+
+    auto apply_hint = Gtk::make_managed<Gtk::Label>(
+            "Quick apply follows the selected profile. Open the generator when you need preview, import, or two-gear layout.");
+    apply_hint->set_wrap(true);
+    apply_hint->set_xalign(0.0f);
+    apply_hint->set_max_width_chars(28);
+    apply_hint->add_css_class("dim-label");
+    apply_section->append(*apply_hint);
 
     m_gears_module_spin->set_value(2.0);
     m_gears_teeth_spin->set_value(24);
@@ -5587,6 +5730,7 @@ void Editor::init_gears_popover()
     m_gears_segments_spin->set_tooltip_text("Curve quality for standalone involute gear generation.");
     m_gears_backlash_spin->set_tooltip_text(
             "Tooth side clearance at pitch circle. Use small values (typically 0.02-0.10 mm).");
+    m_gears_inward_switch->set_tooltip_text("Apply generated teeth inside the selected profile instead of outside.");
 
     const auto update_hole_mode_label = [this] {
         if (m_gears_hole_mode_label)
@@ -5677,9 +5821,11 @@ void Editor::init_gears_popover()
     m_gears_material_thickness_spin->signal_value_changed().connect(sync_generator_from_main);
     m_gears_inward_switch->property_active().signal_changed().connect(sync_generator_from_main);
 
-    auto generator_button = Gtk::make_managed<Gtk::Button>("Generator");
+    auto generator_button = Gtk::make_managed<Gtk::Button>("Open Generator");
     generator_button->set_has_frame(true);
     generator_button->add_css_class("suggested-action");
+    generator_button->set_hexpand(true);
+    generator_button->set_halign(Gtk::Align::FILL);
     root->append(*generator_button);
     generator_button->signal_clicked().connect([this] {
         if (m_gears_popover && m_gears_popover->get_visible()) {
@@ -5755,7 +5901,7 @@ void Editor::open_gears_generator_window()
 
         auto header = Gtk::make_managed<Gtk::HeaderBar>();
         header->set_show_title_buttons(true);
-        auto title = Gtk::make_managed<Gtk::Label>("Generator");
+        auto title = Gtk::make_managed<Gtk::Label>("Gear Generator");
         header->set_title_widget(*title);
         m_gears_generator_import_button = Gtk::make_managed<Gtk::Button>("Import");
         m_gears_generator_import_button->add_css_class("suggested-action");
@@ -5770,7 +5916,7 @@ void Editor::open_gears_generator_window()
         m_gears_generator_window->set_child(*root);
 
         auto settings_frame = Gtk::make_managed<Gtk::Frame>("Settings");
-        settings_frame->set_size_request(270, -1);
+        settings_frame->set_size_request(300, -1);
         settings_frame->set_vexpand(true);
         root->append(*settings_frame);
 
@@ -5779,119 +5925,113 @@ void Editor::open_gears_generator_window()
         settings_scroll->set_min_content_height(100);
         settings_frame->set_child(*settings_scroll);
 
-        auto settings = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 8);
+        auto settings = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 10);
         settings->set_margin_start(10);
         settings->set_margin_end(10);
         settings->set_margin_top(10);
         settings->set_margin_bottom(10);
         settings_scroll->set_child(*settings);
 
-        auto add_spin_row = [settings](const char *label_text, Gtk::SpinButton *&spin, int digits, double min, double max,
-                                       double step, const char *unit = nullptr) {
-            auto row = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 6);
-            auto label = Gtk::make_managed<Gtk::Label>(label_text);
-            label->set_hexpand(true);
-            label->set_xalign(0);
-            spin = Gtk::make_managed<Gtk::SpinButton>();
-            spin->set_digits(digits);
-            spin->set_numeric(true);
-            spin->set_range(min, max);
-            spin->set_increments(step, step * 10.0);
-            spin->set_width_chars(6);
-            row->append(*label);
-            row->append(*spin);
-            if (unit) {
-                auto unit_label = Gtk::make_managed<Gtk::Label>(unit);
-                unit_label->add_css_class("dim-label");
-                row->append(*unit_label);
-            }
-            settings->append(*row);
-        };
+        auto settings_intro = Gtk::make_managed<Gtk::Label>(
+                "Build a single involute gear or a meshing pair, then import the preview as closed polylines.");
+        settings_intro->set_wrap(true);
+        settings_intro->set_xalign(0.0f);
+        settings_intro->set_max_width_chars(28);
+        settings_intro->add_css_class("dim-label");
+        settings->append(*settings_intro);
 
-        add_spin_row("Module", m_gears_generator_module_spin, 2, 0.1, 50.0, 0.1, "mm");
-        add_spin_row("Teeth", m_gears_generator_teeth_spin, 0, 3, 720, 1);
-        add_spin_row("Pressure", m_gears_generator_pressure_spin, 1, 5, 45, 0.5, "deg");
-        add_spin_row("Backlash", m_gears_generator_backlash_spin, 3, 0.0, 0.5, 0.01, "mm");
-        add_spin_row("Segments", m_gears_generator_segments_spin, 0, 4, 128, 1);
-        add_spin_row("Bore", m_gears_generator_bore_spin, 2, 0.0, 400.0, 0.1, "mm");
-        add_spin_row("Material", m_gears_generator_material_thickness_spin, 2, 0.1, 100.0, 0.1, "mm");
+        auto primary_section = append_sketch_settings_section(*settings, "Primary gear");
+        auto primary_grid = Gtk::make_managed<Gtk::Grid>();
+        primary_section->append(*primary_grid);
+        SketchSettingsGridBuilder primary_rows(*primary_grid);
 
-        auto hole_mode_row = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 6);
-        auto hole_mode_title = Gtk::make_managed<Gtk::Label>("Hole");
-        hole_mode_title->set_hexpand(true);
-        hole_mode_title->set_xalign(0);
+        m_gears_generator_module_spin = Gtk::make_managed<Gtk::SpinButton>();
+        configure_sketch_settings_spin(*m_gears_generator_module_spin, 2, 0.1, 50.0, 0.1);
+        primary_rows.add_row("Module", *m_gears_generator_module_spin, make_sketch_unit_label("mm"));
+
+        m_gears_generator_diameter1_spin = Gtk::make_managed<Gtk::SpinButton>();
+        configure_sketch_settings_spin(*m_gears_generator_diameter1_spin, 2, 1.0, 2000.0, 0.1);
+        primary_rows.add_row("Diameter 1", *m_gears_generator_diameter1_spin, make_sketch_unit_label("mm"));
+
+        m_gears_generator_teeth_spin = Gtk::make_managed<Gtk::SpinButton>();
+        configure_sketch_settings_spin(*m_gears_generator_teeth_spin, 0, 3, 720, 1);
+        primary_rows.add_row("Teeth", *m_gears_generator_teeth_spin);
+
+        m_gears_generator_pressure_spin = Gtk::make_managed<Gtk::SpinButton>();
+        configure_sketch_settings_spin(*m_gears_generator_pressure_spin, 1, 5, 45, 0.5);
+        primary_rows.add_row("Pressure", *m_gears_generator_pressure_spin, make_sketch_unit_label("deg"));
+
+        m_gears_generator_backlash_spin = Gtk::make_managed<Gtk::SpinButton>();
+        configure_sketch_settings_spin(*m_gears_generator_backlash_spin, 3, 0.0, 0.5, 0.01);
+        primary_rows.add_row("Backlash", *m_gears_generator_backlash_spin, make_sketch_unit_label("mm"));
+
+        m_gears_generator_segments_spin = Gtk::make_managed<Gtk::SpinButton>();
+        configure_sketch_settings_spin(*m_gears_generator_segments_spin, 0, 4, 128, 1);
+        primary_rows.add_row("Segments", *m_gears_generator_segments_spin);
+
+        auto hole_section = append_sketch_settings_section(*settings, "Center hole");
+        auto hole_grid = Gtk::make_managed<Gtk::Grid>();
+        hole_section->append(*hole_grid);
+        SketchSettingsGridBuilder hole_rows(*hole_grid);
+
+        m_gears_generator_bore_spin = Gtk::make_managed<Gtk::SpinButton>();
+        configure_sketch_settings_spin(*m_gears_generator_bore_spin, 2, 0.0, 400.0, 0.1);
+        hole_rows.add_row("Bore", *m_gears_generator_bore_spin, make_sketch_unit_label("mm"));
+
+        m_gears_generator_material_thickness_spin = Gtk::make_managed<Gtk::SpinButton>();
+        configure_sketch_settings_spin(*m_gears_generator_material_thickness_spin, 2, 0.1, 100.0, 0.1);
+        hole_rows.add_row("Material", *m_gears_generator_material_thickness_spin, make_sketch_unit_label("mm"));
+
+        auto hole_mode_control = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 6);
+        hole_mode_control->set_halign(Gtk::Align::END);
         m_gears_generator_hole_mode_prev_button = Gtk::make_managed<Gtk::Button>();
-        m_gears_generator_hole_mode_prev_button->set_icon_name("go-previous-symbolic");
-        m_gears_generator_hole_mode_prev_button->set_has_frame(true);
+        configure_sketch_cycle_button(*m_gears_generator_hole_mode_prev_button, "go-previous-symbolic");
         m_gears_generator_hole_mode_label = Gtk::make_managed<Gtk::Label>("Circle");
-        m_gears_generator_hole_mode_label->set_width_chars(6);
+        m_gears_generator_hole_mode_label->set_width_chars(8);
         m_gears_generator_hole_mode_label->set_xalign(0.5f);
         m_gears_generator_hole_mode_next_button = Gtk::make_managed<Gtk::Button>();
-        m_gears_generator_hole_mode_next_button->set_icon_name("go-next-symbolic");
-        m_gears_generator_hole_mode_next_button->set_has_frame(true);
-        hole_mode_row->append(*hole_mode_title);
-        hole_mode_row->append(*m_gears_generator_hole_mode_prev_button);
-        hole_mode_row->append(*m_gears_generator_hole_mode_label);
-        hole_mode_row->append(*m_gears_generator_hole_mode_next_button);
-        settings->append(*hole_mode_row);
+        configure_sketch_cycle_button(*m_gears_generator_hole_mode_next_button, "go-next-symbolic");
+        hole_mode_control->append(*m_gears_generator_hole_mode_prev_button);
+        hole_mode_control->append(*m_gears_generator_hole_mode_label);
+        hole_mode_control->append(*m_gears_generator_hole_mode_next_button);
+        hole_rows.add_row_span("Hole", *hole_mode_control, 2);
 
-        {
-            auto row = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 6);
-            auto label = Gtk::make_managed<Gtk::Label>("Diameter 1");
-            label->set_hexpand(true);
-            label->set_xalign(0);
-            m_gears_generator_diameter1_spin = Gtk::make_managed<Gtk::SpinButton>();
-            m_gears_generator_diameter1_spin->set_digits(2);
-            m_gears_generator_diameter1_spin->set_numeric(true);
-            m_gears_generator_diameter1_spin->set_range(1.0, 2000.0);
-            m_gears_generator_diameter1_spin->set_increments(0.1, 1.0);
-            auto unit = Gtk::make_managed<Gtk::Label>("mm");
-            unit->add_css_class("dim-label");
-            row->append(*label);
-            row->append(*m_gears_generator_diameter1_spin);
-            row->append(*unit);
-            settings->append(*row);
-        }
+        auto pair_section = append_sketch_settings_section(*settings, "Pair preview");
+        auto pair_grid = Gtk::make_managed<Gtk::Grid>();
+        pair_section->append(*pair_grid);
+        SketchSettingsGridBuilder pair_rows(*pair_grid);
 
-        auto pair_row = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 6);
-        auto pair_label = Gtk::make_managed<Gtk::Label>("Two gears");
-        pair_label->set_hexpand(true);
-        pair_label->set_xalign(0);
         m_gears_generator_pair_switch = Gtk::make_managed<Gtk::Switch>();
-        pair_row->append(*pair_label);
-        pair_row->append(*m_gears_generator_pair_switch);
-        settings->append(*pair_row);
+        pair_rows.add_row("Two gears", *m_gears_generator_pair_switch);
 
         m_gears_generator_pair_box = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 8);
-        settings->append(*m_gears_generator_pair_box);
+        m_gears_generator_pair_box->set_margin_top(4);
+        pair_section->append(*m_gears_generator_pair_box);
 
-        auto ratio_mode_row = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 6);
-        auto ratio_mode_label = Gtk::make_managed<Gtk::Label>("Use degrees");
-        ratio_mode_label->set_hexpand(true);
-        ratio_mode_label->set_xalign(0);
+        auto pair_detail_grid = Gtk::make_managed<Gtk::Grid>();
+        m_gears_generator_pair_box->append(*pair_detail_grid);
+        SketchSettingsGridBuilder pair_detail_rows(*pair_detail_grid);
+
         m_gears_generator_ratio_degrees_switch = Gtk::make_managed<Gtk::Switch>();
-        ratio_mode_row->append(*ratio_mode_label);
-        ratio_mode_row->append(*m_gears_generator_ratio_degrees_switch);
-        m_gears_generator_pair_box->append(*ratio_mode_row);
+        pair_detail_rows.add_row("Use angle", *m_gears_generator_ratio_degrees_switch);
 
-        auto ratio_row = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 6);
         m_gears_generator_ratio_label = Gtk::make_managed<Gtk::Label>("Ratio");
         m_gears_generator_ratio_label->set_hexpand(true);
-        m_gears_generator_ratio_label->set_xalign(0);
+        m_gears_generator_ratio_label->set_xalign(0.0f);
+        m_gears_generator_ratio_label->set_halign(Gtk::Align::START);
         m_gears_generator_ratio_spin = Gtk::make_managed<Gtk::SpinButton>();
-        m_gears_generator_ratio_spin->set_digits(3);
-        m_gears_generator_ratio_spin->set_numeric(true);
-        m_gears_generator_ratio_spin->set_range(0.05, 20.0);
-        m_gears_generator_ratio_spin->set_increments(0.01, 0.1);
-        ratio_row->append(*m_gears_generator_ratio_label);
-        ratio_row->append(*m_gears_generator_ratio_spin);
-        m_gears_generator_pair_box->append(*ratio_row);
+        configure_sketch_settings_spin(*m_gears_generator_ratio_spin, 3, 0.05, 20.0, 0.01);
+        m_gears_generator_ratio_unit_label = make_sketch_unit_label("");
+        pair_detail_rows.add_widget_row(*m_gears_generator_ratio_label, *m_gears_generator_ratio_spin,
+                                        m_gears_generator_ratio_unit_label);
 
+        auto summary_section = append_sketch_settings_section(*settings, "Summary");
         m_gears_generator_summary_label = Gtk::make_managed<Gtk::Label>();
-        m_gears_generator_summary_label->set_xalign(0);
+        m_gears_generator_summary_label->set_xalign(0.0f);
         m_gears_generator_summary_label->set_wrap(true);
+        m_gears_generator_summary_label->set_max_width_chars(28);
         m_gears_generator_summary_label->add_css_class("dim-label");
-        settings->append(*m_gears_generator_summary_label);
+        summary_section->append(*m_gears_generator_summary_label);
 
         auto preview_box = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 8);
         preview_box->set_hexpand(true);
@@ -6028,12 +6168,12 @@ void Editor::update_gears_generator_ui()
         m_gears_generator_pair_box->set_visible(pair_mode);
     if (m_gears_generator_rotation_slider)
         m_gears_generator_rotation_slider->set_visible(pair_mode);
-    if (m_gears_generator_ratio_label) {
-        if (m_gears_generator_ratio_degrees_switch && m_gears_generator_ratio_degrees_switch->get_active())
-            m_gears_generator_ratio_label->set_text("Angle2/360");
-        else
-            m_gears_generator_ratio_label->set_text("Ratio");
-    }
+    const bool ratio_in_degrees =
+            m_gears_generator_ratio_degrees_switch && m_gears_generator_ratio_degrees_switch->get_active();
+    if (m_gears_generator_ratio_label)
+        m_gears_generator_ratio_label->set_text(ratio_in_degrees ? "Angle 2" : "Ratio");
+    if (m_gears_generator_ratio_unit_label)
+        m_gears_generator_ratio_unit_label->set_text(ratio_in_degrees ? "deg" : "");
 
     if (!m_gears_generator_summary_label || !m_gears_generator_module_spin || !m_gears_generator_teeth_spin)
         return;
@@ -6053,6 +6193,7 @@ void Editor::update_gears_generator_ui()
     if (!pair_mode) {
         const auto pitch_d = module * static_cast<double>(z1_from_diameter);
         std::ostringstream ss;
+        ss << "Single gear\n";
         ss << "z=" << z1_from_diameter << "  pitch diameter=" << std::fixed << std::setprecision(2) << pitch_d << " mm";
         m_gears_generator_summary_label->set_text(ss.str());
         return;
@@ -6074,8 +6215,9 @@ void Editor::update_gears_generator_ui()
     const auto actual_ratio = static_cast<double>(z1) / static_cast<double>(z2);
     const auto actual_deg = 360.0 * actual_ratio;
     std::ostringstream ss;
-    ss << "z1=" << z1 << "  z2=" << z2 << "  d1=" << std::fixed << std::setprecision(2) << d1 << " mm  d2=" << d2
-       << " mm  ratio=" << std::setprecision(3) << actual_ratio << " (" << std::setprecision(1) << actual_deg
+    ss << "Gear 1: z=" << z1 << "  d=" << std::fixed << std::setprecision(2) << d1 << " mm\n";
+    ss << "Gear 2: z=" << z2 << "  d=" << std::fixed << std::setprecision(2) << d2 << " mm\n";
+    ss << "Actual ratio=" << std::setprecision(3) << actual_ratio << " (" << std::setprecision(1) << actual_deg
        << " deg/360)";
     m_gears_generator_summary_label->set_text(ss.str());
 #endif
@@ -6411,15 +6553,110 @@ void Editor::rebuild_joints_settings_ui()
     const auto save_value = [this, family](const std::string &dest, std::string value) {
         m_joints_setting_values[joints_value_key(family->id, dest)] = std::move(value);
     };
+    const auto append_arg_row = [this, &get_value, &save_value](auto &rows, const SettingsArgDef &arg) {
+        auto label = Gtk::make_managed<Gtk::Label>(arg.label);
+        label->set_hexpand(true);
+        label->set_xalign(0.0f);
+        label->set_halign(Gtk::Align::START);
+        label->set_ellipsize(Pango::EllipsizeMode::END);
+        label->set_tooltip_text(arg.help);
+
+        if (arg.kind == SettingsArgKind::FLOAT || arg.kind == SettingsArgKind::INT) {
+            const auto digits = arg.kind == SettingsArgKind::INT ? 0 : 3;
+            const auto step = arg.kind == SettingsArgKind::INT ? 1.0 : 0.1;
+            auto spin = Gtk::make_managed<Gtk::SpinButton>();
+            configure_sketch_settings_spin(*spin, digits, -1000000.0, 1000000.0, step, 8);
+            try {
+                spin->set_value(std::stod(get_value(arg)));
+            }
+            catch (...) {
+                spin->set_value(arg.kind == SettingsArgKind::INT ? static_cast<double>(arg.default_int) : arg.default_float);
+            }
+            spin->signal_value_changed().connect([this, save_value, dest = arg.dest, digits, spin] {
+                if (m_joints_rebuilding_settings)
+                    return;
+                std::ostringstream ss;
+                ss << std::fixed << std::setprecision(digits) << spin->get_value();
+                save_value(dest, ss.str());
+                update_joints_summary();
+            });
+            rows.add_widget_row(*label, *spin);
+            m_joints_spin_settings[arg.dest] = spin;
+        }
+        else if (arg.kind == SettingsArgKind::BOOL) {
+            auto sw = Gtk::make_managed<Gtk::Switch>();
+            sw->set_halign(Gtk::Align::END);
+            const auto value = get_value(arg);
+            sw->set_active(value == "1" || value == "true" || (value.empty() && arg.default_bool));
+            sw->property_active().signal_changed().connect([this, save_value, dest = arg.dest, sw] {
+                if (m_joints_rebuilding_settings)
+                    return;
+                save_value(dest, sw->get_active() ? "1" : "0");
+                update_joints_summary();
+            });
+            rows.add_widget_row(*label, *sw);
+            m_joints_switch_settings[arg.dest] = sw;
+        }
+        else if (arg.kind == SettingsArgKind::CHOICE) {
+            auto model = Gtk::StringList::create();
+            for (const auto &choice : arg.choices)
+                model->append(choice);
+            auto dropdown = Gtk::make_managed<Gtk::DropDown>(model, nullptr);
+            dropdown->set_size_request(104, -1);
+            dropdown->set_halign(Gtk::Align::END);
+            auto value = get_value(arg);
+            auto pos = std::find(arg.choices.begin(), arg.choices.end(), value);
+            if (pos == arg.choices.end())
+                pos = arg.choices.begin();
+            if (pos != arg.choices.end())
+                dropdown->set_selected(static_cast<unsigned int>(std::distance(arg.choices.begin(), pos)));
+            dropdown->property_selected().signal_changed().connect([this, save_value, arg, dropdown] {
+                if (m_joints_rebuilding_settings)
+                    return;
+                if (!arg.choices.empty()) {
+                    const auto idx = std::min<size_t>(dropdown->get_selected(), arg.choices.size() - 1);
+                    save_value(arg.dest, arg.choices.at(idx));
+                }
+                update_joints_summary();
+            });
+            rows.add_widget_row(*label, *dropdown);
+            m_joints_dropdown_settings[arg.dest] = dropdown;
+        }
+        else {
+            auto entry = Gtk::make_managed<Gtk::Entry>();
+            entry->set_hexpand(true);
+            entry->set_width_chars(12);
+            entry->set_halign(Gtk::Align::END);
+            entry->set_text(get_value(arg));
+            entry->signal_changed().connect([this, save_value, dest = arg.dest, entry] {
+                if (m_joints_rebuilding_settings)
+                    return;
+                save_value(dest, entry->get_text());
+                update_joints_summary();
+            });
+            rows.add_widget_row(*label, *entry);
+            m_joints_entry_settings[arg.dest] = entry;
+        }
+    };
 
     for (const auto &group : family->arg_groups) {
-        auto frame = Gtk::make_managed<Gtk::Frame>(group.title);
+        auto frame = Gtk::make_managed<Gtk::Frame>(compact_sketch_settings_title(group.title));
         auto group_box = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 6);
-        group_box->set_margin_start(8);
-        group_box->set_margin_end(8);
-        group_box->set_margin_top(8);
-        group_box->set_margin_bottom(8);
+        frame->set_hexpand(true);
+        frame->set_halign(Gtk::Align::FILL);
+        group_box->set_hexpand(true);
+        group_box->set_halign(Gtk::Align::FILL);
+        group_box->set_margin_start(10);
+        group_box->set_margin_end(10);
+        group_box->set_margin_top(10);
+        group_box->set_margin_bottom(10);
         frame->set_child(*group_box);
+
+        auto group_rows_box = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 8);
+        group_rows_box->set_hexpand(true);
+        group_rows_box->set_halign(Gtk::Align::FILL);
+        group_box->append(*group_rows_box);
+        SketchSettingsRowListBuilder group_rows(*group_rows_box);
 
         bool has_rows = false;
         for (const auto &dest : group.args) {
@@ -6427,94 +6664,7 @@ void Editor::rebuild_joints_settings_ui()
                                          [&dest](const auto &arg) { return arg.dest == dest; });
             if (it == visible_args.end())
                 continue;
-            const auto &arg = *it;
-
-            auto row = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 6);
-            auto label = Gtk::make_managed<Gtk::Label>(arg.label);
-            label->set_hexpand(true);
-            label->set_xalign(0.0f);
-            label->set_tooltip_text(arg.help);
-            row->append(*label);
-
-            if (arg.kind == SettingsArgKind::FLOAT || arg.kind == SettingsArgKind::INT) {
-                const auto digits = arg.kind == SettingsArgKind::INT ? 0 : 3;
-                const auto step = arg.kind == SettingsArgKind::INT ? 1.0 : 0.1;
-                auto spin = Gtk::make_managed<Gtk::SpinButton>();
-                spin->set_digits(digits);
-                spin->set_numeric(true);
-                spin->set_range(-1000000.0, 1000000.0);
-                spin->set_increments(step, step * 10.0);
-                spin->set_width_chars(8);
-                try {
-                    spin->set_value(std::stod(get_value(arg)));
-                }
-                catch (...) {
-                    spin->set_value(arg.kind == SettingsArgKind::INT ? static_cast<double>(arg.default_int) : arg.default_float);
-                }
-                spin->signal_value_changed().connect([this, save_value, dest = arg.dest, digits, spin] {
-                    if (m_joints_rebuilding_settings)
-                        return;
-                    std::ostringstream ss;
-                    ss << std::fixed << std::setprecision(digits) << spin->get_value();
-                    save_value(dest, ss.str());
-                    update_joints_summary();
-                });
-                row->append(*spin);
-                m_joints_spin_settings[arg.dest] = spin;
-            }
-            else if (arg.kind == SettingsArgKind::BOOL) {
-                auto sw = Gtk::make_managed<Gtk::Switch>();
-                const auto value = get_value(arg);
-                sw->set_active(value == "1" || value == "true" || (value.empty() && arg.default_bool));
-                sw->property_active().signal_changed().connect([this, save_value, dest = arg.dest, sw] {
-                    if (m_joints_rebuilding_settings)
-                        return;
-                    save_value(dest, sw->get_active() ? "1" : "0");
-                    update_joints_summary();
-                });
-                row->append(*sw);
-                m_joints_switch_settings[arg.dest] = sw;
-            }
-            else if (arg.kind == SettingsArgKind::CHOICE) {
-                auto model = Gtk::StringList::create();
-                for (const auto &choice : arg.choices)
-                    model->append(choice);
-                auto dropdown = Gtk::make_managed<Gtk::DropDown>(model, nullptr);
-                auto value = get_value(arg);
-                auto pos = std::find(arg.choices.begin(), arg.choices.end(), value);
-                if (pos == arg.choices.end())
-                    pos = arg.choices.begin();
-                if (pos != arg.choices.end())
-                    dropdown->set_selected(static_cast<unsigned int>(std::distance(arg.choices.begin(), pos)));
-                dropdown->property_selected().signal_changed().connect([this, save_value, arg, dropdown] {
-                    if (m_joints_rebuilding_settings)
-                        return;
-                    if (!arg.choices.empty()) {
-                        const auto idx = std::min<size_t>(dropdown->get_selected(), arg.choices.size() - 1);
-                        save_value(arg.dest, arg.choices.at(idx));
-                    }
-                    update_joints_summary();
-                });
-                row->append(*dropdown);
-                m_joints_dropdown_settings[arg.dest] = dropdown;
-            }
-            else {
-                auto entry = Gtk::make_managed<Gtk::Entry>();
-                entry->set_hexpand(true);
-                entry->set_width_chars(12);
-                entry->set_text(get_value(arg));
-                entry->signal_changed().connect([this, save_value, dest = arg.dest, entry] {
-                    if (m_joints_rebuilding_settings)
-                        return;
-                    save_value(dest, entry->get_text());
-                    update_joints_summary();
-                });
-                row->append(*entry);
-                m_joints_entry_settings[arg.dest] = entry;
-            }
-
-            m_joints_setting_rows[arg.dest] = row;
-            group_box->append(*row);
+            append_arg_row(group_rows, *it);
             has_rows = true;
         }
 
@@ -6525,32 +6675,39 @@ void Editor::rebuild_joints_settings_ui()
     const auto append_edge_extra_group = [this, &family, &visible_args, &get_value, &save_value](const JointEdgeDef *edge) {
         if (!edge || edge->extra_args.empty())
             return;
-        auto frame = Gtk::make_managed<Gtk::Frame>(edge->label);
+        auto frame = Gtk::make_managed<Gtk::Frame>(compact_sketch_settings_title(edge->label));
         auto group_box = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 6);
-        group_box->set_margin_start(8);
-        group_box->set_margin_end(8);
-        group_box->set_margin_top(8);
-        group_box->set_margin_bottom(8);
+        frame->set_hexpand(true);
+        frame->set_halign(Gtk::Align::FILL);
+        group_box->set_hexpand(true);
+        group_box->set_halign(Gtk::Align::FILL);
+        group_box->set_margin_start(10);
+        group_box->set_margin_end(10);
+        group_box->set_margin_top(10);
+        group_box->set_margin_bottom(10);
         frame->set_child(*group_box);
+
+        auto group_rows_box = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 8);
+        group_rows_box->set_hexpand(true);
+        group_rows_box->set_halign(Gtk::Align::FILL);
+        group_box->append(*group_rows_box);
+        SketchSettingsRowListBuilder group_rows(*group_rows_box);
+        bool has_rows = false;
 
         for (const auto &arg : edge->extra_args) {
             if (std::none_of(visible_args.begin(), visible_args.end(), [&arg](const auto &existing) { return existing.dest == arg.dest; }))
                 continue;
-            auto row = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 6);
             auto label = Gtk::make_managed<Gtk::Label>(arg.label);
             label->set_hexpand(true);
             label->set_xalign(0.0f);
+            label->set_halign(Gtk::Align::START);
+            label->set_ellipsize(Pango::EllipsizeMode::END);
             label->set_tooltip_text(arg.help);
-            row->append(*label);
             if (arg.kind == SettingsArgKind::FLOAT || arg.kind == SettingsArgKind::INT) {
                 const auto digits = arg.kind == SettingsArgKind::INT ? 0 : 3;
                 const auto step = arg.kind == SettingsArgKind::INT ? 1.0 : 0.1;
                 auto spin = Gtk::make_managed<Gtk::SpinButton>();
-                spin->set_digits(digits);
-                spin->set_numeric(true);
-                spin->set_range(-1000000.0, 1000000.0);
-                spin->set_increments(step, step * 10.0);
-                spin->set_width_chars(8);
+                configure_sketch_settings_spin(*spin, digits, -1000000.0, 1000000.0, step, 8);
                 try {
                     spin->set_value(std::stod(get_value(arg)));
                 }
@@ -6565,12 +6722,13 @@ void Editor::rebuild_joints_settings_ui()
                     save_value(dest, ss.str());
                     update_joints_summary();
                 });
-                row->append(*spin);
+                group_rows.add_widget_row(*label, *spin);
                 m_joints_spin_settings[arg.dest] = spin;
+                has_rows = true;
             }
-            group_box->append(*row);
         }
-        m_joints_settings_box->append(*frame);
+        if (has_rows)
+            m_joints_settings_box->append(*frame);
     };
     append_edge_extra_group(find_joint_edge(*family, role->line0_edge));
     if (role->pair)
@@ -6616,27 +6774,36 @@ void Editor::update_joints_summary()
         return;
     if (!m_joints_runtime_requested && g_joint_families.empty()) {
         m_joints_summary_label->set_text("Edge Features load when you open the panel.");
+        m_joints_summary_label->set_visible(true);
+        if (m_joints_family_description_label)
+            m_joints_family_description_label->set_visible(false);
+        if (m_joints_selection_hint_label)
+            m_joints_selection_hint_label->set_visible(false);
         return;
     }
 
     std::string error;
     if (!ensure_joint_families_loaded(error)) {
         m_joints_summary_label->set_text(error);
+        m_joints_summary_label->set_visible(true);
         return;
     }
     if (g_joint_families.empty()) {
         m_joints_summary_label->set_text("No joint families");
+        m_joints_summary_label->set_visible(true);
         return;
     }
 
     const auto *family = get_selected_joint_family(m_joints_family_dropdown, m_joints_visible_family_indices);
     if (!family) {
         m_joints_summary_label->set_text("No edge feature family");
+        m_joints_summary_label->set_visible(true);
         return;
     }
     const auto *role = get_selected_joint_role(*family, m_joints_role_dropdown);
     if (!role) {
         m_joints_summary_label->set_text("No operation");
+        m_joints_summary_label->set_visible(true);
         return;
     }
 
@@ -6647,6 +6814,7 @@ void Editor::update_joints_summary()
     if (!family->description.empty())
         ss << "  " << family->description;
     m_joints_summary_label->set_text(ss.str());
+    m_joints_summary_label->set_visible(true);
     if (m_joints_family_description_label)
         m_joints_family_description_label->set_text(family->description);
     JointSelectionState selection_state;
@@ -6663,7 +6831,10 @@ void Editor::update_joints_summary()
         if (!selection_state.text.empty())
             hint += "\n" + selection_state.text;
         m_joints_selection_hint_label->set_text(hint);
+        m_joints_selection_hint_label->set_visible(!hint.empty());
     }
+    if (m_joints_family_description_label)
+        m_joints_family_description_label->set_visible(!family->description.empty());
     if (m_joints_quick_hint_label)
         m_joints_quick_hint_label->set_text(selection_state.text);
     if (m_joints_apply_button)
@@ -6703,7 +6874,7 @@ void Editor::init_joints_popover()
     m_joints_popover->set_autohide(false);
     m_joints_popover->add_css_class("sketch-grid-popover");
     m_joints_popover->set_parent(*m_joints_button);
-    m_joints_popover->set_size_request(edge_features_popover_total_width, -1);
+    m_joints_popover->set_size_request(sketch_popover_total_width, -1);
     install_hover_popover(*m_joints_button, *m_joints_popover, [this] { return !m_primary_button_pressed; },
                           [this] { return m_right_click_popovers_only; });
     m_joints_popover->signal_show().connect([this] {
@@ -6713,93 +6884,57 @@ void Editor::init_joints_popover()
     });
     m_joints_popover->signal_hide().connect([this] { update_sketcher_toolbar_button_states(); });
 
-    auto root = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 8);
-    root->set_margin_start(12);
-    root->set_margin_end(12);
-    root->set_margin_top(12);
-    root->set_margin_bottom(12);
-    root->set_size_request(edge_features_popover_content_width, -1);
-    m_joints_popover->set_child(*root);
+    auto root = create_sketch_popover_content_box(*m_joints_popover, 8);
 
-    auto add_spin_row = [](Gtk::Box &parent, const char *label_text, Gtk::SpinButton *&spin, int digits, double min, double max,
-                           double step, const char *unit = nullptr) {
-        auto row = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 6);
-        auto label = Gtk::make_managed<Gtk::Label>(label_text);
-        label->set_hexpand(true);
-        label->set_xalign(0);
-        spin = Gtk::make_managed<Gtk::SpinButton>();
-        spin->set_digits(digits);
-        spin->set_numeric(true);
-        spin->set_range(min, max);
-        spin->set_increments(step, step * 10.0);
-        spin->set_width_chars(6);
-        row->append(*label);
-        row->append(*spin);
-        if (unit) {
-            auto unit_label = Gtk::make_managed<Gtk::Label>(unit);
-            unit_label->add_css_class("dim-label");
-            row->append(*unit_label);
-        }
-        parent.append(*row);
-    };
-    auto add_dropdown_row = [](Gtk::Box &parent, const char *label_text, Gtk::DropDown *&dropdown,
-                               std::initializer_list<const char *> items) {
-        auto row = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 6);
-        auto label = Gtk::make_managed<Gtk::Label>(label_text);
-        label->set_hexpand(true);
-        label->set_xalign(0);
-        auto model = Gtk::StringList::create();
-        for (const auto *item : items)
-            model->append(item);
-        dropdown = Gtk::make_managed<Gtk::DropDown>(model, nullptr);
-        row->append(*label);
-        row->append(*dropdown);
-        parent.append(*row);
-    };
-    auto add_dropdown_row_model = [](Gtk::Box &parent, const char *label_text, Gtk::DropDown *&dropdown,
-                                     const Glib::RefPtr<Gtk::StringList> &model) {
-        auto row = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 6);
-        auto label = Gtk::make_managed<Gtk::Label>(label_text);
-        label->set_hexpand(true);
-        label->set_xalign(0);
-        dropdown = Gtk::make_managed<Gtk::DropDown>(model, nullptr);
-        row->append(*label);
-        row->append(*dropdown);
-        parent.append(*row);
-    };
-    auto add_switcher_row = [](Gtk::Box &parent, const char *label_text, Gtk::Button *&prev_button, Gtk::Label *&value_label,
-                               Gtk::Button *&next_button) {
-        auto row = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 6);
-        auto label = Gtk::make_managed<Gtk::Label>(label_text);
-        label->set_hexpand(true);
-        label->set_xalign(0);
+    auto content_scroll = Gtk::make_managed<Gtk::ScrolledWindow>();
+    content_scroll->set_policy(Gtk::PolicyType::NEVER, Gtk::PolicyType::AUTOMATIC);
+    content_scroll->set_min_content_width(sketch_popover_content_width);
+    content_scroll->set_max_content_width(sketch_popover_content_width);
+    content_scroll->set_min_content_height(140);
+    content_scroll->set_max_content_height(sketch_tall_popover_max_height);
+    content_scroll->set_propagate_natural_height(true);
+    content_scroll->set_propagate_natural_width(false);
+    root->append(*content_scroll);
+
+    auto content = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 8);
+    content->set_size_request(sketch_popover_content_width, -1);
+    content->set_hexpand(true);
+    content->set_halign(Gtk::Align::FILL);
+    content_scroll->set_child(*content);
+
+    auto intro = Gtk::make_managed<Gtk::Label>(
+            "Dial in edge feature mode, kerf-aware defaults, and selection context here before applying changes to sketch lines.");
+    intro->set_wrap(true);
+    intro->set_xalign(0.0f);
+    intro->set_max_width_chars(28);
+    intro->add_css_class("dim-label");
+    content->append(*intro);
+
+    auto make_cycle_control = [](Gtk::Button *&prev_button, Gtk::Label *&value_label, Gtk::Button *&next_button,
+                                 int width_chars = 8) {
+        auto control = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 6);
+        control->set_halign(Gtk::Align::END);
         prev_button = Gtk::make_managed<Gtk::Button>();
-        prev_button->set_icon_name("go-previous-symbolic");
-        prev_button->set_has_frame(false);
-        prev_button->set_focusable(false);
+        configure_sketch_cycle_button(*prev_button, "go-previous-symbolic");
         value_label = Gtk::make_managed<Gtk::Label>("-");
-        value_label->set_width_chars(8);
+        value_label->set_width_chars(width_chars);
+        value_label->set_hexpand(true);
         value_label->set_xalign(0.5f);
+        value_label->set_halign(Gtk::Align::CENTER);
         value_label->set_ellipsize(Pango::EllipsizeMode::END);
         next_button = Gtk::make_managed<Gtk::Button>();
-        next_button->set_icon_name("go-next-symbolic");
-        next_button->set_has_frame(false);
-        next_button->set_focusable(false);
-        row->append(*label);
-        row->append(*prev_button);
-        row->append(*value_label);
-        row->append(*next_button);
-        parent.append(*row);
+        configure_sketch_cycle_button(*next_button, "go-next-symbolic");
+        control->append(*prev_button);
+        control->append(*value_label);
+        control->append(*next_button);
+        return control;
     };
-    auto add_switch_row = [](Gtk::Box &parent, const char *label_text, Gtk::Switch *&sw) {
-        auto row = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 6);
-        auto label = Gtk::make_managed<Gtk::Label>(label_text);
-        label->set_hexpand(true);
-        label->set_xalign(0);
-        sw = Gtk::make_managed<Gtk::Switch>();
-        row->append(*label);
-        row->append(*sw);
-        parent.append(*row);
+    auto make_info_label = [] {
+        auto label = Gtk::make_managed<Gtk::Label>();
+        label->set_xalign(0.0f);
+        label->set_wrap(true);
+        label->set_max_width_chars(28);
+        return label;
     };
 
     auto category_model = Gtk::StringList::create();
@@ -6819,57 +6954,83 @@ void Editor::init_joints_popover()
     auto role_model = Gtk::StringList::create();
     role_model->append("Edge");
     m_joints_role_dropdown = Gtk::make_managed<Gtk::DropDown>(role_model, nullptr);
-    add_switcher_row(*root, "Category", m_joints_category_prev_button, m_joints_category_label, m_joints_category_next_button);
-    add_switcher_row(*root, "Family", m_joints_family_prev_button, m_joints_family_label, m_joints_family_next_button);
-    add_switcher_row(*root, "Operation", m_joints_role_prev_button, m_joints_role_label, m_joints_role_next_button);
+
+    auto mode_section = append_sketch_settings_section(*content, "Mode");
+    auto mode_rows_box = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 8);
+    mode_section->append(*mode_rows_box);
+    SketchSettingsRowListBuilder mode_rows(*mode_rows_box);
+
+    auto category_control =
+            make_cycle_control(m_joints_category_prev_button, m_joints_category_label, m_joints_category_next_button);
+    mode_rows.add_row_span("Category", *category_control, 2);
+
+    auto family_control = make_cycle_control(m_joints_family_prev_button, m_joints_family_label, m_joints_family_next_button);
+    mode_rows.add_row_span("Family", *family_control, 2);
+
+    auto operation_control = make_cycle_control(m_joints_role_prev_button, m_joints_role_label, m_joints_role_next_button);
+    mode_rows.add_row_span("Operation", *operation_control, 2);
+
     auto side_model = Gtk::StringList::create();
     side_model->append("Auto");
     side_model->append("Inside");
     side_model->append("Outside");
     m_joints_side_dropdown = Gtk::make_managed<Gtk::DropDown>(side_model, nullptr);
-    add_switcher_row(*root, "Side", m_joints_side_prev_button, m_joints_side_label, m_joints_side_next_button);
-    add_switch_row(*root, "Flip direction", m_joints_flip_direction_switch);
-    add_spin_row(*root, "Thickness", m_joints_thickness_spin, 2, 0.1, 100.0, 0.1, "mm");
-    add_spin_row(*root, "Burn", m_joints_burn_spin, 3, 0.0, 3.0, 0.01, "mm");
+
+    auto defaults_section = append_sketch_settings_section(*content, "Defaults");
+    auto defaults_rows_box = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 8);
+    defaults_section->append(*defaults_rows_box);
+    SketchSettingsRowListBuilder defaults_rows(*defaults_rows_box);
+
+    auto side_control = make_cycle_control(m_joints_side_prev_button, m_joints_side_label, m_joints_side_next_button, 8);
+    defaults_rows.add_row_span("Side", *side_control, 2);
+
+    m_joints_flip_direction_switch = Gtk::make_managed<Gtk::Switch>();
+    defaults_rows.add_row("Flip direction", *m_joints_flip_direction_switch);
+
+    m_joints_thickness_spin = Gtk::make_managed<Gtk::SpinButton>();
+    configure_sketch_settings_spin(*m_joints_thickness_spin, 2, 0.1, 100.0, 0.1, 6);
+    defaults_rows.add_row("Thickness", *m_joints_thickness_spin, make_sketch_unit_label("mm"));
+
+    m_joints_burn_spin = Gtk::make_managed<Gtk::SpinButton>();
+    configure_sketch_settings_spin(*m_joints_burn_spin, 3, 0.0, 3.0, 0.01, 6);
+    defaults_rows.add_row("Burn", *m_joints_burn_spin, make_sketch_unit_label("mm"));
+
     m_joints_swap_roles_button = Gtk::make_managed<Gtk::Button>("Swap roles");
     m_joints_swap_roles_button->set_has_frame(true);
     m_joints_swap_roles_button->set_tooltip_text("Swap the first and second edge roles for pair operations");
-    root->append(*m_joints_swap_roles_button);
+    m_joints_swap_roles_button->set_hexpand(true);
+    m_joints_swap_roles_button->set_halign(Gtk::Align::FILL);
+    defaults_section->append(*m_joints_swap_roles_button);
 
-    m_joints_family_description_label = Gtk::make_managed<Gtk::Label>();
-    m_joints_family_description_label->set_xalign(0);
-    m_joints_family_description_label->set_wrap(true);
-    m_joints_family_description_label->set_max_width_chars(24);
+    auto context_section = append_sketch_settings_section(*content, "Context");
+
+    m_joints_family_description_label = make_info_label();
     m_joints_family_description_label->add_css_class("dim-label");
-    m_joints_family_description_label->set_visible(false);
-    root->append(*m_joints_family_description_label);
+    m_joints_family_description_label->set_visible(true);
+    context_section->append(*m_joints_family_description_label);
 
-    m_joints_selection_hint_label = Gtk::make_managed<Gtk::Label>();
-    m_joints_selection_hint_label->set_xalign(0);
-    m_joints_selection_hint_label->set_wrap(true);
-    m_joints_selection_hint_label->set_max_width_chars(24);
+    m_joints_selection_hint_label = make_info_label();
     m_joints_selection_hint_label->add_css_class("dim-label");
-    m_joints_selection_hint_label->set_visible(false);
-    root->append(*m_joints_selection_hint_label);
+    m_joints_selection_hint_label->set_visible(true);
+    context_section->append(*m_joints_selection_hint_label);
 
-    m_joints_summary_label = Gtk::make_managed<Gtk::Label>();
-    m_joints_summary_label->set_xalign(0);
-    m_joints_summary_label->set_wrap(true);
-    m_joints_summary_label->set_max_width_chars(24);
-    m_joints_summary_label->add_css_class("dim-label");
-    m_joints_summary_label->set_visible(false);
-    root->append(*m_joints_summary_label);
+    m_joints_summary_label = make_info_label();
+    m_joints_summary_label->set_visible(true);
+    context_section->append(*m_joints_summary_label);
 
     m_joints_advanced_expander = Gtk::make_managed<Gtk::Expander>("Advanced");
     m_joints_advanced_expander->set_expanded(false);
-    auto advanced_scroll = Gtk::make_managed<Gtk::ScrolledWindow>();
-    advanced_scroll->set_policy(Gtk::PolicyType::NEVER, Gtk::PolicyType::AUTOMATIC);
-    advanced_scroll->set_min_content_height(160);
+    m_joints_advanced_expander->set_resize_toplevel(false);
+    m_joints_advanced_expander->set_size_request(sketch_popover_content_width, -1);
+    m_joints_advanced_expander->set_hexpand(true);
+    m_joints_advanced_expander->set_halign(Gtk::Align::FILL);
+    content->append(*m_joints_advanced_expander);
     m_joints_settings_box = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 8);
     m_joints_settings_box->set_margin_top(8);
-    advanced_scroll->set_child(*m_joints_settings_box);
-    m_joints_advanced_expander->set_child(*advanced_scroll);
-    root->append(*m_joints_advanced_expander);
+    m_joints_settings_box->set_size_request(sketch_popover_content_width, -1);
+    m_joints_settings_box->set_hexpand(true);
+    m_joints_settings_box->set_halign(Gtk::Align::FILL);
+    m_joints_advanced_expander->set_child(*m_joints_settings_box);
 
     if (m_joints_category_dropdown)
         m_joints_category_dropdown->set_selected(0);
@@ -9935,13 +10096,7 @@ void Editor::init_radial_menu()
         popover->set_position(Gtk::PositionType::LEFT);
         popover->set_parent(anchor);
         popover->set_size_request(sketch_popover_total_width, -1);
-        auto box = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 10);
-        box->set_margin_start(12);
-        box->set_margin_end(12);
-        box->set_margin_top(12);
-        box->set_margin_bottom(12);
-        box->set_size_request(sketch_popover_content_width, -1);
-        popover->set_child(*box);
+        auto box = create_sketch_popover_content_box(*popover, 10);
         return std::pair<Gtk::Popover *, Gtk::Box *>(popover, box);
     };
 
@@ -9989,11 +10144,9 @@ void Editor::init_radial_menu()
         radius_spin->set_numeric(true);
         radius_spin->set_width_chars(5);
         radius_spin->set_value(ToolDrawRectangle::get_default_round_radius());
-        auto mm_label = Gtk::make_managed<Gtk::Label>("mm");
-        mm_label->add_css_class("dim-label");
         radius_row->append(*radius_label);
+        radius_row->append(*make_sketch_unit_label("mm"));
         radius_row->append(*radius_spin);
-        radius_row->append(*mm_label);
         radius_revealer->set_child(*radius_row);
         radius_revealer->set_reveal_child(rounded_switch->get_active());
         box->append(*radius_revealer);
@@ -10052,11 +10205,9 @@ void Editor::init_radial_menu()
         angle_spin->set_numeric(true);
         angle_spin->set_width_chars(3);
         angle_spin->set_value(std::clamp(default_span, 1.0, 359.0));
-        auto deg_label = Gtk::make_managed<Gtk::Label>("deg");
-        deg_label->add_css_class("dim-label");
         angle_row->append(*angle_label);
+        angle_row->append(*make_sketch_unit_label("deg"));
         angle_row->append(*angle_spin);
-        angle_row->append(*deg_label);
         angle_revealer->set_child(*angle_row);
         angle_revealer->set_reveal_child(slice_switch->get_active());
         box->append(*angle_revealer);
@@ -10127,11 +10278,9 @@ void Editor::init_radial_menu()
         radius_spin->set_numeric(true);
         radius_spin->set_width_chars(5);
         radius_spin->set_value(ToolDrawRegularPolygon::get_default_round_radius());
-        auto mm_label = Gtk::make_managed<Gtk::Label>("mm");
-        mm_label->add_css_class("dim-label");
         radius_row->append(*radius_label);
+        radius_row->append(*make_sketch_unit_label("mm"));
         radius_row->append(*radius_spin);
-        radius_row->append(*mm_label);
         radius_revealer->set_child(*radius_row);
         radius_revealer->set_reveal_child(rounded_switch->get_active());
         box->append(*radius_revealer);
@@ -10242,39 +10391,61 @@ void Editor::init_radial_menu()
     sep->add_css_class("sketch-toolbar-divider");
     layout->append(*sep);
 
-    m_radial_grid_button = add_strip_button("view-grid-symbolic", "Toggle grid");
+    m_radial_grid_button = add_strip_button("view-grid-symbolic", "Toggle grid visibility");
     m_radial_grid_button->signal_clicked().connect([this] { toggle_radial_grid(); });
     {
         auto [popover, box] = create_quick_options_popover(*m_radial_grid_button);
         m_quick_grid_popover = popover;
-        auto snap_row = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 8);
-        auto snap_label = Gtk::make_managed<Gtk::Label>("Snap to grid");
-        snap_label->set_hexpand(true);
-        snap_label->set_xalign(0);
+        auto intro = Gtk::make_managed<Gtk::Label>(
+                "Keep grid visibility and snapping close at hand while you continue sketching from the radial menu.");
+        intro->set_wrap(true);
+        intro->set_xalign(0.0f);
+        intro->set_max_width_chars(26);
+        intro->add_css_class("dim-label");
+        box->append(*intro);
+
+        auto display_section = append_sketch_settings_section(*box, "Display");
+        auto display_grid = Gtk::make_managed<Gtk::Grid>();
+        display_section->append(*display_grid);
+        SketchSettingsGridBuilder display_rows(*display_grid);
+
+        auto show_grid_switch = Gtk::make_managed<Gtk::Switch>();
+        show_grid_switch->set_halign(Gtk::Align::END);
+        display_rows.add_row("Show grid", *show_grid_switch);
+
+        auto behavior_section = append_sketch_settings_section(*box, "Behavior");
+        auto behavior_grid = Gtk::make_managed<Gtk::Grid>();
+        behavior_section->append(*behavior_grid);
+        SketchSettingsGridBuilder behavior_rows(*behavior_grid);
+
         auto snap_switch = Gtk::make_managed<Gtk::Switch>();
-        snap_row->append(*snap_label);
-        snap_row->append(*snap_switch);
-        box->append(*snap_row);
-        auto spacing_box = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 6);
-        auto spacing_title = Gtk::make_managed<Gtk::Label>("Size");
-        spacing_title->set_hexpand(true);
-        spacing_title->set_xalign(0);
+        snap_switch->set_halign(Gtk::Align::END);
+        behavior_rows.add_row("Snap to grid", *snap_switch);
+
         auto spacing_spin = Gtk::make_managed<Gtk::SpinButton>();
-        spacing_spin->set_range(0.1, 100000.0);
-        spacing_spin->set_increments(0.1, 1.0);
-        spacing_spin->set_digits(2);
-        spacing_spin->set_numeric(true);
-        spacing_spin->set_width_chars(6);
-        spacing_spin->set_halign(Gtk::Align::END);
-        auto spacing_label = Gtk::make_managed<Gtk::Label>("mm");
-        spacing_label->add_css_class("dim-label");
-        spacing_box->append(*spacing_title);
-        spacing_box->append(*spacing_spin);
-        spacing_box->append(*spacing_label);
-        box->append(*spacing_box);
-        popover->signal_show().connect([this, snap_switch, spacing_spin] {
+        configure_sketch_settings_spin(*spacing_spin, 2, 0.1, 100000.0, 0.1, 6);
+        behavior_rows.add_row("Spacing", *spacing_spin, make_sketch_unit_label("mm"));
+
+        auto spacing_hint = Gtk::make_managed<Gtk::Label>(
+                "Smaller spacing helps detail work; larger spacing keeps layout guides easier to scan.");
+        spacing_hint->set_wrap(true);
+        spacing_hint->set_xalign(0.0f);
+        spacing_hint->set_max_width_chars(26);
+        spacing_hint->add_css_class("dim-label");
+        behavior_section->append(*spacing_hint);
+
+        auto sync_quick_grid = [this, show_grid_switch, snap_switch, spacing_spin] {
+            show_grid_switch->set_active(get_canvas().get_grid_enabled());
             snap_switch->set_active(get_canvas().get_grid_snap_enabled());
             spacing_spin->set_value(get_canvas().get_grid_spacing_mm());
+        };
+
+        popover->signal_show().connect(sync_quick_grid);
+        show_grid_switch->property_active().signal_changed().connect([this, show_grid_switch] {
+            get_canvas().set_grid_enabled(show_grid_switch->get_active());
+            update_sketcher_toolbar_button_states();
+            sync_symmetry_popover_context();
+            update_radial_menu_button_states();
         });
         snap_switch->property_active().signal_changed().connect(
                 [this, snap_switch] { get_canvas().set_grid_snap_enabled(snap_switch->get_active()); });
@@ -10282,25 +10453,36 @@ void Editor::init_radial_menu()
                 [this, spacing_spin] { get_canvas().set_grid_spacing_mm(spacing_spin->get_value()); });
     }
 
-    m_radial_symmetry_button = add_strip_button("object-flip-horizontal-symbolic", "Toggle symmetry");
+    m_radial_symmetry_button = add_strip_button("object-flip-horizontal-symbolic", "Toggle live symmetry");
     m_radial_symmetry_button->signal_clicked().connect([this] { toggle_radial_symmetry(); });
     {
         auto [popover, box] = create_quick_options_popover(*m_radial_symmetry_button);
         m_quick_symmetry_popover = popover;
         auto updating = std::make_shared<bool>(false);
-        auto radial_row = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 8);
-        auto radial_label = Gtk::make_managed<Gtk::Label>("Radial");
-        radial_label->set_hexpand(true);
-        radial_label->set_xalign(0);
-        auto radial_switch = Gtk::make_managed<Gtk::Switch>();
-        radial_row->append(*radial_label);
-        radial_row->append(*radial_switch);
-        box->append(*radial_row);
 
-        auto mode_row = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 8);
-        auto mode_label = Gtk::make_managed<Gtk::Label>("Mode");
-        mode_label->set_hexpand(true);
-        mode_label->set_xalign(0);
+        auto intro = Gtk::make_managed<Gtk::Label>(
+                "Adjust symmetry mode and placement quickly while you keep drawing on the canvas.");
+        intro->set_wrap(true);
+        intro->set_xalign(0.0f);
+        intro->set_max_width_chars(26);
+        intro->add_css_class("dim-label");
+        box->append(*intro);
+
+        auto mode_section = append_sketch_settings_section(*box, "Mode");
+        auto mode_grid = Gtk::make_managed<Gtk::Grid>();
+        mode_section->append(*mode_grid);
+        SketchSettingsGridBuilder mode_rows(*mode_grid);
+
+        auto radial_switch = Gtk::make_managed<Gtk::Switch>();
+        radial_switch->set_halign(Gtk::Align::END);
+        mode_rows.add_row("Radial mode", *radial_switch);
+
+        auto axis_direction_label = Gtk::make_managed<Gtk::Label>("Axis direction");
+        axis_direction_label->set_hexpand(true);
+        axis_direction_label->set_xalign(0.0f);
+        axis_direction_label->set_halign(Gtk::Align::START);
+        auto mode_controls = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 8);
+        mode_controls->set_hexpand(true);
         auto mode_prev_button = Gtk::make_managed<Gtk::Button>();
         mode_prev_button->set_icon_name("go-previous-symbolic");
         mode_prev_button->set_has_frame(true);
@@ -10309,48 +10491,46 @@ void Editor::init_radial_menu()
         mode_value_label->set_hexpand(true);
         mode_value_label->set_halign(Gtk::Align::CENTER);
         mode_value_label->set_xalign(.5f);
+        mode_value_label->set_ellipsize(Pango::EllipsizeMode::END);
         mode_value_label->set_max_width_chars(10);
         auto mode_next_button = Gtk::make_managed<Gtk::Button>();
         mode_next_button->set_icon_name("go-next-symbolic");
         mode_next_button->set_has_frame(true);
         mode_next_button->set_tooltip_text("Next mode");
-        mode_row->append(*mode_label);
-        mode_row->append(*mode_prev_button);
-        mode_row->append(*mode_value_label);
-        mode_row->append(*mode_next_button);
-        box->append(*mode_row);
+        mode_controls->append(*mode_prev_button);
+        mode_controls->append(*mode_value_label);
+        mode_controls->append(*mode_next_button);
+        mode_rows.add_widget_row(*axis_direction_label, *mode_controls);
 
-        auto axes_row = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 8);
-        auto axes_label = Gtk::make_managed<Gtk::Label>("Segments");
-        axes_label->set_hexpand(true);
-        axes_label->set_xalign(0);
+        auto placement_section = append_sketch_settings_section(*box, "Placement");
+        auto placement_grid = Gtk::make_managed<Gtk::Grid>();
+        placement_section->append(*placement_grid);
+        SketchSettingsGridBuilder placement_rows(*placement_grid);
+
+        auto segments_label = Gtk::make_managed<Gtk::Label>("Segments");
+        segments_label->set_hexpand(true);
+        segments_label->set_xalign(0.0f);
+        segments_label->set_halign(Gtk::Align::START);
+        auto axes_controls = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 8);
         auto axes_spin = Gtk::make_managed<Gtk::SpinButton>();
-        axes_spin->set_range(3, 32);
-        axes_spin->set_increments(1, 1);
-        axes_spin->set_digits(0);
-        axes_spin->set_numeric(true);
-        axes_row->append(*axes_label);
-        axes_row->append(*axes_spin);
-        box->append(*axes_row);
+        configure_sketch_settings_spin(*axes_spin, 0, 3, 32, 1, 4);
+        axes_controls->append(*axes_spin);
+        placement_rows.add_widget_row(*segments_label, *axes_controls);
 
-        auto rot_row = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 8);
-        auto rot_label = Gtk::make_managed<Gtk::Label>("Rotation");
-        rot_label->set_hexpand(true);
-        rot_label->set_xalign(0);
         auto rot_spin = Gtk::make_managed<Gtk::SpinButton>();
-        rot_spin->set_range(-180, 180);
-        rot_spin->set_increments(1, 10);
-        rot_spin->set_digits(1);
-        rot_spin->set_numeric(true);
-        auto rot_unit = Gtk::make_managed<Gtk::Label>("deg");
-        rot_row->append(*rot_label);
-        rot_row->append(*rot_spin);
-        rot_row->append(*rot_unit);
-        box->append(*rot_row);
+        configure_sketch_settings_spin(*rot_spin, 1, -180, 180, 1, 5);
+        placement_rows.add_row("Rotation", *rot_spin, make_sketch_unit_label("deg"));
+
+        auto context_hint = Gtk::make_managed<Gtk::Label>();
+        context_hint->set_wrap(true);
+        context_hint->set_xalign(0.0f);
+        context_hint->set_max_width_chars(26);
+        context_hint->add_css_class("dim-label");
+        box->append(*context_hint);
 
         const auto sync_quick =
                 [this, updating, radial_switch, mode_value_label, mode_prev_button, mode_next_button, axes_spin, rot_spin,
-                 mode_row, axes_row] {
+                 axis_direction_label, mode_controls, segments_label, axes_controls, context_hint] {
             if (!m_symmetry_radial_switch || !m_symmetry_axes_spin || !m_symmetry_rotation_spin)
                 return;
             *updating = true;
@@ -10359,39 +10539,53 @@ void Editor::init_radial_menu()
             axes_spin->set_value(m_symmetry_axes_spin->get_value());
             rot_spin->set_value(m_symmetry_rotation_spin->get_value());
             const bool radial = radial_switch->get_active();
-            mode_row->set_visible(!radial);
-            axes_row->set_visible(radial);
+            axis_direction_label->set_visible(!radial);
+            mode_controls->set_visible(!radial);
+            segments_label->set_visible(radial);
+            axes_controls->set_visible(radial);
             mode_prev_button->set_sensitive(!radial);
             mode_next_button->set_sensitive(!radial);
+            if (m_symmetry_context_label)
+                context_hint->set_text(m_symmetry_context_label->get_text());
+            else
+                context_hint->set_text("Uses the same live symmetry state as the toolbar symmetry control.");
             *updating = false;
         };
         popover->signal_show().connect(sync_quick);
         radial_switch->property_active().signal_changed().connect(
-                [this, updating, radial_switch, mode_row, axes_row] {
+                [this, updating, radial_switch, axis_direction_label, mode_controls, segments_label, axes_controls, context_hint] {
                     if (*updating || !m_symmetry_radial_switch)
                         return;
                     m_symmetry_radial_switch->set_active(radial_switch->get_active());
                     const bool radial = radial_switch->get_active();
-                    mode_row->set_visible(!radial);
-                    axes_row->set_visible(radial);
+                    axis_direction_label->set_visible(!radial);
+                    mode_controls->set_visible(!radial);
+                    segments_label->set_visible(radial);
+                    axes_controls->set_visible(radial);
                     sync_symmetry_popover_context();
                     apply_symmetry_live_from_popover(false);
+                    if (m_symmetry_context_label)
+                        context_hint->set_text(m_symmetry_context_label->get_text());
                 });
-        mode_prev_button->signal_clicked().connect([this, updating, mode_value_label] {
+        mode_prev_button->signal_clicked().connect([this, updating, mode_value_label, context_hint] {
             if (*updating)
                 return;
             m_symmetry_mode_selected = (m_symmetry_mode_selected + 1u) % 2u;
             mode_value_label->set_text((m_symmetry_mode_selected % 2u) == 0u ? "Horizontal" : "Vertical");
             sync_symmetry_popover_context();
             apply_symmetry_live_from_popover(false);
+            if (m_symmetry_context_label)
+                context_hint->set_text(m_symmetry_context_label->get_text());
         });
-        mode_next_button->signal_clicked().connect([this, updating, mode_value_label] {
+        mode_next_button->signal_clicked().connect([this, updating, mode_value_label, context_hint] {
             if (*updating)
                 return;
             m_symmetry_mode_selected = (m_symmetry_mode_selected + 1u) % 2u;
             mode_value_label->set_text((m_symmetry_mode_selected % 2u) == 0u ? "Horizontal" : "Vertical");
             sync_symmetry_popover_context();
             apply_symmetry_live_from_popover(false);
+            if (m_symmetry_context_label)
+                context_hint->set_text(m_symmetry_context_label->get_text());
         });
         axes_spin->signal_value_changed().connect([this, updating, axes_spin] {
             if (*updating || !m_symmetry_axes_spin)
@@ -10927,7 +11121,7 @@ void Editor::init_header_bar()
         set_tool_hint(*m_grid_menu_button, join_tooltip_lines({
                                               "Grid",
                                               "Toggle grid.",
-                                              "Hover to change spacing and snap.",
+                                              "Hover to change visibility, spacing, and snap.",
                                       }));
 
         auto grid_popover = Gtk::make_managed<Gtk::Popover>();
@@ -10936,50 +11130,63 @@ void Editor::init_header_bar()
         grid_popover->set_autohide(false);
         grid_popover->set_parent(*m_grid_menu_button);
         grid_popover->set_size_request(sketch_popover_total_width, -1);
-        auto grid_box = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 10);
-        grid_box->set_margin_start(12);
-        grid_box->set_margin_end(12);
-        grid_box->set_margin_top(12);
-        grid_box->set_margin_bottom(12);
-        grid_box->set_size_request(sketch_popover_content_width, -1);
-        grid_popover->set_child(*grid_box);
+        auto grid_box = create_sketch_popover_content_box(*grid_popover, 10);
         m_win.get_header_bar().pack_start(*m_grid_menu_button);
         install_hover_popover(*m_grid_menu_button, *grid_popover, [this] { return !m_primary_button_pressed; },
                               [this] { return m_right_click_popovers_only; });
 
-        auto make_switch_row = [grid_box](const Glib::ustring &text, Gtk::Switch *&sw) {
-            auto row = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 10);
-            auto label = Gtk::make_managed<Gtk::Label>(text);
-            label->set_hexpand(true);
-            label->set_xalign(0);
-            sw = Gtk::make_managed<Gtk::Switch>();
-            sw->set_halign(Gtk::Align::END);
-            row->append(*label);
-            row->append(*sw);
-            grid_box->append(*row);
-        };
-        make_switch_row("Snap to grid", m_grid_snap_button);
+        auto intro = Gtk::make_managed<Gtk::Label>("Quick grid visibility, snap, and spacing for the current sketch.");
+        intro->set_wrap(true);
+        intro->set_xalign(0.0f);
+        intro->set_max_width_chars(24);
+        intro->add_css_class("dim-label");
+        grid_box->append(*intro);
 
-        auto spacing_box = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 6);
-        auto spacing_title = Gtk::make_managed<Gtk::Label>("Size");
-        spacing_title->set_hexpand(true);
-        spacing_title->set_xalign(0);
+        auto display_section = append_sketch_settings_section(*grid_box, "Display");
+        auto display_rows_box = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 8);
+        display_section->append(*display_rows_box);
+        SketchSettingsRowListBuilder display_rows(*display_rows_box);
+
+        auto grid_enabled_switch = Gtk::make_managed<Gtk::Switch>();
+        grid_enabled_switch->set_halign(Gtk::Align::END);
+        display_rows.add_row_span("Show grid", *grid_enabled_switch, 2);
+
+        auto behavior_section = append_sketch_settings_section(*grid_box, "Behavior");
+        auto behavior_rows_box = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 8);
+        behavior_section->append(*behavior_rows_box);
+        SketchSettingsRowListBuilder behavior_rows(*behavior_rows_box);
+
+        m_grid_snap_button = Gtk::make_managed<Gtk::Switch>();
+        m_grid_snap_button->set_halign(Gtk::Align::END);
+        behavior_rows.add_row_span("Snap to grid", *m_grid_snap_button, 2);
+
         m_grid_spacing_spin = Gtk::make_managed<Gtk::SpinButton>();
-        m_grid_spacing_spin->set_range(0.1, 100000.0);
-        m_grid_spacing_spin->set_increments(0.1, 1.0);
-        m_grid_spacing_spin->set_digits(2);
-        m_grid_spacing_spin->set_numeric(true);
-        m_grid_spacing_spin->set_width_chars(6);
-        m_grid_spacing_spin->set_halign(Gtk::Align::END);
-        auto spacing_label = Gtk::make_managed<Gtk::Label>("mm");
-        spacing_label->add_css_class("dim-label");
-        spacing_box->append(*spacing_title);
-        spacing_box->append(*m_grid_spacing_spin);
-        spacing_box->append(*spacing_label);
-        grid_box->append(*spacing_box);
+        configure_sketch_settings_spin(*m_grid_spacing_spin, 2, 0.1, 100000.0, 0.1, 6);
+        behavior_rows.add_row("Spacing", *m_grid_spacing_spin, make_sketch_unit_label("mm"));
+
+        auto spacing_hint = Gtk::make_managed<Gtk::Label>(
+                "Smaller spacing helps detail work; larger spacing keeps guides easier to scan.");
+        spacing_hint->set_wrap(true);
+        spacing_hint->set_xalign(0.0f);
+        spacing_hint->set_max_width_chars(24);
+        spacing_hint->add_css_class("dim-label");
+        behavior_section->append(*spacing_hint);
+
+        auto sync_grid_popover_controls = [this, grid_enabled_switch] {
+            grid_enabled_switch->set_active(get_canvas().get_grid_enabled());
+            if (m_grid_spacing_spin)
+                m_grid_spacing_spin->set_value(get_canvas().get_grid_spacing_mm());
+            if (m_grid_snap_button)
+                m_grid_snap_button->set_active(get_canvas().get_grid_snap_enabled());
+        };
 
         m_grid_menu_button->signal_clicked().connect([this] {
             get_canvas().set_grid_enabled(!get_canvas().get_grid_enabled());
+            update_sketcher_toolbar_button_states();
+            sync_symmetry_popover_context();
+        });
+        grid_enabled_switch->property_active().signal_changed().connect([this, grid_enabled_switch] {
+            get_canvas().set_grid_enabled(grid_enabled_switch->get_active());
             update_sketcher_toolbar_button_states();
             sync_symmetry_popover_context();
         });
@@ -10991,9 +11198,8 @@ void Editor::init_header_bar()
             if (m_grid_snap_button)
                 get_canvas().set_grid_snap_enabled(m_grid_snap_button->get_active());
         });
-
-        m_grid_spacing_spin->set_value(get_canvas().get_grid_spacing_mm());
-        m_grid_snap_button->set_active(get_canvas().get_grid_snap_enabled());
+        grid_popover->signal_show().connect(sync_grid_popover_controls);
+        sync_grid_popover_controls();
 
         init_symmetry_popover();
 #endif
@@ -11014,7 +11220,7 @@ void Editor::init_symmetry_popover()
     set_tool_hint(*m_symmetry_menu_button, join_tooltip_lines({
                                               "Symmetry",
                                               "Toggle live symmetry.",
-                                              "Hover to choose axis or radial mode.",
+                                              "Hover to choose axis, rotation, or radial mode.",
                                       }));
     m_win.get_header_bar().pack_start(*m_symmetry_menu_button);
 
@@ -11028,31 +11234,47 @@ void Editor::init_symmetry_popover()
                           [this] { return m_right_click_popovers_only; });
     m_symmetry_popover = popover;
 
-    auto root = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 10);
-    root->set_margin_start(12);
-    root->set_margin_end(12);
-    root->set_margin_top(12);
-    root->set_margin_bottom(12);
-    root->set_size_request(sketch_popover_content_width, -1);
-    popover->set_child(*root);
+    auto root = create_sketch_popover_content_box(*popover, 10);
+
+    auto intro = Gtk::make_managed<Gtk::Label>(
+            "Mirror sketch geometry or spin out radial copies without leaving the current sketch.");
+    intro->set_wrap(true);
+    intro->set_xalign(0.0f);
+    intro->set_max_width_chars(28);
+    intro->add_css_class("dim-label");
+    root->append(*intro);
+
+    auto append_symmetry_row = [](Gtk::Box &parent, const char *label_text, Gtk::Widget &control, Gtk::Widget *trailing = nullptr) {
+        auto row = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 12);
+        auto *unit_slot = trailing ? trailing : static_cast<Gtk::Widget *>(make_sketch_unit_label(""));
+        auto label = Gtk::make_managed<Gtk::Label>(label_text);
+        label->set_hexpand(true);
+        label->set_xalign(0.0f);
+        label->set_halign(Gtk::Align::START);
+        row->append(*label);
+        row->append(*unit_slot);
+        row->append(control);
+        parent.append(*row);
+        return row;
+    };
+
+    auto mode_section = append_sketch_settings_section(*root, "Mode");
+    auto placement_section = append_sketch_settings_section(*root, "Placement");
+    auto context_section = append_sketch_settings_section(*root, "Context");
 
     m_symmetry_context_label = Gtk::make_managed<Gtk::Label>();
     m_symmetry_context_label->set_wrap(true);
     m_symmetry_context_label->set_wrap_mode(Pango::WrapMode::WORD_CHAR);
-    m_symmetry_context_label->set_max_width_chars(16);
+    m_symmetry_context_label->set_max_width_chars(28);
     m_symmetry_context_label->set_xalign(0);
     m_symmetry_context_label->add_css_class("dim-label");
 
-    auto radial_row = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 8);
-    auto radial_label = Gtk::make_managed<Gtk::Label>("Radial");
-    radial_label->set_xalign(0);
-    radial_label->set_hexpand(true);
     m_symmetry_radial_switch = Gtk::make_managed<Gtk::Switch>();
-    radial_row->append(*radial_label);
-    radial_row->append(*m_symmetry_radial_switch);
-    root->append(*radial_row);
+    m_symmetry_radial_switch->set_halign(Gtk::Align::END);
+    append_symmetry_row(*mode_section, "Radial mode", *m_symmetry_radial_switch);
 
-    m_symmetry_mode_row = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 8);
+    auto mode_controls = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 8);
+    mode_controls->set_hexpand(true);
     m_symmetry_mode_prev_button = Gtk::make_managed<Gtk::Button>();
     m_symmetry_mode_prev_button->set_icon_name("go-previous-symbolic");
     m_symmetry_mode_prev_button->set_has_frame(true);
@@ -11070,49 +11292,31 @@ void Editor::init_symmetry_popover()
     m_symmetry_mode_next_button->set_has_frame(true);
     m_symmetry_mode_next_button->set_tooltip_text("Next mode");
 
-    m_symmetry_mode_row->append(*m_symmetry_mode_prev_button);
-    m_symmetry_mode_row->append(*m_symmetry_mode_value_label);
-    m_symmetry_mode_row->append(*m_symmetry_mode_next_button);
-    root->append(*m_symmetry_mode_row);
+    mode_controls->append(*m_symmetry_mode_prev_button);
+    mode_controls->append(*m_symmetry_mode_value_label);
+    mode_controls->append(*m_symmetry_mode_next_button);
+    m_symmetry_mode_row = append_symmetry_row(*mode_section, "Axis direction", *mode_controls);
 
-    m_symmetry_axes_row = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 8);
-    auto count_label = Gtk::make_managed<Gtk::Label>("Segments");
-    count_label->set_xalign(0);
-    count_label->set_hexpand(true);
+    auto axes_controls = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 8);
     m_symmetry_axes_spin = Gtk::make_managed<Gtk::SpinButton>();
-    m_symmetry_axes_spin->set_range(3, 32);
-    m_symmetry_axes_spin->set_increments(1, 1);
-    m_symmetry_axes_spin->set_digits(0);
-    m_symmetry_axes_spin->set_numeric(true);
-    m_symmetry_axes_spin->set_width_chars(4);
-    m_symmetry_axes_spin->set_value(4);
-    m_symmetry_axes_row->append(*count_label);
-    m_symmetry_axes_row->append(*m_symmetry_axes_spin);
-    root->append(*m_symmetry_axes_row);
+    configure_sketch_settings_spin(*m_symmetry_axes_spin, 0, 3, 32, 1, 4);
+    m_symmetry_axes_spin->set_value(m_symmetry_radial_axes);
+    axes_controls->append(*m_symmetry_axes_spin);
+    m_symmetry_axes_row = append_symmetry_row(*placement_section, "Segments", *axes_controls);
 
-    m_symmetry_rotation_row = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 8);
-    auto rotation_label = Gtk::make_managed<Gtk::Label>("Rotation");
-    rotation_label->set_xalign(0);
-    rotation_label->set_hexpand(true);
+    auto rotation_controls = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 8);
     m_symmetry_rotation_spin = Gtk::make_managed<Gtk::SpinButton>();
-    m_symmetry_rotation_spin->set_range(-180, 180);
-    m_symmetry_rotation_spin->set_increments(1, 10);
-    m_symmetry_rotation_spin->set_digits(1);
-    m_symmetry_rotation_spin->set_numeric(true);
-    m_symmetry_rotation_spin->set_width_chars(5);
-    m_symmetry_rotation_spin->set_value(0);
-    auto rotation_unit_label = Gtk::make_managed<Gtk::Label>("deg");
-    m_symmetry_rotation_row->append(*rotation_label);
-    m_symmetry_rotation_row->append(*m_symmetry_rotation_spin);
-    m_symmetry_rotation_row->append(*rotation_unit_label);
-    root->append(*m_symmetry_rotation_row);
+    configure_sketch_settings_spin(*m_symmetry_rotation_spin, 1, -180, 180, 1, 5);
+    m_symmetry_rotation_spin->set_value(m_symmetry_radial_rotation_deg);
+    rotation_controls->append(*m_symmetry_rotation_spin);
+    m_symmetry_rotation_row =
+            append_symmetry_row(*placement_section, "Rotation", *rotation_controls, make_sketch_unit_label("deg"));
 
     m_symmetry_apply_button = Gtk::make_managed<Gtk::Button>("Set Axis");
     m_symmetry_apply_button->set_hexpand(true);
-    root->append(*m_symmetry_apply_button);
+    placement_section->append(*m_symmetry_apply_button);
 
-    // Keep context hint at the bottom of the popover.
-    root->append(*m_symmetry_context_label);
+    context_section->append(*m_symmetry_context_label);
 
     m_symmetry_menu_button->signal_clicked().connect([this] {
         if (m_symmetry_enabled)
@@ -12266,22 +12470,26 @@ void Editor::init_settings_popover()
     popover->set_autohide(true);
     popover->set_size_request(sketch_popover_total_width, -1);
 
-    auto root = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 10);
-    root->set_margin_start(12);
-    root->set_margin_end(12);
-    root->set_margin_top(12);
-    root->set_margin_bottom(12);
-    root->set_size_request(sketch_popover_content_width, -1);
-    popover->set_child(*root);
+    auto root = create_sketch_popover_content_box(*popover, 10);
 
-    auto theme_title = Gtk::make_managed<Gtk::Label>("Theme");
-    theme_title->set_halign(Gtk::Align::CENTER);
-    theme_title->add_css_class("dim-label");
-    root->append(*theme_title);
+    auto intro = Gtk::make_managed<Gtk::Label>(
+            "Adjust theme, canvas feel, and everyday workflow defaults without leaving the current sketch.");
+    intro->set_wrap(true);
+    intro->set_xalign(0.0f);
+    intro->set_max_width_chars(28);
+    intro->add_css_class("dim-label");
+    root->append(*intro);
+
+    auto theme_section = append_sketch_settings_section(*root, "Theme");
+    m_theme_accent_section = theme_section;
+    auto theme_grid = Gtk::make_managed<Gtk::Grid>();
+    theme_section->append(*theme_grid);
+    SketchSettingsGridBuilder theme_rows(*theme_grid);
 
     auto theme_row = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 0);
     theme_row->add_css_class("linked");
-    root->append(*theme_row);
+    theme_row->set_hexpand(true);
+    theme_rows.add_row_span("Variant", *theme_row, 2);
 
     m_theme_prev_button = Gtk::make_managed<Gtk::Button>();
     m_theme_prev_button->set_icon_name("go-previous-symbolic");
@@ -12324,17 +12532,10 @@ void Editor::init_settings_popover()
     m_theme_next_button->signal_clicked().connect(
             [this, set_theme_variant] { set_theme_variant(cycle_sketch_theme_variant(m_preferences.canvas.theme_variant, +1)); });
 
-    m_theme_accent_section = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 6);
-    root->append(*m_theme_accent_section);
-
-    auto accent_title = Gtk::make_managed<Gtk::Label>("Accent");
-    accent_title->set_halign(Gtk::Align::CENTER);
-    accent_title->add_css_class("dim-label");
-    m_theme_accent_section->append(*accent_title);
-
     m_theme_accent_row = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 8);
-    m_theme_accent_row->set_halign(Gtk::Align::CENTER);
-    m_theme_accent_section->append(*m_theme_accent_row);
+    m_theme_accent_row->set_halign(Gtk::Align::START);
+    m_theme_accent_row->set_hexpand(true);
+    theme_rows.add_row_span("Accent", *m_theme_accent_row, 2);
 
     const auto set_accent_variant = [this](CanvasPreferences::AccentVariant accent) {
         m_preferences.canvas.accent_variant = accent;
@@ -12364,21 +12565,27 @@ void Editor::init_settings_popover()
         m_theme_accent_buttons.emplace(def.accent, button);
     }
 
-    auto width_title = Gtk::make_managed<Gtk::Label>("Line Thickness");
-    width_title->set_halign(Gtk::Align::CENTER);
-    width_title->add_css_class("dim-label");
-    root->append(*width_title);
+    auto canvas_section = append_sketch_settings_section(*root, "Canvas");
+    auto canvas_grid = Gtk::make_managed<Gtk::Grid>();
+    canvas_section->append(*canvas_grid);
+    SketchSettingsGridBuilder canvas_rows(*canvas_grid);
 
     m_line_width_scale = Gtk::make_managed<Gtk::Scale>(Gtk::Orientation::HORIZONTAL);
     m_line_width_scale->set_range(1.0, 5.0);
     m_line_width_scale->set_increments(0.1, 0.5);
     m_line_width_scale->set_draw_value(false);
-    root->append(*m_line_width_scale);
+    m_line_width_scale->set_hexpand(true);
 
     m_line_width_value_label = Gtk::make_managed<Gtk::Label>();
-    m_line_width_value_label->set_halign(Gtk::Align::CENTER);
+    m_line_width_value_label->set_halign(Gtk::Align::START);
+    m_line_width_value_label->set_xalign(0.0f);
     m_line_width_value_label->add_css_class("dim-label");
-    root->append(*m_line_width_value_label);
+
+    auto line_width_box = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 4);
+    line_width_box->set_hexpand(true);
+    line_width_box->append(*m_line_width_scale);
+    line_width_box->append(*m_line_width_value_label);
+    canvas_rows.add_row_span("Line thickness", *line_width_box, 2);
 
     m_line_width_scale->signal_value_changed().connect([this] {
         if (!m_line_width_scale)
@@ -12393,14 +12600,14 @@ void Editor::init_settings_popover()
         m_preferences.signal_changed().emit();
     });
 
-    auto right_click_popover_row = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 8);
-    auto right_click_popover_label = Gtk::make_managed<Gtk::Label>("Options by right click");
-    right_click_popover_label->set_hexpand(true);
-    right_click_popover_label->set_xalign(0);
+    auto workflow_section = append_sketch_settings_section(*root, "Workflow");
+    auto workflow_grid = Gtk::make_managed<Gtk::Grid>();
+    workflow_section->append(*workflow_grid);
+    SketchSettingsGridBuilder workflow_rows(*workflow_grid);
+
     m_right_click_popovers_switch = Gtk::make_managed<Gtk::Switch>();
-    right_click_popover_row->append(*right_click_popover_label);
-    right_click_popover_row->append(*m_right_click_popovers_switch);
-    root->append(*right_click_popover_row);
+    m_right_click_popovers_switch->set_halign(Gtk::Align::END);
+    workflow_rows.add_row("Right-click options", *m_right_click_popovers_switch);
 
     m_right_click_popovers_switch->property_active().signal_changed().connect([this] {
         if (m_updating_settings_popover || !m_right_click_popovers_switch)
@@ -12408,14 +12615,9 @@ void Editor::init_settings_popover()
         m_right_click_popovers_only = m_right_click_popovers_switch->get_active();
     });
 
-    auto tool_hints_row = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 8);
-    auto tool_hints_label = Gtk::make_managed<Gtk::Label>("Tool hints");
-    tool_hints_label->set_hexpand(true);
-    tool_hints_label->set_xalign(0);
     m_tool_hints_switch = Gtk::make_managed<Gtk::Switch>();
-    tool_hints_row->append(*tool_hints_label);
-    tool_hints_row->append(*m_tool_hints_switch);
-    root->append(*tool_hints_row);
+    m_tool_hints_switch->set_halign(Gtk::Align::END);
+    workflow_rows.add_row("Tool hints", *m_tool_hints_switch);
 
     m_tool_hints_switch->property_active().signal_changed().connect([this] {
         if (m_updating_settings_popover || !m_tool_hints_switch)
@@ -12426,14 +12628,9 @@ void Editor::init_settings_popover()
         m_preferences.signal_changed().emit();
     });
 
-    auto support_button_row = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 8);
-    auto support_button_label = Gtk::make_managed<Gtk::Label>("Support button");
-    support_button_label->set_hexpand(true);
-    support_button_label->set_xalign(0);
     m_support_button_switch = Gtk::make_managed<Gtk::Switch>();
-    support_button_row->append(*support_button_label);
-    support_button_row->append(*m_support_button_switch);
-    root->append(*support_button_row);
+    m_support_button_switch->set_halign(Gtk::Align::END);
+    workflow_rows.add_row("Support button", *m_support_button_switch);
 
     m_support_button_switch->property_active().signal_changed().connect([this] {
         if (m_updating_settings_popover || !m_support_button_switch)
@@ -12443,13 +12640,15 @@ void Editor::init_settings_popover()
         m_preferences.signal_changed().emit();
     });
 
+    auto actions_section = append_sketch_settings_section(*root, "Actions");
+
     auto pref_button = Gtk::make_managed<Gtk::Button>("Preferences");
     pref_button->set_hexpand(true);
-    root->append(*pref_button);
+    actions_section->append(*pref_button);
 
     auto actions_row = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 8);
     actions_row->add_css_class("linked");
-    root->append(*actions_row);
+    actions_section->append(*actions_row);
 
     auto help_button = Gtk::make_managed<Gtk::Button>("Help");
     auto about_button = Gtk::make_managed<Gtk::Button>("About");
@@ -12566,11 +12765,11 @@ void Editor::on_open_document(const ActionConnection &conn)
             }
             m_workspace_browser->update_documents(get_current_document_views());
         }
-        catch (const Gtk::DialogError &err) {
-            std::cout << "No file selected. " << err.what() << std::endl;
+        catch (const Gtk::DialogError &) {
+            // User cancelled the dialog.
         }
         catch (const Glib::Error &err) {
-            std::cout << "Unexpected exception. " << err.what() << std::endl;
+            log_dialog_failure("Open files dialog", err);
         }
     });
     return;
@@ -12594,7 +12793,7 @@ void Editor::on_open_document(const ActionConnection &conn)
     filter_any->add_pattern("*.svg");
     filter_any->add_pattern("*.SVG");
 #else
-    filter_any->set_name("Dune 3D documents");
+    filter_any->set_name("DXF Sketcher documents");
     filter_any->add_pattern("*.d3ddoc");
 #endif
     filters->append(filter_any);
@@ -12606,16 +12805,12 @@ void Editor::on_open_document(const ActionConnection &conn)
         try {
             auto file = dialog->open_finish(result);
             open_file(path_from_string(file->get_path()));
-            // Notice that this is a std::string, not a Glib::ustring.
-            auto filename = file->get_path();
-            std::cout << "File selected: " << filename << std::endl;
         }
-        catch (const Gtk::DialogError &err) {
-            // Can be thrown by dialog->open_finish(result).
-            std::cout << "No file selected. " << err.what() << std::endl;
+        catch (const Gtk::DialogError &) {
+            // User cancelled the dialog.
         }
         catch (const Glib::Error &err) {
-            std::cout << "Unexpected exception. " << err.what() << std::endl;
+            log_dialog_failure("Open file dialog", err);
         }
     });
 #endif
@@ -12632,11 +12827,11 @@ void Editor::on_open_folder()
             auto folder = dialog->select_folder_finish(result);
             open_folder(path_from_string(folder->get_path()));
         }
-        catch (const Gtk::DialogError &err) {
-            std::cout << "No folder selected. " << err.what() << std::endl;
+        catch (const Gtk::DialogError &) {
+            // User cancelled the dialog.
         }
         catch (const Glib::Error &err) {
-            std::cout << "Unexpected exception. " << err.what() << std::endl;
+            log_dialog_failure("Open folder dialog", err);
         }
     });
 #endif
@@ -12663,11 +12858,11 @@ void Editor::on_open_project()
             if (file)
                 open_project(path_from_string(file->get_path()));
         }
-        catch (const Gtk::DialogError &err) {
-            std::cout << "No file selected. " << err.what() << std::endl;
+        catch (const Gtk::DialogError &) {
+            // User cancelled the dialog.
         }
         catch (const Glib::Error &err) {
-            std::cout << "Unexpected exception. " << err.what() << std::endl;
+            log_dialog_failure("Open project dialog", err);
         }
     });
 #endif
@@ -12709,11 +12904,11 @@ void Editor::on_save_project()
             const auto project_file = project_dir / path_from_string(project_name + std::string(kSketcherProjectExtension));
             save_project_to(project_file);
         }
-        catch (const Gtk::DialogError &err) {
-            std::cout << "No file selected. " << err.what() << std::endl;
+        catch (const Gtk::DialogError &) {
+            // User cancelled the dialog.
         }
         catch (const Glib::Error &err) {
-            std::cout << "Unexpected exception. " << err.what() << std::endl;
+            log_dialog_failure("Save project dialog", err);
         }
     });
 #endif
@@ -13357,11 +13552,11 @@ void Editor::on_save_as(const ActionConnection &conn)
                 m_after_save_cb();
             m_after_save_cb = nullptr;
         }
-        catch (const Gtk::DialogError &err) {
-            std::cout << "No file selected. " << err.what() << std::endl;
+        catch (const Gtk::DialogError &) {
+            // User cancelled the dialog.
         }
         catch (const Glib::Error &err) {
-            std::cout << "Unexpected exception. " << err.what() << std::endl;
+            log_dialog_failure("Save file dialog", err);
         }
     });
 #else
@@ -13375,7 +13570,7 @@ void Editor::on_save_as(const ActionConnection &conn)
     auto filters = Gio::ListStore<Gtk::FileFilter>::create();
 
     auto filter_any = Gtk::FileFilter::create();
-    filter_any->set_name("Dune 3D documents");
+    filter_any->set_name("DXF Sketcher documents");
     filter_any->add_pattern("*.d3ddoc");
     filters->append(filter_any);
 
@@ -13388,7 +13583,6 @@ void Editor::on_save_as(const ActionConnection &conn)
             // open_file_view(file);
             //  Notice that this is a std::string, not a Glib::ustring.
             auto filename = path_from_string(append_suffix_if_required(file->get_path(), ".d3ddoc"));
-            // std::cout << "File selected: " << filename << std::endl;
             m_win.get_app().add_recent_item(filename);
             m_core.save_as(filename);
             save_workspace_view(m_core.get_current_idocument_info().get_uuid());
@@ -13399,12 +13593,11 @@ void Editor::on_save_as(const ActionConnection &conn)
                 m_after_save_cb();
             m_after_save_cb = nullptr;
         }
-        catch (const Gtk::DialogError &err) {
-            // Can be thrown by dialog->open_finish(result).
-            std::cout << "No file selected. " << err.what() << std::endl;
+        catch (const Gtk::DialogError &) {
+            // User cancelled the dialog.
         }
         catch (const Glib::Error &err) {
-            std::cout << "Unexpected exception. " << err.what() << std::endl;
+            log_dialog_failure("Save file dialog", err);
         }
     });
 #endif

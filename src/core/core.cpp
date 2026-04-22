@@ -14,8 +14,6 @@
 #include "logger/log_util.hpp"
 #include "tools/itool_constrain.hpp"
 #include "action/action_catalog.hpp"
-#include <iostream>
-
 namespace dune3d {
 
 Core::Core(EditorInterface &intf) : m_intf(intf), m_constraint_preview_tool(ToolID::NONE)
@@ -572,7 +570,6 @@ bool Core::maybe_end_tool(const ToolResponse &r)
         }*/
         // tool_selection = tool->selection;
         m_last_tool_selection = m_tool->m_selection;
-        std::cout << "end tool" << std::endl;
         m_tool.reset();
         m_signal_tool_changed.emit();
         if (r.result == ToolResponse::Result::COMMIT) {

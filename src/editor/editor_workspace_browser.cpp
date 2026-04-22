@@ -818,9 +818,9 @@ void Editor::on_workspace_browser_set_group_color(const UUID &uu_doc, const UUID
 
 void Editor::on_workspace_browser_reset_body_color(const UUID &uu_doc, const UUID &uu_group)
 {
-#ifdef DUNE_SKETCHER_ONLY
     auto &doc = m_core.get_idocument_info(uu_doc).get_document();
     auto &group = doc.get_group(uu_group);
+#ifdef DUNE_SKETCHER_ONLY
     if (m_sketcher_folder_paths.contains(uu_group) && group.get_type() == Group::Type::REFERENCE) {
         for (auto &[wsv_uu, wsv] : m_workspace_views) {
             if (auto it = wsv.m_documents.find(uu_doc); it != wsv.m_documents.end())
@@ -834,7 +834,7 @@ void Editor::on_workspace_browser_reset_body_color(const UUID &uu_doc, const UUI
     }
 #endif
 
-    doc.get_group(uu_group).m_body.value().m_color.reset();
+    group.m_body.value().m_color.reset();
     doc.set_group_update_solid_model_pending(uu_group);
     m_core.rebuild("reset body color");
     canvas_update_keep_selection();

@@ -1,7 +1,6 @@
 #include "tool_popover.hpp"
 #include "action/action_catalog.hpp"
 #include "util/str_util.hpp"
-#include <iostream>
 
 namespace dune3d {
 
@@ -115,8 +114,6 @@ public:
             return false;
 
         if (m_selected_group != ActionGroup::ALL && !m_pattern) {
-            // std::cout << static_cast<int>(action_catalog.at(it->m_id).group)
-            //           << " != " << static_cast<int>(m_selected_group) << std::endl;
             if (action_catalog.at(it->m_id).group != m_selected_group)
                 return false;
         }
@@ -161,7 +158,6 @@ ToolPopover::ToolPopover() : Gtk::Popover()
         controller->signal_key_pressed().connect(
                 [this](guint keyval, guint keycode, Gdk::ModifierType state) -> bool {
                     if (auto sel = m_selection->get_selected(); sel != GTK_INVALID_LIST_POSITION) {
-                        std::cout << "search sel " << keyval << std::endl;
                         if (keyval == GDK_KEY_Down) {
                             sel++;
                             if (sel >= m_selection->get_n_items())

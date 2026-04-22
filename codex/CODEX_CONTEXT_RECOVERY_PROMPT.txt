@@ -1,0 +1,23 @@
+Stop and fully restore context before making any more edits.
+
+Read these files again from the top:
+- CODEX_MASTER_BRIEF_DXF_SKETCHER.md
+- CODEX_EXECUTION_PROTOCOL.md
+- DXF_SKETCHER_REFACTOR_PLAN.md
+- DXF_SKETCHER_POLISH_STANDARD.md
+- DXF_SKETCHER_APPIMAGE_TRACK.md
+- DXF_SKETCHER_WORKLOG.md
+
+Then do the following:
+1. Reconstruct the current state only from those files and the current codebase.
+2. State what was already done.
+3. State what is uncertain.
+4. List 3 candidate next steps.
+5. Compare them by impact, risk, readiness, and session fit.
+6. Choose one step only if justified.
+7. Do not assume the first open plan item is automatically the next task.
+8. Do not continue any previous line of work unless it is still the best justified next step.
+9. Update DXF_SKETCHER_WORKLOG.md after the session.
+
+Your goal is not to follow a rigid queue.
+Your goal is to move DXF Sketcher toward a polished, cohesive, workshop-friendly, release-mature state.
