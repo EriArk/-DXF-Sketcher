@@ -1,3 +1,15 @@
+# Version 1.5.3
+
+## Fixes
+
+ - fix the stretched `Use angle` switch in the Gear Generator pair-preview controls so toggle rows stay aligned with the rest of the compact settings layout
+ - refresh Linux release artifacts so the published installers and AppImage match the hotfix build
+
+## Notes
+
+ - this is a small hotfix release on top of `1.5.2`
+ - Linux remains the main release target
+
 # Version 1.5.2
 
 ## Enhancements

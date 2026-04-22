@@ -32,6 +32,11 @@
   </provides>
 
   <releases>
+    <release version="1.5.3" date="2026-04-22">
+      <description>
+        <p>Small hotfix release that fixes the stretched Gear Generator Use angle toggle row and republishes refreshed Linux installers and AppImage assets.</p>
+      </description>
+    </release>
     <release version="1.5.2" date="2026-04-22">
       <description>
         <p>Polish release with cleaner toolbar popovers, more readable edge-tool settings, improved DXF Sketcher copy cleanup, and AppImage releases that now publish update metadata plus the matching .zsync companion for Gear Lever style updates.</p>

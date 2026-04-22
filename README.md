@@ -138,7 +138,7 @@ That makes it easy to stop and continue later exactly where you left off.
 
 ## Download
 
-Current release: **1.5.2**
+Current release: **1.5.3**
 
 GitHub releases:
 
@@ -153,23 +153,23 @@ Linux release files include:
 Example install commands:
 
 ```bash
-sudo apt install ./dxfsketcher_1.5.2_amd64.deb
+sudo apt install ./dxfsketcher_1.5.3_amd64.deb
 ```
 
 ```bash
-sudo rpm -i dxfsketcher-1.5.2-1.x86_64.rpm
+sudo rpm -i dxfsketcher-1.5.3-1.x86_64.rpm
 ```
 
 ```bash
-chmod +x dxfsketcher-1.5.2-x86_64.AppImage
-./dxfsketcher-1.5.2-x86_64.AppImage
+chmod +x dxfsketcher-1.5.3-x86_64.AppImage
+./dxfsketcher-1.5.3-x86_64.AppImage
 ```
 
-## What's New in 1.5.2
+## What's New in 1.5.3
 
-- Cleaner, more consistent toolbar popovers for selection, grid, symmetry, gears, cup templates, and edge tools
-- Shorter joint labels and tidier parameter rows so edge settings are easier to scan
-- Stronger Linux release packaging, including AppImage update metadata plus the `.zsync` companion used by Gear Lever style update flows
+- Small hotfix release on top of `1.5.2`
+- Fixes the stretched `Use angle` toggle in the Gear Generator pair-preview section
+- Refreshes the Linux installers and AppImage release artifacts so the published packages match the UI fix
 
 ## Platform Status
 
@@ -215,7 +215,7 @@ Example:
 
 ```bash
 APPIMAGE_GITHUB_REPO=EriArk/-DXF-Sketcher bash scripts/build_appimage.sh build-sketcher
-./dist/appimage/dxfsketcher-1.5.2-x86_64.AppImage --appimage-updateinformation
+./dist/appimage/dxfsketcher-1.5.3-x86_64.AppImage --appimage-updateinformation
 ```
 
 If `appimagetool` has zsync support available, it also writes a matching `.zsync` companion file next to the `.AppImage`.

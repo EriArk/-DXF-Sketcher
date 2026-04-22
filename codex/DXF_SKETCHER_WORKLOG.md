@@ -7,7 +7,7 @@
 ## Project status snapshot
 
 ### Current stage
-Release-close phase: the visible toolbar-popover polish pass is accepted, packaging artifacts are aligned for `1.5.2`, and the remaining work is publication plus post-release verification rather than new feature churn.
+Hotfix release-close phase: the accepted toolbar/popover polish pass now has the last Gear Generator row fix folded in, packaging artifacts are aligned for `1.5.3`, and the remaining work is publication plus final release verification rather than new feature churn.
 
 ### Product direction
 Practical DXF-first workshop editor.
@@ -37,21 +37,22 @@ Fast canvas editing, fabrication helpers, file/folder/project workflow, no drift
 
 ## Last completed step
 - Closed the toolbar-popover polish branch with user-approved width alignment, shorter `Joints > Advanced` labels, and removal of the no-longer-needed ruler follow-up from the active assignment.
-- Prepared release `1.5.2` end to end: aligned project version files, refreshed README / changelog / AppStream release notes, and finished Linux packaging output for `.deb`, `.rpm`, `.AppImage`, and `.AppImage.zsync`.
-- Confirmed the AppImage build now embeds `gh-releases-zsync` update metadata and generates the `.zsync` companion needed for release-side update tooling such as Gear Lever.
+- Folded in the final post-release UI hotfix for the stretched Gear Generator `Use angle` row so mixed control rows now keep switches at natural width instead of expanding awkwardly.
+- Prepared hotfix release `1.5.3`: aligned project version files, refreshed README / changelog / AppStream notes, and rebuilt Linux packaging output for `.deb`, `.rpm`, `.AppImage`, and `.AppImage.zsync`.
+- Confirmed the AppImage build still embeds `gh-releases-zsync` update metadata and generates the `.zsync` companion needed for release-side update tooling such as Gear Lever.
 
 ## Current focus
-- Publish `1.5.2` cleanly and verify the release assets rather than reopening more UI surfaces.
+- Publish `1.5.3` cleanly and verify the refreshed release assets rather than reopening more UI surfaces.
 - Keep AppImage/Gear-Lever updateability as the main post-release packaging watch item.
 - Only return to new product work after the release tag, release notes, and downloadable assets are confirmed good.
 
 ## Candidate next steps
-1. Push the `1.5.2` release commit/tag and publish the GitHub release with `.deb`, `.rpm`, `.AppImage`, and `.AppImage.zsync`.
+1. Push the `1.5.3` hotfix commit/tag and publish the GitHub release with `.deb`, `.rpm`, `.AppImage`, and `.AppImage.zsync`.
 2. Verify the published release assets and the real AppImage update path on a clean installed artifact.
 3. Only then pick the next bounded polish or packaging fix from fresh evidence.
 
 ## Preferred next step
-- Publish and verify release `1.5.2`; do not reopen broader UI polish unless a concrete post-release regression appears.
+- Publish and verify release `1.5.3`; do not reopen broader UI polish unless a concrete post-release regression appears.
 
 ---
 
@@ -2402,3 +2403,71 @@ Publishing `1.5.2` now was the right move because the user had accepted the curr
 - commit the `1.5.2` release state and push `main`
 - create and push tag `v1.5.2`
 - publish the GitHub release with all four Linux assets and the plain-language notes
+
+### Session 2026-04-22 / Release 1.5.3 hotfix packaging and publication
+**Goal:**
+Ship one clean hotfix release on top of `1.5.2` that fixes the stretched Gear Generator `Use angle` row and refreshes all Linux installers without reopening unrelated UI work.
+
+**Remaining-session estimate before this session:**
+- optimistic: `1`
+- realistic: `1`
+- conservative: `2`
+- the actual bug was already isolated, so the main remaining work was disciplined release hygiene rather than another broad polish pass.
+
+**Candidate steps considered:**
+- ship a focused `1.5.3` hotfix with rebuilt installers and release notes
+- overwrite the already-published `1.5.2` release assets in place
+- reopen more UI cleanup before cutting another release
+
+**Chosen step and why:**
+Publishing `1.5.3` as a dedicated hotfix is the safer product move because it preserves the released `1.5.2` history, gives users a clear upgrade target, and keeps the scope limited to the verified Gear Generator regression.
+
+**Files touched:**
+- `src/editor/editor.cpp`
+- `meson.build`
+- `version.py`
+- `README.md`
+- `CHANGELOG.md`
+- `io.github.eriark.dxfsketcher.metainfo.xml`
+- `RELEASE_NOTES_1.5.3.md`
+- `codex/DXF_SKETCHER_WORKLOG.md`
+
+**Changes made:**
+- fixed mixed settings-grid rows so switch controls keep natural width and stop stretching awkwardly in Gear Generator pair-preview rows such as `Use angle`
+- bumped the application version from `1.5.2` to `1.5.3`
+- refreshed README release references, changelog notes, AppStream release metadata, and plain-language GitHub release notes for the hotfix
+- rebuilt the Linux release artifacts for:
+  - `.deb`
+  - `.rpm`
+  - `.AppImage`
+  - `.AppImage.zsync`
+
+**Checks performed:**
+- verified `git diff --check -- src/editor/editor.cpp meson.build version.py README.md CHANGELOG.md RELEASE_NOTES_1.5.3.md io.github.eriark.dxfsketcher.metainfo.xml`
+- verified `meson setup build-sketcher -Dsketcher_only=true --reconfigure`
+- verified `meson compile -C build-sketcher`
+- verified `meson compile -C build-full dxfsketcher`
+- verified `bash scripts/build_deb.sh build-sketcher`
+- verified `bash scripts/build_rpm.sh build-sketcher`
+- verified `bash scripts/build_appimage.sh build-sketcher`
+- confirmed produced hotfix artifacts:
+  - `dist/deb/dxfsketcher_1.5.3_amd64.deb`
+  - `dist/rpm/dxfsketcher-1.5.3-1.x86_64.rpm`
+  - `dist/appimage/dxfsketcher-1.5.3-x86_64.AppImage`
+  - `dist/appimage/dxfsketcher-1.5.3-x86_64.AppImage.zsync`
+
+**What remains / risks:**
+- the remaining release work is publication and verification, not another code pass
+- the rpm build still emits the same local rpmdb warnings from this environment, but the target `1.5.3` package is produced successfully
+- AppImage packaging still falls back cleanly when the local `linuxdeploy` GTK plugin cannot use `/usr/lib/x86_64-linux-gnu/gtk-4.0`; the final AppImage and `.zsync` are still generated
+
+**Remaining-session estimate after this session:**
+- optimistic: `0`
+- realistic: `0`
+- conservative: `1`
+- if the git push, tag push, and GitHub release upload succeed cleanly, this hotfix track is complete.
+
+**Next recommended candidates:**
+- commit the `1.5.3` hotfix state and push `main`
+- create and push tag `v1.5.3`
+- publish the GitHub release with the refreshed Linux assets and plain-language notes

@@ -266,6 +266,11 @@ public:
     void add_widget_row(Gtk::Widget &label, Gtk::Widget &control, Gtk::Widget *trailing = nullptr)
     {
         auto *unit_slot = trailing ? trailing : static_cast<Gtk::Widget *>(make_sketch_unit_label(""));
+        label.set_valign(Gtk::Align::CENTER);
+        unit_slot->set_valign(Gtk::Align::CENTER);
+        control.set_valign(Gtk::Align::CENTER);
+        if (dynamic_cast<Gtk::Switch *>(&control))
+            control.set_halign(Gtk::Align::END);
         m_grid.attach(label, 0, m_row, 1, 1);
         m_grid.attach(*unit_slot, 1, m_row, 1, 1);
         m_grid.attach(control, 2, m_row, 1, 1);
