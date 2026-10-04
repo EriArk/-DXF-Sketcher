@@ -4,7 +4,7 @@
 
 A 2D drawing editor for laser-cut parts, templates, signs, control panels and everyday DXF cleanup. Draw and adjust precise geometry, generate useful parts, and export your work as DXF or SVG.
 
-**[Download for Windows or Linux](#download)** · [Try the sample drawings](#try-it-in-a-minute) · [What you can make](#from-a-sketch-to-a-set-of-parts) · [Get help](#help-and-feedback)
+**[Download for Windows or Linux](#download)** · [See the tools in action](#tools-in-action) · [Try the sample drawings](#try-it-in-a-minute) · [Get help](#help-and-feedback)
 
 ![DXF Sketcher in its dark theme with a complete control panel: a display opening, three controls, mounting holes and rounded slots.](screenshots/showcase-2026-10/control-panel-dark.png)
 
@@ -38,6 +38,53 @@ On Windows, run the MSI and follow the installer. On Linux, open the package wit
 
 Save drawings as **DXF**, or use **Save As** to export **SVG**. Sketcher focuses on 2D drawing and fabrication preparation; machine control and toolpath generation belong in your fabrication software.
 
+## Tools in action
+
+### Gears that mesh and move together
+
+Create an involute gear, switch on **Two gears**, and set the **Ratio** to preview a meshing pair. Move the vertical rotation slider to turn both gears together and inspect their engagement before importing the geometry into your drawing.
+
+![The Gear Generator turning a meshing pair of gears with a 2:1 ratio.](screenshots/showcase-2026-10/gear-pair-preview.gif)
+
+*A real interactive preview recorded in Sketcher, with Ratio set to 2.000. The animation loops; in the app, you control the rotation. [View a still image](screenshots/showcase-2026-10/gear-pair-preview.png).*
+
+Adjust the tooth count, module, pressure angle, backlash and center hole to suit your design. To try the pair shown here, right-click **Gears**, choose **Open Generator**, enable **Two gears**, and enter **2** for the ratio.
+
+### Boxes, including flexible walls
+
+Open **Boxes**, choose a template from the bundled catalog, and change its dimensions and material settings. The preview shows the flat parts that will be imported into your drawing.
+
+![FlexBox in the Boxes catalog: two rounded end panels and a long wall with flex cuts, alongside dimension and material settings.](screenshots/showcase-2026-10/boxes-flex-preview.png)
+
+*Choose **Boxes with flex → FlexBox** to explore a wall with repeated cuts for bending around the corners. This example uses the template's 100 mm dimensions, 15 mm radius and 3 mm material thickness.*
+
+<details>
+<summary>See a simpler box with finger joints</summary>
+
+![ABox with its five flat panels, finger joints and mounting slots visible in the preview.](screenshots/showcase-2026-10/boxes-finger-joints.png)
+
+Choose **Boxes → ABox** for a straightforward starting point. The catalog also includes trays, drawer inserts, shelves and other workshop projects.
+
+</details>
+
+### Joints and edge treatments on your own shapes
+
+Use **Edge Tools** when you already have an outline. Choose a joint family and operation, set the material thickness and burn allowance, then apply it to the selected edges. Finger joints are one example; the tool also offers grooves, hinges, lids, flex cuts and handles.
+
+![Two panels with finger joints and the Edge Tools settings for 3 mm material.](screenshots/Screenshot%20From%202026-03-20%2012-34-51.png)
+
+*Earlier Linux capture from March 2026, retained in its original form.*
+
+### From a picture to editable outlines
+
+Prepare artwork with **Import Raster**, then use **Trace Image** to compare the original image with its vector preview. Tune the threshold, smoothness and noise filtering before applying the result to your drawing.
+
+![Trace Image comparing a cat illustration with its vector outlines.](screenshots/Screenshot%20From%202026-03-20%2012-49-46.png)
+
+*Earlier Linux capture from March 2026, retained in its original form.*
+
+There is also a **Cup Template** helper for generating a flat template from cup dimensions. Combine generated parts with ordinary sketch geometry, text and imported artwork, then save as DXF or SVG.
+
 ## Try it in a minute
 
 1. Install and launch DXF Sketcher.
@@ -55,7 +102,7 @@ Choose **Light, Mix, Dark, Blue or Light-Blue**, adjust the accent and line thic
 
 For larger jobs, open a folder of DXF files. A **.dxsp** project copies the relevant files into a project folder and remembers the structure, active file, visibility and color markers, so you can return to the same job later.
 
-New screenshots above were captured from the installed Windows application on 4 October 2026. [Capture details](screenshots/showcase-2026-10/README.md). Earlier Linux screenshots remain in [the screenshot archive](screenshots).
+The October screenshots and gear animation were captured from the installed Windows application on 4 October 2026; the two earlier Linux examples are labelled above. [Capture details](screenshots/showcase-2026-10/README.md). More earlier screenshots remain in [the screenshot archive](screenshots).
 
 ## Sketcher or Viewer?
 
