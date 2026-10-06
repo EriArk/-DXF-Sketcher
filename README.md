@@ -104,6 +104,10 @@ For larger jobs, open a folder of DXF files. A **.dxsp** project copies the rele
 
 The October screenshots and gear animation were captured from the installed Windows application on 4 October 2026; the two earlier Linux examples are labelled above. [Capture details](screenshots/showcase-2026-10/README.md). More earlier screenshots remain in [the screenshot archive](screenshots).
 
+## DXF compatibility
+
+Import currently supports lines, circles, arcs, polyline vertices and a limited cubic-spline form. Layer information and unsupported entities can be lost on import, and Bezier export approximates curves with line segments. Keep the original drawing, inspect the result and use **Save As** for edits to existing DXFs. [Import fidelity work](https://github.com/EriArk/-DXF-Sketcher/issues/2) and [curve export accuracy](https://github.com/EriArk/-DXF-Sketcher/issues/5) are tracked publicly.
+
 ## Sketcher or Viewer?
 
 Use **Sketcher** to create or change drawings. If you mainly want to open DXF files, inspect details and check distances, try the smaller-purpose **[DXF Viewer / Viewer Plus](https://github.com/EriArk/-DXF-Viewer)**.
@@ -116,7 +120,7 @@ If Sketcher is useful in your workshop, you can support development on **[Patreo
 
 ## For developers
 
-[Build from source, create packages and configure AppImage updates](BUILDING.md).
+[Build from source and create packages](BUILDING.md) · [Contribute](CONTRIBUTING.md) · [Development guide](DEVELOPMENT.md) · [Report a security concern](SECURITY.md).
 
 ## Acknowledgements and license
 
